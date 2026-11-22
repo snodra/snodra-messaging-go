@@ -415,6 +415,9 @@ func (w *certWatch) check() {
 		if w.stopping() {
 			return
 		}
+		if c.memberRole() != roleActive {
+			continue // a parked duplicate or a drained address: only kept hubs are rolled, as in the reference library
+		}
 		if c.presentsOther(disk.digest) && !c.rollOver(disk.fingerprint) {
 			w.refused = disk.digest
 			w.app.log.Error("the hub did not register again with the renewed client certificate in time; the other hubs keep the certificate they have until the files change again",

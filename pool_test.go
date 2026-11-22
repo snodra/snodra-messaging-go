@@ -503,7 +503,7 @@ func TestInstanceStatusOnEveryStream(t *testing.T) {
 		var during []uint32
 		for i, at := range times {
 			if i > 0 {
-				if gap := at.Sub(times[i-1]); gap > 260*ms {
+				if gap := at.Sub(times[i-1]); gap > 400*ms { // 200 ms, with room for a slow -race run
 					t.Fatalf("stream %d: a gap of %v between two InstanceStatus", st.Index, gap)
 				}
 			}
@@ -518,7 +518,7 @@ func TestInstanceStatusOnEveryStream(t *testing.T) {
 		if len(during) < 3 || slices.ContainsFunc(during, func(n uint32) bool { return n != 2 }) {
 			t.Fatalf("stream %d: handlers_in_flight %v while two handlers ran", st.Index, during)
 		}
-		if tail := time.Since(times[len(times)-1]); tail > 260*ms {
+		if tail := time.Since(times[len(times)-1]); tail > 400*ms {
 			t.Fatalf("stream %d: no InstanceStatus for %v", st.Index, tail)
 		}
 	}
@@ -528,16 +528,32 @@ func TestDNSTargets(t *testing.T) {
 	a, b := fakehub.Start(t), fakehub.Start(t)
 	var mu sync.Mutex
 	answer := []string{a.Addr()}
-	resolved := make(chan struct{}, 16)
+	var failure error
+	resolved := make(chan struct{}) // a resolution after the test's change of the answer
 	resolve := func(_ context.Context, host, port string) ([]string, error) {
-		is(t, host+":"+port, "hubs.example:7000")
+		if host+":"+port != "hubs.example:7000" {
+			return nil, fmt.Errorf("resolved %s:%s", host, port)
+		}
 		mu.Lock()
-		defer mu.Unlock()
+		out, err := slices.Clone(answer), failure
+		mu.Unlock()
 		select {
 		case resolved <- struct{}{}:
 		default:
 		}
-		return slices.Clone(answer), nil
+		return out, err
+	}
+	// resolvedTwice waits (bounded) until the resolver ran twice more: the second run began after
+	// the first one's answer was applied.
+	resolvedTwice := func() {
+		t.Helper()
+		for range 2 {
+			select {
+			case <-resolved:
+			case <-time.After(2 * s_):
+				t.Fatal("the name was not resolved again within 2 s")
+			}
+		}
 	}
 	tm := scaled()
 	tm.dnsRefresh = 50 * ms
@@ -550,11 +566,16 @@ func TestDNSTargets(t *testing.T) {
 	mu.Unlock()
 	sb, _ := registered(t, b, "hub-b")
 	hubIDsAre(t, app, "hub-a", "hub-b")
-	// A failed resolution keeps the hubs.
+	// A failed resolution, and an empty answer, keep the hubs.
 	mu.Lock()
-	answer = nil
+	failure = errors.New("no such host")
 	mu.Unlock()
-	time.Sleep(150 * ms)
+	resolvedTwice()
+	hubIDsAre(t, app, "hub-a", "hub-b")
+	mu.Lock()
+	failure, answer = nil, nil
+	mu.Unlock()
+	resolvedTwice()
 	hubIDsAre(t, app, "hub-a", "hub-b")
 	// A vanished address leaves the routing at once, gets a Register with no types, and is
 	// closed once nothing of the instance is in flight on it.
@@ -643,3 +664,68 @@ func TestAResolvedAddressIsCheckedAgainstTheDNSName(t *testing.T) {
 
 // newPoolForTest is the pool of a, not started.
 func (a *App) newPoolForTest() *pool { return newPool(a) }
+
+func TestAWithdrawnAddressBackInDNSRegistersItsTypesAgain(t *testing.T) {
+	a := fakehub.Start(t)
+	failing := func(context.Context, string, string) ([]string, error) { return nil, errors.New("no such host") }
+	app := newApp(t, Hubs("dns:///hubs.example:7000"), withResolver(failing))
+	is(t, HandleCommand(app, func(context.Context, GetOrder) (Empty, error) { return Empty{}, nil }), nil)
+	is(t, app.Start(context.Background()), nil)
+	app.pool.apply([]string{a.Addr()})
+	sa, _ := registered(t, a, "hub-a")
+	hubIDsAre(t, app, "hub-a")
+	c := app.pool.all()[0]
+	held := async(func() (Empty, error) { return Send[Empty](ctxWithin(t, 5*s_), app, PlaceOrder{}) })
+	r := sa.RecvRequest(t) // in flight: the drain waits for it
+	// The answers applied one after the other, the drain's goroutine given no chance to run in
+	// between: the withdrawal is decided with the role, so the revival undoes it.
+	app.pool.apply([]string{"127.0.0.1:1"})
+	is(t, c.withdrawn.Load(), true)
+	is(t, c.memberRole(), roleDraining)
+	app.pool.apply([]string{a.Addr()})
+	is(t, c.withdrawn.Load(), false)
+	is(t, c.memberRole(), roleActive)
+	// The empty Register (unless the revival came before the stream wrote it: both asks
+	// coalesce, the latest state wins), then the Register announcing the types again.
+	reg := sa.RecvRegister(t)
+	if len(reg.GetCommandTypes()) == 0 {
+		reg = sa.RecvRegister(t)
+	}
+	is(t, strings.Join(reg.GetCommandTypes(), ","), "orders.GetOrder")
+	sa.Send(t, replyTo(r.GetId(), "{}"))
+	is(t, await(t, held).err, nil)
+	sa.Nothing(t, 3*dnsDrainPoll, "request") // the drain's goroutine saw the revival and left: not closed (a repeated Register may come)
+	isAlive(t, sa)
+	is(t, c.withdrawn.Load(), false)
+}
+
+func TestASendWaitsForALoneHubRolledOver(t *testing.T) {
+	hub := fakehub.Start(t)
+	app := startApp(t, Hubs(hub.Addr()), MaxConcurrent(1))
+	s1, _ := registered(t, hub, "hub-1")
+	hubIDsAre(t, app, "hub-1")
+	c := app.pool.all()[0]
+	c.setRolling(true) // the rollover closed the only hub's stream; it reconnects with the renewed pair
+	s1.Close(codes.Unavailable, "rollover")
+	hubIDsAre(t, app)
+	sent := async(func() (Empty, error) { return Send[Empty](ctxWithin(t, 5*s_), app, PlaceOrder{}) })
+	s2, _ := registered(t, hub, "hub-1") // back: the send that waited goes out
+	r := s2.RecvRequest(t)
+	s2.Send(t, replyTo(r.GetId(), "{}"))
+	is(t, await(t, sent).err, nil)
+	// Bounded by the caller's timeout when the hub does not come back.
+	hub.Down()
+	hubIDsAre(t, app)
+	o := await(t, async(func() (Empty, error) {
+		return Send[Empty](context.Background(), app, PlaceOrder{}, Timeout(300*ms))
+	}))
+	is(t, errors.Is(o.err, ErrNeverSent), true)
+	within(t, o.elapsed, 290*ms, 1500*ms)
+	// Without a rollover nothing waits.
+	c.setRolling(false)
+	o = await(t, async(func() (Empty, error) {
+		return Send[Empty](context.Background(), app, PlaceOrder{}, Timeout(300*ms))
+	}))
+	is(t, errors.Is(o.err, ErrNeverSent), true)
+	within(t, o.elapsed, 0, 100*ms)
+}

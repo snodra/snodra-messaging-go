@@ -147,7 +147,10 @@ reference library departs from it. In each case this library follows the referen
   queued goes to the next hub without counting as a move. Unary requests, scatter-gathers, streams and subscriptions
   move alike.
 - **This library:** does the same (`send.go`, `stream_client.go`), failing with `ErrNeverSent`.
-- **Question:** should the specification bound the moves, and with which number?
+- **Also:** on a move the reference library and this one send the call's chosen timeout again as `Request.timeout_ms`
+  (each hop is guarded by the full bound), while the Kotlin library sends what is left of the call's deadline.
+- **Question:** should the specification bound the moves, and with which number; and should a moved request send its
+  remaining time or its timeout unchanged?
 
 ### SG-11: which refusal a library keeps
 
@@ -337,3 +340,16 @@ reference library departs from it. In each case this library follows the referen
   left the DNS answer and is being drained), the parked address is connected again at once, unless its own address
   left the DNS answer.
 - **Question:** should the reference library park and retry a duplicate as the specification says?
+
+### SG-23: the permit split during a client certificate rollover with several hubs
+
+- **Specification:** [protocol.md, Several hubs](https://snodra.damoreira.com/library-authors/protocol/) counts in N
+  the hubs that are live or on their first connect attempt, and says "a hub that joins or returns gets
+  `ceil(max / N)` on its new stream".
+- **Reference library:** takes a hub being rolled over to a renewed client certificate out of N while another hub
+  serves; the rolled hub's new `Register` therefore offers `ceil(max / (N - 1))` (5 of 5 with two hubs and a
+  capacity of 5) and the other hubs are topped up meanwhile.
+- **This library:** keeps counting the rolled hub, as the Kotlin library does: its new `Register` offers
+  `ceil(max / N)` (3 of 5); the other hubs are topped up once its old stream has ended, as in both libraries.
+- **Question:** is a rolled hub a hub that "returns" (`ceil(max / N)`), or does it get the share of the hubs that
+  stayed?

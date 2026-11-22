@@ -216,6 +216,16 @@ func (p *pool) order(key string, turn bool) []*hubConn {
 	return out
 }
 
+// rolling is true while a client certificate rollover has a kept connection out of the routing.
+func (p *pool) rolling() bool {
+	for _, c := range p.all() {
+		if c.memberRole() == roleActive && c.isRolling() {
+			return true
+		}
+	}
+	return false
+}
+
 // pick is the hub a request with key goes to first (taking a round-robin turn); with none, an
 // error wrapping ErrNeverSent.
 func (p *pool) pick(key string) (*hubConn, error) {
@@ -239,6 +249,7 @@ func (p *pool) ackFor(key string) *hubpb.RegisterAck {
 
 // hubCount is N of the permit split: the kept connections whose stream is acknowledged or that
 // are still on their first connect attempt, and including (when not nil).
+// TODO(spec-gap): SG-23 (a hub being rolled over to a renewed client certificate stays counted).
 func (p *pool) hubCount(including *hubConn) int {
 	p.mu.Lock()
 	conns := slices.Clone(p.conns)

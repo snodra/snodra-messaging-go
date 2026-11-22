@@ -503,6 +503,43 @@ func (a *App) write(ctx context.Context, tmpl *hubpb.Request, chosen time.Durati
 	if p == nil {
 		return nil, 0, nil, fmt.Errorf("%w: the app is not started (sending %s)", ErrNeverSent, typ)
 	}
+	var until time.Time // the end of a wait for a hub out of the routing for a rollover
+	for {
+		ref, guard, conn, err := a.writeOnce(ctx, p, tmpl, chosen, c, skip)
+		if err == nil || ctx.Err() != nil || len(skip) > 0 || !p.rolling() {
+			return ref, guard, conn, err
+		}
+		// No hub took it only because a client certificate rollover has the hub(s) out of the
+		// routing (a single hub, reconnecting with the renewed pair): wait for one, within the
+		// caller's timeout and at most rollReconnectLimit (when the rollover gives up anyway), as
+		// the reference library does.
+		if until.IsZero() {
+			limit := a.cfg.timings.rollReconnectLimit
+			if chosen > 0 {
+				limit = min(limit, chosen)
+			}
+			until = time.Now().Add(limit)
+		}
+		left := time.Until(until)
+		if left <= 0 {
+			return ref, guard, conn, err
+		}
+		timer := time.NewTimer(min(left, rollPoll))
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, 0, nil, fmt.Errorf("%w: %w", ErrNeverSent, ctx.Err())
+		case <-a.stopped:
+			timer.Stop()
+			return ref, guard, conn, err
+		}
+	}
+}
+
+// writeOnce is one try of write over the hubs routable now.
+func (a *App) writeOnce(ctx context.Context, p *pool, tmpl *hubpb.Request, chosen time.Duration, c *call, skip []*hubConn) (*streamRef, time.Duration, *hubConn, error) {
+	typ := tmpl.GetType()
 	ranked := p.ranked(tmpl.GetRoutingKey())
 	if len(ranked) == 0 {
 		return nil, 0, nil, fmt.Errorf("%w: no hub has acknowledged the registration (sending %s)", ErrNeverSent, typ)
