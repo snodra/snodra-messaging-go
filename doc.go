@@ -1,6 +1,7 @@
 // Package snodra is the official Go client library of the Snodra messaging suite.
 //
-// The module path ends in snodra-messaging-go, so the import names the package explicitly:
+// The package is named snodra while its import path ends in snodra-messaging-go; by convention
+// the import spells the name out (goimports writes it so), though Go binds snodra either way:
 //
 //	import snodra "github.com/snodra/snodra-messaging-go"
 //

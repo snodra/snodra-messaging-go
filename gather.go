@@ -11,8 +11,8 @@ import (
 // Part is one target's answer to a [Gather]: the service and instance that answered, and the
 // answer decoded as R, or the target's failure. Err is an [*Error] with the target's code and
 // message (its handler's error, or a failure the hub saw for that target, such as
-// HANDLER_DISCONNECTED or RESOURCE_EXHAUSTED); a payload that does not decode as R is another
-// error.
+// HANDLER_DISCONNECTED or RESOURCE_EXHAUSTED). A payload that does not decode as R is a plain
+// error, not an [*Error]: the target answered, the caller could not read it.
 type Part[R any] struct {
 	Service, Instance string
 	Value             R
@@ -23,7 +23,10 @@ type Part[R any] struct {
 type Gathered[R any] struct {
 	// Parts holds one entry per answer, in arrival order, failed ones included.
 	Parts []Part[R]
-	// Targets is how many targets the gather had: the parts the hub sent plus TimedOut.
+	// Targets is the parts the hub sent plus TimedOut: how many targets the gather had when it
+	// ended at its deadline or with every target answered. When [MaxResults] ended it, the hub
+	// cancels the targets still working and counts them nowhere (TimedOut is 0): 5 targets and
+	// MaxResults(2) give Targets 2.
 	Targets int
 	// Failed counts the Parts whose Err is set.
 	Failed int

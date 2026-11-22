@@ -85,22 +85,86 @@ func TestGatherCollectsThePartsUntilTheEnd(t *testing.T) {
 	is(t, waiting(app), 0)
 }
 
+func TestGatherSendsMaxResults(t *testing.T) {
+	app, _, s := sending(t, fakehub.Ack("hub-1"))
+	gathered := async(func() (*Gathered[Stock], error) {
+		return Gather[Stock](context.Background(), app, GetStock{}, MaxResults(2))
+	})
+	r := s.RecvRequest(t)
+	is(t, r.GetMaxResults(), uint32(2))
+	// The hub ends the gather after the second success and cancels the rest: they are in
+	// neither count, so Targets is the parts sent (5 targets here, Targets 2).
+	s.Send(t, partOf(r.GetId(), 0, "B", "b1", `{"count":1}`, nil))
+	s.Send(t, partOf(r.GetId(), 1, "B", "b2", `{"count":2}`, nil))
+	s.Send(t, endOf(r.GetId(), 2, 0, 0))
+	o := await(t, gathered)
+	is(t, o.err, nil)
+	is(t, len(o.value.Parts), 2)
+	is(t, o.value.TimedOut, 0)
+	is(t, o.value.Targets, 2)
+}
+
 func TestGatherCountsTheTimedOutTargets(t *testing.T) {
 	app, _, s := sending(t, fakehub.Ack("hub-1"))
 	gathered := async(func() (*Gathered[Stock], error) {
-		return Gather[Stock](context.Background(), app, GetStock{}, MaxResults(1), Timeout(1500*ms))
+		return Gather[Stock](context.Background(), app, GetStock{}, Timeout(1500*ms))
 	})
 	r := s.RecvRequest(t)
-	is(t, r.GetMaxResults(), uint32(1))
+	is(t, r.GetMaxResults(), uint32(0))
 	is(t, r.GetTimeoutMs(), uint32(1500)) // the deadline of the whole gather
 	s.Send(t, partOf(r.GetId(), 0, "B", "b1", `{"count":1}`, nil))
-	s.Send(t, endOf(r.GetId(), 1, 0, 2))
+	s.Send(t, endOf(r.GetId(), 1, 0, 2)) // the deadline passed with two targets silent
 	o := await(t, gathered)
 	is(t, o.err, nil)
 	is(t, len(o.value.Parts), 1)
 	is(t, o.value.Failed, 0)
 	is(t, o.value.TimedOut, 2)
 	is(t, o.value.Targets, 3)
+}
+
+func TestFramesAfterTheGatherEndedAreIgnored(t *testing.T) {
+	app, _, s := sending(t, &hubpb.RegisterAck{HubId: "hub-1", HeartbeatIntervalMs: 3000, HeartbeatTimeoutMs: 10000,
+		DefaultTimeoutMs: 200, MaxTimeoutMs: 200})
+	// After the end: a part and a second end of the same gather change nothing.
+	gathered := async(func() (*Gathered[Stock], error) { return Gather[Stock](context.Background(), app, GetStock{}) })
+	r := s.RecvRequest(t)
+	s.Send(t, partOf(r.GetId(), 0, "B", "b1", `{"count":1}`, nil))
+	s.Send(t, endOf(r.GetId(), 1, 0, 0))
+	o := await(t, gathered)
+	is(t, o.err, nil)
+	is(t, len(o.value.Parts), 1)
+	s.Send(t, partOf(r.GetId(), 1, "B", "b2", `{"count":2}`, nil))
+	s.Send(t, endOf(r.GetId(), 2, 0, 0))
+	is(t, len(o.value.Parts), 1)
+
+	// After the local guard fired (the hub's bound, 200 ms, plus 1 s).
+	gathered = async(func() (*Gathered[Stock], error) { return Gather[Stock](context.Background(), app, GetStock{}) })
+	guarded := s.RecvRequest(t)
+	o = await(t, gathered)
+	var e *Error
+	is(t, errors.As(o.err, &e), true)
+	is(t, e.Code, CodeTimeout)
+	s.Send(t, partOf(guarded.GetId(), 0, "B", "b1", `{"count":1}`, nil))
+	s.Send(t, endOf(guarded.GetId(), 1, 0, 0))
+
+	// After the caller cancelled.
+	ctx, cancel := context.WithCancel(context.Background())
+	gathered = async(func() (*Gathered[Stock], error) { return Gather[Stock](ctx, app, GetStock{}) })
+	cancelled := s.RecvRequest(t)
+	cancel()
+	o = await(t, gathered)
+	is(t, errors.Is(o.err, context.Canceled), true)
+	s.Send(t, partOf(cancelled.GetId(), 0, "B", "b1", `{"count":1}`, nil))
+	s.Send(t, endOf(cancelled.GetId(), 1, 0, 0))
+
+	// None of them reached a later gather, and nothing is left waiting.
+	gathered = async(func() (*Gathered[Stock], error) { return Gather[Stock](context.Background(), app, GetStock{}) })
+	later := s.RecvRequest(t)
+	s.Send(t, endOf(later.GetId(), 0, 0, 0))
+	o = await(t, gathered)
+	is(t, o.err, nil)
+	is(t, len(o.value.Parts), 0)
+	is(t, waiting(app), 0)
 }
 
 func TestAPartThatDoesNotDecodeIsAFailedPart(t *testing.T) {
