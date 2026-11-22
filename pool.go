@@ -21,7 +21,7 @@ type memberRole int
 
 const (
 	roleActive    memberRole = iota // routed to, counted in the permit split
-	roleDuplicate                   // its hub is reached by another connection: closed for good
+	roleDuplicate                   // its hub is reached by another connection: closed and parked
 	roleDraining                    // its address left the DNS answer: out of the routing, closed once idle
 	roleGone                        // drained and being closed; removed once its goroutine ended
 )
@@ -32,8 +32,9 @@ const (
 //
 //   - Dedupe. A hub is its RegisterAck.hub_id (for an empty one, its target as host:port). The
 //     connection that acknowledged an id first owns it while it is kept, live or reconnecting; a
-//     later one answering the same id is closed for good (SG-22). On one hub its Register has
-//     replaced the owner's session already, so the owner reconnects, once.
+//     later one answering the same id is closed and parked (on one hub its Register has replaced
+//     the owner's session already, so the owner reconnects, once). A parked address is connected
+//     again once the owner is gone: it answers another hub id, or it left the DNS answer (SG-22).
 //   - Routing. An unkeyed request goes round-robin over the hubs whose stream is acknowledged, a
 //     keyed one to the live hub with the highest rendezvous score for (hub id, key). A hub that is
 //     leaving (shutting down, rolled over to a renewed client certificate) is used only when no
@@ -51,10 +52,11 @@ type pool struct {
 	app *App
 	dns *target // the dns:/// target; nil for a list of hubs
 
-	mu     sync.Mutex
-	conns  []*hubConn          // in target (or resolution) order, closed duplicates and drained ones included
-	owners map[string]*hubConn // hub id → the connection that acknowledged it first
-	closed bool                // the shutdown began: no connection is added
+	mu       sync.Mutex
+	conns    []*hubConn          // in target (or resolution) order, parked duplicates and drained ones included
+	owners   map[string]*hubConn // hub id → the connection that acknowledged it first
+	resolved []string            // the latest DNS answer applied (a dns:/// target only)
+	closed   bool                // the shutdown began: no connection is added
 
 	turn atomic.Uint64 // the round-robin position
 }
@@ -70,16 +72,17 @@ func newPool(a *App) *pool {
 			p.dns = &t
 			continue
 		}
-		p.conns = append(p.conns, p.newConn(t.address, ""))
+		p.conns = append(p.conns, p.newConn(t.address, "", t.https))
 	}
 	return p
 }
 
 // newConn is a connection of the pool to address; serverName is the name a TLS hub certificate
-// is checked against when the configuration names none (a resolved address's DNS name).
-func (p *pool) newConn(address, serverName string) *hubConn {
+// is checked against when the configuration names none (a resolved address's DNS name); https
+// reaches it over TLS even without a TLS configuration (an https:// target).
+func (p *pool) newConn(address, serverName string, https bool) *hubConn {
 	c := newHubConn(p.app, address)
-	c.pool, c.serverName = p, serverName
+	c.pool, c.serverName, c.https = p, serverName, https
 	return c
 }
 
@@ -277,32 +280,77 @@ func (p *pool) changed() {
 func (p *pool) accept(c *hubConn, ack *hubpb.RegisterAck) bool {
 	id := hubIDOf(ack.GetHubId(), c.address)
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	// c may reach another hub than before (a restarted hub has a new id).
+	// c may reach another hub than before (a restarted hub has a new id): it gives up the id it
+	// owned, and an address parked behind that id is connected again.
 	for k, owner := range p.owners {
 		if owner == c {
 			delete(p.owners, k)
 		}
 	}
 	if owner, ok := p.owners[id]; ok && owner.role == roleActive {
-		c.role = roleDuplicate
-		c.log.Warn("two hub addresses reach the same hub; closing the second", "hub_id", id, "kept", owner.address)
+		c.role, c.parkedID = roleDuplicate, id
+		p.mu.Unlock()
+		c.log.Warn("two hub addresses reach the same hub; closing and parking the second", "hub_id", id, "kept", owner.address)
 		return false
 	}
 	p.owners[id] = c
+	revived := p.reviveLocked()
+	p.mu.Unlock()
+	p.startRevived(revived)
 	return true
+}
+
+// reviveLocked replaces every parked duplicate whose owner is gone (no kept connection owns its
+// hub id any more) with a new connection to its address, unless its address left the DNS answer,
+// and returns the new connections, to start. Caller holds p.mu.
+// TODO(spec-gap): SG-22 (a parked address is retried once its owner is gone).
+func (p *pool) reviveLocked() []*hubConn {
+	if p.closed {
+		return nil
+	}
+	for k, owner := range p.owners {
+		if owner.role != roleActive {
+			delete(p.owners, k) // a draining or gone owner keeps nothing
+		}
+	}
+	var out []*hubConn
+	for i, c := range p.conns {
+		if c.role != roleDuplicate {
+			continue
+		}
+		if _, owned := p.owners[c.parkedID]; owned {
+			continue
+		}
+		if p.dns != nil && !slices.Contains(p.resolved, c.address) {
+			continue
+		}
+		n := p.newConn(c.address, c.serverName, c.https)
+		p.conns[i] = n
+		out = append(out, n)
+	}
+	return out
+}
+
+// startRevived runs the goroutines of revived parked addresses.
+func (p *pool) startRevived(revived []*hubConn) {
+	for _, c := range revived {
+		c.log.Info("the hub this address was parked behind has no other address any more; connecting again")
+		go c.run()
+	}
 }
 
 // remove takes a closed connection out of the pool.
 func (p *pool) remove(c *hubConn) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	p.conns = slices.DeleteFunc(p.conns, func(x *hubConn) bool { return x == c })
 	for k, owner := range p.owners {
 		if owner == c {
 			delete(p.owners, k)
 		}
 	}
+	revived := p.reviveLocked()
+	p.mu.Unlock()
+	p.startRevived(revived)
 }
 
 // reportStatusEvery sends an InstanceStatus to every live hub every interval, until the hard
@@ -322,14 +370,17 @@ func (p *pool) reportStatusEvery(interval time.Duration) {
 
 // reportStatus sends one InstanceStatus to every live hub: the ids of the live hubs, the
 // handlers in flight over all hubs, and no processor. A hub being rolled over to a renewed
-// client certificate is out of both, as in the reference library.
+// client certificate is out of both while another live hub is not, as in the reference library
+// (which takes a hub out of the routing for a rollover only then).
 // See https://snodra.damoreira.com/library-authors/protocol/ (Instance status).
 func (p *pool) reportStatus() {
 	var hubs []liveHub
 	var ids []string
-	for _, h := range p.live() {
-		if h.conn.isRolling() {
-			continue
+	live := p.live()
+	steady := slices.ContainsFunc(live, func(h liveHub) bool { return !h.conn.isRolling() })
+	for _, h := range live {
+		if steady && h.conn.isRolling() {
+			continue // another hub serves meanwhile; a lone hub keeps its reports
 		}
 		hubs = append(hubs, h)
 		if !slices.Contains(ids, h.id) {
@@ -428,6 +479,7 @@ func (p *pool) apply(resolved []string) {
 		p.mu.Unlock()
 		return
 	}
+	p.resolved = slices.Clone(resolved)
 	current := map[string]*hubConn{}
 	for _, c := range p.conns {
 		if c.role != roleGone {
@@ -437,32 +489,41 @@ func (p *pool) apply(resolved []string) {
 	for _, address := range resolved {
 		switch c, ok := current[address]; {
 		case !ok:
-			c = p.newConn(address, host)
+			c = p.newConn(address, host, false)
 			p.conns = append(p.conns, c)
 			added = append(added, c)
 		case c.role == roleDraining:
 			c.role = roleActive
+			c.withdrawn.Store(false)
 			revived = append(revived, c)
 		}
 	}
 	for address, c := range current {
 		if !slices.Contains(resolved, address) && c.role != roleDraining {
 			gone = append(gone, drained{conn: c, was: c.role})
+			if c.role != roleDuplicate {
+				// Decided here, with the role: a revival in a later answer undoes both.
+				c.withdrawn.Store(true)
+			}
 			c.role = roleDraining
 		}
 	}
+	parked := p.reviveLocked()
 	p.mu.Unlock()
+	p.startRevived(parked)
 	for _, c := range added {
 		c.log.Info("new hub address in DNS; connecting")
 		go c.run()
 	}
 	for _, c := range revived {
 		c.log.Info("the hub address is back in DNS; kept")
-		c.withdrawn.Store(false)
 		c.reregister()
 	}
 	for _, d := range gone {
 		d.conn.log.Info("the hub address left DNS; closing it once idle")
+		if d.was != roleDuplicate {
+			d.conn.reregister() // the Register with no types
+		}
 		go p.drain(d.conn, d.was)
 	}
 	p.changed()
@@ -474,8 +535,6 @@ func (p *pool) apply(resolved []string) {
 // of its requests runs, at most dnsDrainLimit later. A duplicate has nothing to wait for.
 func (p *pool) drain(c *hubConn, was memberRole) {
 	if was != roleDuplicate {
-		c.withdrawn.Store(true)
-		c.reregister()
 		deadline := time.Now().Add(dnsDrainLimit)
 		ticker := time.NewTicker(dnsDrainPoll)
 		defer ticker.Stop()

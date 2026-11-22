@@ -54,7 +54,7 @@ func TestParseTargetsTakesAListInOrderWithoutRepeats(t *testing.T) {
 	is(t, len(got), 3)
 	is(t, got[0], target{address: "hub-1:7000"})
 	is(t, got[1], target{address: "hub-2:7000"})
-	is(t, got[2], target{address: "hub-3:7100"})
+	is(t, got[2], target{address: "hub-3:7100", https: true})
 }
 
 func TestParseTargetsTakesOneDNSName(t *testing.T) {

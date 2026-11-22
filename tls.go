@@ -88,10 +88,17 @@ func systemRootsWith(path string) (*x509.CertPool, error) {
 	return pool, nil
 }
 
-// transport is the transport credentials of one connection attempt: plain text without TLS;
-// else TLS with the CA file read now, presenting id when there is one.
+// transport is the transport credentials of one connection attempt: plain text without TLS (and
+// for an address other than https://); else TLS with the CA file read now (the system's roots
+// without one), presenting id when there is one.
 func (c *hubConn) transport(id *clientIdentity) (credentials.TransportCredentials, error) {
 	t := c.app.cfg.tls
+	if t == nil && c.https {
+		// An https:// address without a TLS configuration: TLS with the system's roots, as in
+		// the reference library.
+		// TODO(spec-gap): SG-14 (the https:// prefix of an address turns TLS on).
+		t = &TLSConfig{}
+	}
 	if t == nil {
 		return insecure.NewCredentials(), nil
 	}

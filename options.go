@@ -92,10 +92,12 @@ func Instance(id string) Option {
 }
 
 // Hubs are the hubs to connect to: each "host:port" (a "static://", "http://" or "https://"
-// prefix is accepted), or one "dns:///name:port" whose every address is a hub, resolved again
-// every 30 s (an address that leaves the answer is drained and closed, a new one connected).
-// The instance opens one stream to every hub, each with the identical registration, and knows a
-// hub by its RegisterAck.hub_id: a second address answering an id already served is closed. See
+// prefix is accepted; an "https://" hub is reached over TLS with the system's roots even
+// without [TLS]), or one "dns:///name:port" whose every address is a hub, resolved again every
+// 30 s (an address that leaves the answer is drained and closed, a new one connected). The
+// instance opens one stream to every hub, each with the identical registration, and knows a hub
+// by its RegisterAck.hub_id: a second address answering an id already served is closed and
+// parked until that hub has no other address. See
 // https://snodra.damoreira.com/library-authors/protocol/ (Several hubs). Required (or
 // SNODRA_SERVER_ADDRESS with [FromEnv]).
 func Hubs(addresses ...string) Option {

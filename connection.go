@@ -56,10 +56,12 @@ type hubConn struct {
 	// names none: the DNS name of a resolved address; "" for a configured host:port.
 	serverName string
 
+	https      bool          // an https:// target: TLS even without a TLS configuration
 	role       memberRole    // the connection's role in its pool; guarded by pool.mu
+	parkedID   string        // the hub id a duplicate is parked behind; guarded by pool.mu
 	failedOnce atomic.Bool   // a stream ended: the first connect attempt is over
 	withdrawn  atomic.Bool   // the address left the DNS answer: every Register carries no types
-	parked     bool          // closed for good as a second address of a hub (the goroutine's own)
+	parked     bool          // closed and parked as a second address of a hub (the goroutine's own)
 	reregReq   chan struct{} // write the Register again to the acknowledged stream (buffered)
 
 	stopping  chan struct{} // closed when shutdown begins: no reconnect, the empty Register
@@ -545,8 +547,9 @@ func (c *hubConn) serve(sr *streamRun) (reached bool, err error) {
 					break
 				}
 				if !reached && c.pool != nil && !c.pool.accept(c, k.RegisterAck) {
-					// Another address of this hub was acknowledged first: closed for good.
-					// TODO(spec-gap): SG-22 (a duplicate is closed for good, not retried).
+					// Another address of this hub was acknowledged first: closed and parked; the
+					// pool connects the address again once that owner is gone.
+					// TODO(spec-gap): SG-22 (parked and retried, as the specification says).
 					c.parked = true
 					return false, nil
 				}

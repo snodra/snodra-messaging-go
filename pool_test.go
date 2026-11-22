@@ -136,11 +136,11 @@ func TestPickSkipsADrainingConnection(t *testing.T) {
 
 func TestOneStreamPerHubID(t *testing.T) {
 	a, b, c := fakehub.Start(t), fakehub.Start(t), fakehub.Start(t)
-	app := startApp(t, Hubs(a.Addr(), b.Addr(), c.Addr()))
+	app := startApp(t, Hubs(a.Addr(), b.Addr(), c.Addr()), StatusInterval(50*ms))
 	sa, ra := registered(t, a, "hub-x")
-	_, rb := registered(t, b, "hub-y")
+	sb, rb := registered(t, b, "hub-y")
 	hubIDsAre(t, app, "hub-x", "hub-y")
-	sc, rc := registered(t, c, "hub-x") // another target of hub-x: closed, never made the owner
+	sc, rc := registered(t, c, "hub-x") // another target of hub-x: closed and parked, never the owner
 	sc.Ended(t, 2*s_)
 	// On one real hub the alias's Register replaced the owner's session: the hub ends the
 	// owner's stream, and the owner reconnects, once.
@@ -149,8 +149,10 @@ func TestOneStreamPerHubID(t *testing.T) {
 	hubIDsAre(t, app, "hub-x", "hub-y")
 	isAlive(t, sa2)
 	a.NoStreamWithin(t, 500*ms)
-	c.NoStreamWithin(t, 500*ms) // the duplicate is closed for good (SG-22)
+	c.NoStreamWithin(t, 500*ms) // parked while its owner is kept (SG-22)
 	is(t, strings.Join(app.HubIDs(), ","), "hub-x,hub-y")
+	statuses := sb.Statuses()
+	is(t, strings.Join(sortedIDs(statuses[len(statuses)-1]), ","), "hub-x,hub-y")
 	// The Registers are identical apart from initial_permits (each stream's share).
 	for _, r := range []*hubpb.Register{ra, rb, rc} {
 		is(t, r.GetInitialPermits(), uint32(86)) // ceil(256/3): three hubs on their first attempt
@@ -158,6 +160,114 @@ func TestOneStreamPerHubID(t *testing.T) {
 	}
 	is(t, proto.Equal(ra, rb), true)
 	is(t, proto.Equal(ra, rc), true)
+}
+
+// sortedIDs are the hub ids an InstanceStatus names, sorted.
+func sortedIDs(st *hubpb.InstanceStatus) []string {
+	ids := slices.Clone(st.GetConnectedHubIds())
+	slices.Sort(ids)
+	return ids
+}
+
+func TestAParkedAddressComesBackWhenItsOwnerAnswersAnotherID(t *testing.T) { // SG-22
+	a, c := fakehub.Start(t), fakehub.Start(t)
+	app := startApp(t, Hubs(a.Addr(), c.Addr()))
+	sa, _ := registered(t, a, "hub-x")
+	hubIDsAre(t, app, "hub-x")
+	sc, _ := registered(t, c, "hub-x")
+	sc.Ended(t, 2*s_)
+	c.NoStreamWithin(t, 300*ms)
+	// The owner's address now reaches another hub (say a load balancer after a rolling restart):
+	// hub-x has no address any more, and the parked one is connected again.
+	sa.Close(codes.Unavailable, "restart")
+	registered(t, a, "hub-z")
+	sc2, _ := registered(t, c, "hub-x")
+	hubIDsAre(t, app, "hub-x", "hub-z")
+	isAlive(t, sc2)
+}
+
+func TestAParkedAddressComesBackWhenItsOwnerLeavesDNS(t *testing.T) { // SG-22
+	a, c := fakehub.Start(t), fakehub.Start(t)
+	var mu sync.Mutex
+	answer := []string{a.Addr(), c.Addr()}
+	resolve := func(context.Context, string, string) ([]string, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(answer), nil
+	}
+	tm := scaled()
+	tm.dnsRefresh = 50 * ms
+	app := startApp(t, Hubs("dns:///hubs.example:7000"), withTimings(tm), withResolver(resolve))
+	sa, _ := registered(t, a, "hub-x")
+	hubIDsAre(t, app, "hub-x")
+	sc, _ := registered(t, c, "hub-x")
+	sc.Ended(t, 2*s_)
+	mu.Lock()
+	answer = []string{c.Addr()} // the owner's address left the answer
+	mu.Unlock()
+	sa.HalfClosed(t, 2*s_) // drained: nothing of the instance in flight on it
+	sc2, _ := registered(t, c, "hub-x")
+	hubIDsAre(t, app, "hub-x")
+	isAlive(t, sc2)
+}
+
+func TestAnHTTPSAddressIsReachedOverTLS(t *testing.T) {
+	targets, err := parseTargets([]string{"https://hub-1:7000", "hub-1:7000", "static://https://hub-1:7000", "http://hub-1:7000"})
+	is(t, err, nil)
+	is(t, len(targets), 2) // https:// is another target than host:port, as in the reference library
+	is(t, targets[0], target{address: "hub-1:7000", https: true})
+	is(t, targets[1], target{address: "hub-1:7000"})
+	is(t, targets[0].String(), "https://hub-1:7000")
+	plain := newApp(t, Hubs("https://hub-1:7000", "hub-2:7000"))
+	conns := plain.newPoolForTest().all()
+	creds, err := conns[0].transport(nil)
+	is(t, err, nil)
+	is(t, creds.Info().SecurityProtocol, "tls") // system roots, no configuration needed
+	creds, err = conns[1].transport(nil)
+	is(t, err, nil)
+	is(t, creds.Info().SecurityProtocol, "insecure")
+	// With a TLS configuration every hub is reached over TLS, http:// ones too.
+	configured := newApp(t, Hubs("http://hub-1:7000"), TLS(TLSConfig{}))
+	creds, err = configured.newPoolForTest().all()[0].transport(nil)
+	is(t, err, nil)
+	is(t, creds.Info().SecurityProtocol, "tls")
+}
+
+func TestALoneRollingHubKeepsItsStatus(t *testing.T) {
+	hub := fakehub.Start(t)
+	app := startApp(t, Hubs(hub.Addr()), StatusInterval(50*ms))
+	s1, _ := registered(t, hub, "hub-1")
+	hubIDsAre(t, app, "hub-1")
+	app.pool.all()[0].setRolling(true) // a client certificate rollover waiting for its handlers
+	defer app.pool.all()[0].setRolling(false)
+	waitStatuses(t, s1, len(s1.Statuses())+3)
+	statuses := s1.Statuses()
+	is(t, strings.Join(sortedIDs(statuses[len(statuses)-1]), ","), "hub-1")
+}
+
+func TestARollingHubLeavesTheStatusWhileAnotherServes(t *testing.T) {
+	app, _, st := twoHubs(t, StatusInterval(50*ms))
+	app.pool.all()[0].setRolling(true)
+	defer app.pool.all()[0].setRolling(false)
+	after := len(st[1].Statuses())
+	waitStatuses(t, st[1], after+3)
+	statuses := st[1].Statuses()
+	is(t, strings.Join(sortedIDs(statuses[len(statuses)-1]), ","), "hub-2")
+	before := len(st[0].Statuses())
+	waitStatuses(t, st[1], len(st[1].Statuses())+3)
+	is(t, len(st[0].Statuses()) <= before+1, true) // at most one sent before the flag was seen
+}
+
+// waitStatuses waits (bounded) until s received n InstanceStatus.
+func waitStatuses(t *testing.T, s *fakehub.Stream, n int) {
+	t.Helper()
+	deadline := time.Now().Add(3 * s_)
+	for len(s.Statuses()) < n {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d InstanceStatus, want %d", len(s.Statuses()), n)
+		}
+		time.Sleep(5 * ms)
+	}
 }
 
 func TestPermitsAreSplitAndToppedUp(t *testing.T) {
@@ -520,12 +630,12 @@ func TestADNSAddressBackWhileDrainingIsKept(t *testing.T) {
 
 func TestAResolvedAddressIsCheckedAgainstTheDNSName(t *testing.T) {
 	app := newApp(t, Hubs("dns:///hubs.example:7000"), TLS(TLSConfig{}))
-	c := app.newPoolForTest().newConn("10.0.0.1:7000", "hubs.example")
+	c := app.newPoolForTest().newConn("10.0.0.1:7000", "hubs.example", false)
 	is(t, c.tlsServerName(), "hubs.example")
 	_, err := c.transport(nil)
 	is(t, err, nil)
 	named := newApp(t, Hubs("dns:///hubs.example:7000"), TLS(TLSConfig{ServerName: "hub.internal"}))
-	c = named.newPoolForTest().newConn("10.0.0.1:7000", "hubs.example")
+	c = named.newPoolForTest().newConn("10.0.0.1:7000", "hubs.example", false)
 	is(t, c.tlsServerName(), "hub.internal") // the configured name wins
 	static := newApp(t, Hubs("h:7000"), TLS(TLSConfig{}))
 	is(t, static.newPoolForTest().all()[0].tlsServerName(), "") // the dialled host

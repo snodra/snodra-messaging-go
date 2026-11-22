@@ -15,12 +15,18 @@ import (
 type target struct {
 	address string // host:port; for a DNS target the name and the port
 	dns     bool   // a dns:///name:port target, resolved again every dnsRefresh
+	// https is an https:// target: without a TLS configuration it is reached over TLS with the
+	// system's roots, as in the reference library (with one, every hub is).
+	https bool
 }
 
-// String is the target as configured: host:port, or dns:///name:port.
+// String is the target as configured: host:port, https://host:port or dns:///name:port.
 func (t target) String() string {
-	if t.dns {
+	switch {
+	case t.dns:
 		return dnsScheme + t.address
+	case t.https:
+		return "https://" + t.address
 	}
 	return t.address
 }
@@ -33,12 +39,10 @@ func (t target) hostPort() (host, port string) {
 
 const dnsScheme = "dns:///"
 
-// staticPrefixes may precede a static host:port; they are not part of the address.
-var staticPrefixes = []string{"static://", "http://", "https://"}
-
 // parseTargets reads the hub addresses ([Hubs], SNODRA_SERVER_ADDRESS): a list of host:port
-// (a static://, http:// or https:// prefix optional), in order, repeats of one host:port
-// removed; or exactly one dns:///name:port. It fails when they name no hub, when a DNS target is
+// (a static://, http:// or https:// prefix optional, static:// also before the other two), in
+// order, repeats removed (host:port, static:// and http:// name one target; https:// another, as
+// in the reference library); or exactly one dns:///name:port. It fails when they name no hub, when a DNS target is
 // not alone, or when an entry lacks a host or a port.
 func parseTargets(addresses []string) ([]target, error) {
 	var entries []string
@@ -62,18 +66,14 @@ func parseTargets(addresses []string) ([]target, error) {
 	}
 	var out []target
 	for _, e := range entries {
-		hostport := e
-		for _, p := range staticPrefixes {
-			if rest, ok := strings.CutPrefix(e, p); ok {
-				hostport = rest
-				break
-			}
-		}
+		hostport := strings.TrimPrefix(e, "static://")
+		https := strings.HasPrefix(hostport, "https://")
+		hostport = strings.TrimPrefix(strings.TrimPrefix(hostport, "https://"), "http://")
 		host, port, err := net.SplitHostPort(hostport)
 		if err != nil || host == "" || port == "" {
 			return nil, fmt.Errorf("snodra: hub address %q (Hubs, SNODRA_SERVER_ADDRESS) is not host:port", e)
 		}
-		t := target{address: hostport}
+		t := target{address: hostport, https: https}
 		if !slices.Contains(out, t) {
 			out = append(out, t)
 		}
@@ -115,12 +115,8 @@ func hubIDOf(ackID, target string) string {
 	if ackID != "" {
 		return ackID
 	}
-	for _, p := range staticPrefixes {
-		if rest, ok := strings.CutPrefix(target, p); ok {
-			return rest
-		}
-	}
-	return target
+	target = strings.TrimPrefix(target, "static://")
+	return strings.TrimPrefix(strings.TrimPrefix(target, "https://"), "http://")
 }
 
 // oneFamily is the targets of one DNS answer on port: its IPv4 addresses when it has any, else

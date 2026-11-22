@@ -199,16 +199,19 @@ reference library departs from it. In each case this library follows the referen
 - **Question:** should the initial request carry something no scatter-gather target can (its own mode, or a header),
   or should the hub refuse a scatter-gather of a subscription type?
 
-### SG-14: the prefixes stripped from a target that stands for a hub id
+### SG-14: the http:// and https:// prefixes of a hub address
 
 - **Specification:** [protocol.md, Several hubs](https://snodra.damoreira.com/library-authors/protocol/) says a hub
   whose `RegisterAck.hub_id` is empty is known by its target as `host:port`, "with a `static://` prefix (and in the
-  Rust library `http://` or `https://`) stripped".
-- **Reference library:** strips `static://`, `http://` and `https://`, and accepts all three prefixes in the hub
-  address list.
-- **This library:** does the same (`targets.go`).
-- **Question:** should the `http://` and `https://` prefixes be part of the specification for every library, or
-  dropped from the reference library?
+  Rust library `http://` or `https://`) stripped"; it says nothing else of those two prefixes.
+- **Reference library:** accepts `http://` and `https://` (after an optional `static://`) in the hub address list and
+  strips them from a target that stands for a hub id. An `https://` address is reached over TLS with the system's
+  roots when no TLS is configured; with a TLS configuration every hub is reached over TLS, `http://` ones too. Without
+  one, every other address is plain text, so a list may mix both. `https://h:7000` and `h:7000` are two targets
+  (`static://h:7000` and `http://h:7000` are the same one as `h:7000`).
+- **This library:** does the same (`targets.go`, `tls.go`).
+- **Question:** should the prefixes, and the TLS an `https://` address implies, be part of the specification for every
+  library, or dropped from the reference library?
 
 ### SG-15: a live stream closed with a refusal code
 
@@ -326,9 +329,11 @@ reference library departs from it. In each case this library follows the referen
   target answering a `hub_id` another target owns "is closed and parked [...] and is retried only once the owner is
   gone".
 - **Reference library:** closes such a target for good: it is never retried, also when the owner later answers
-  another id or reconnects elsewhere; with a `dns:///` target it is dropped once its address leaves the answer. The
-  Kotlin library parks it and retries it once the owner is gone (no longer resolved, or answering another id).
-- **This library:** does what the reference library does (`pool.go`, `connection.go`): the duplicate's connection
-  ends and opens no stream again.
-- **Question:** should a parked target be retried once its owner is gone, as the page and the Kotlin library say, or
-  closed for good as the reference library does?
+  another id; with a `dns:///` target it is dropped once its address leaves the answer. An instance behind aliases or
+  load-balanced addresses can so stay one hub short after a rolling restart of the hubs.
+- **This library:** follows the specification, as the Kotlin library does (`pool.go`, `connection.go`): the
+  duplicate's stream is closed and its address parked (no stream, not counted in the permit split, not in the hub ids
+  or the status); once no kept connection owns that hub id any more (the owner now answers another id, or its address
+  left the DNS answer and is being drained), the parked address is connected again at once, unless its own address
+  left the DNS answer.
+- **Question:** should the reference library park and retry a duplicate as the specification says?
