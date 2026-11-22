@@ -40,6 +40,9 @@ type timings struct {
 	// tokenFetchWait bounds the wait for an access token: tokenFetchTimeout and a grace, for a
 	// token source that ignores its context.
 	tokenFetchWait time.Duration
+	// creditWait bounds how long a streaming handler waits for credit before its stream ends
+	// with TIMEOUT "no credit within ..." ([StreamCreditTimeout]).
+	creditWait time.Duration
 }
 
 // permitBatch pending permit grants are written at once; it also caps the low-water mark
@@ -66,6 +69,9 @@ const (
 	// outboundLimit is how many requests may wait in a stream's outbound buffer; a send waits for
 	// room beyond it (the library's own frames never wait).
 	outboundLimit = 256
+	// defaultCredit is a stream's Request.initial_credit when the caller chose none (what the hub
+	// reads 0 as).
+	defaultCredit uint32 = 64
 )
 
 // The checking of the callers' tokens (https://snodra.damoreira.com/library-authors/messages/,
@@ -120,6 +126,7 @@ func defaultTimings() timings {
 		rollIdleLimit:      10 * time.Second,
 		rollReconnectLimit: 30 * time.Second,
 		tokenFetchWait:     tokenFetchTimeout + time.Second,
+		creditWait:         10 * time.Minute,
 	}
 }
 

@@ -3,6 +3,7 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
 
 	snodra "github.com/snodra/snodra-messaging-go"
 )
@@ -41,6 +42,33 @@ func TestEnvMapsOntoOptions(t *testing.T) {
 	}
 	if e.capacity != 4 {
 		t.Fatalf("capacity %d", e.capacity)
+	}
+	if e.creditTimeout != 0 {
+		t.Fatalf("credit timeout %v", e.creditTimeout)
+	}
+
+	e, err = readEnv(lookup(map[string]string{
+		"CONFORMANCE_SERVICE_NAME":             "conformance-go",
+		"CONFORMANCE_INSTANCE_ID":              "i-7",
+		"CONFORMANCE_HUBS":                     "127.0.0.1:7000",
+		"CONFORMANCE_STREAM_CREDIT_TIMEOUT_MS": "2000",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.creditTimeout != 2*time.Second {
+		t.Fatalf("credit timeout %v", e.creditTimeout)
+	}
+	if _, err := snodra.New(append(e.options(), snodra.Hubs("127.0.0.1:7000"))...); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readEnv(lookup(map[string]string{
+		"CONFORMANCE_SERVICE_NAME":             "conformance-go",
+		"CONFORMANCE_INSTANCE_ID":              "i-7",
+		"CONFORMANCE_HUBS":                     "127.0.0.1:7000",
+		"CONFORMANCE_STREAM_CREDIT_TIMEOUT_MS": "0",
+	})); err == nil || !strings.Contains(err.Error(), "CONFORMANCE_STREAM_CREDIT_TIMEOUT_MS") {
+		t.Fatalf("a bad credit timeout: %v", err)
 	}
 
 	for _, missing := range []string{"CONFORMANCE_SERVICE_NAME", "CONFORMANCE_INSTANCE_ID", "CONFORMANCE_HUBS"} {

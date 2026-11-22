@@ -14,6 +14,7 @@ func clearEnv(t *testing.T) {
 		"SNODRA_MAX_CONCURRENT_HANDLERS", "SNODRA_RECONNECT_BACKOFF_MIN_MS", "SNODRA_RECONNECT_BACKOFF_MAX_MS",
 		"SNODRA_SERVER_LOAD_FACTOR", "SNODRA_SERVER_TAGS",
 		"SNODRA_SERVER_REQUEST_TIMEOUT_MS", "SNODRA_SERVER_PRIORITIES", "SNODRA_SERVER_RETRY_ENABLED",
+		"SNODRA_SERVER_STREAM_CREDIT_TIMEOUT_MS",
 		"SNODRA_SERVER_RETRY_MAX_ATTEMPTS", "SNODRA_SERVER_RETRY_INITIAL_BACKOFF_MS",
 		"SNODRA_SERVER_RETRY_MULTIPLIER", "SNODRA_SERVER_RETRY_MAX_BACKOFF_MS",
 		"SNODRA_JWKS_URL", "SNODRA_ISSUER", "SNODRA_SECURITY_ROLES_CLAIM", "SNODRA_FORWARD_JWT",
@@ -109,6 +110,18 @@ func TestFromEnvSendSettings(t *testing.T) {
 	is(t, app.cfg.defaultTimeout, time.Duration(0))
 	is(t, app.cfg.retry == nil, true) // no retry unless enabled
 	is(t, len(app.cfg.priorities), 0)
+	is(t, app.cfg.timings.creditWait, 10*time.Minute)
+
+	t.Setenv("SNODRA_SERVER_STREAM_CREDIT_TIMEOUT_MS", "2500")
+	app, err = New(FromEnv())
+	is(t, err, nil)
+	is(t, app.cfg.timings.creditWait, 2500*ms)
+	t.Setenv("SNODRA_SERVER_STREAM_CREDIT_TIMEOUT_MS", "0")
+	_, err = New(FromEnv())
+	if err == nil || !strings.Contains(err.Error(), "SNODRA_SERVER_STREAM_CREDIT_TIMEOUT_MS") {
+		t.Fatalf("got %v, want an error naming SNODRA_SERVER_STREAM_CREDIT_TIMEOUT_MS", err)
+	}
+	t.Setenv("SNODRA_SERVER_STREAM_CREDIT_TIMEOUT_MS", "")
 
 	t.Setenv("SNODRA_SERVER_REQUEST_TIMEOUT_MS", "0") // 0: not chosen
 	t.Setenv("SNODRA_SERVER_RETRY_MAX_ATTEMPTS", "5") // read, but retry is off

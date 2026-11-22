@@ -120,6 +120,20 @@ type SharedQuery struct{ json.RawMessage }
 // MessageType is the contract's type name.
 func (SharedQuery) MessageType() string { return "conformance.SharedQuery" }
 
+// Stream is the contract's streaming query: Count items {n: 1..Count}, each after DelayMs.
+type Stream struct {
+	Count   int64 `json:"count"`
+	DelayMs int64 `json:"delayMs"`
+}
+
+// MessageType is the contract's type name.
+func (Stream) MessageType() string { return "conformance.Stream" }
+
+// StreamItem is an item of Stream.
+type StreamItem struct {
+	N int64 `json:"n"`
+}
+
 // The runner's types, sent by conformance.Send and Relay; their payload passes through as it
 // is (the runner scripts its answers with it).
 
@@ -134,6 +148,12 @@ type ProbeQuery struct{ json.RawMessage }
 
 // MessageType is the contract's type name.
 func (ProbeQuery) MessageType() string { return "conformance.runner.ProbeQuery" }
+
+// ProbeStream is the runner's streaming query.
+type ProbeStream struct{ json.RawMessage }
+
+// MessageType is the contract's type name.
+func (ProbeStream) MessageType() string { return "conformance.runner.ProbeStream" }
 
 // Missing is a command nobody serves.
 type Missing struct{ json.RawMessage }

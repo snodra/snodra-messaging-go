@@ -15,16 +15,17 @@ import (
 
 // sendConfig is what the [SendOption]s of one call set.
 type sendConfig struct {
-	routingKey  string
-	timeout     time.Duration
-	priority    int32
-	hasPriority bool
-	retry       *RetryPolicy
-	headers     map[string]string // the caller's own, by Header
-	maxResults  uint32
+	routingKey    string
+	timeout       time.Duration
+	priority      int32
+	hasPriority   bool
+	retry         *RetryPolicy
+	headers       map[string]string // the caller's own, by Header
+	maxResults    uint32
+	initialCredit uint32
 }
 
-// A SendOption configures one [Send], [Query] or [Gather].
+// A SendOption configures one [Send], [Query], [Gather] or [Stream].
 type SendOption func(*sendConfig)
 
 // RoutingKey sends the request with key (Request.routing_key): commands of one type with the
@@ -52,9 +53,9 @@ func Retry(p RetryPolicy) SendOption { return func(c *sendConfig) { c.retry = &p
 // NoRetry sends this call once, whatever [DefaultRetry] says.
 func NoRetry() SendOption { return Retry(noRetry) }
 
-// MaxResults ends a [Gather] after n successful parts (Request.max_results): the hub sends the
-// end then and cancels the targets still working. 0, the default, waits for every target.
-// [Send] and [Query] ignore it.
+// MaxResults ends a [Gather] after n successful parts, or a [Stream] after n items
+// (Request.max_results): the hub sends the end then and cancels the targets or the handler still
+// working. 0, the default, is no limit. [Send] and [Query] ignore it.
 func MaxResults(n uint32) SendOption { return func(c *sendConfig) { c.maxResults = n } }
 
 // Send sends the command cmd through a hub to the instance that handles its type and returns the
@@ -205,11 +206,20 @@ func prepare(ctx context.Context, app *App, kind hubpb.RequestKind, mode hubpb.R
 		Mode:       mode,
 		Headers:    outgoingHeaders(ctx, cfg.headers, app.cfg.forwardJWT),
 	}
-	if mode == hubpb.RequestMode_SCATTER_GATHER {
+	switch mode {
+	case hubpb.RequestMode_SCATTER_GATHER:
 		// Every target is asked: a gather goes to a hub unkeyed and carries no routing key, as in
 		// the reference library.
 		tmpl.RoutingKey = ""
 		tmpl.MaxResults = cfg.maxResults
+	case hubpb.RequestMode_STREAMING:
+		// A stream goes to a hub unkeyed and carries no routing key, as in the reference library.
+		tmpl.RoutingKey = ""
+		tmpl.MaxResults = cfg.maxResults
+		tmpl.InitialCredit = cfg.initialCredit
+		if tmpl.InitialCredit == 0 {
+			tmpl.InitialCredit = defaultCredit
+		}
 	}
 	out := &outgoing{typ: typ, tmpl: tmpl, policy: policy, chosen: chosen}
 	if policy.MaxAttempts > 1 {
@@ -272,6 +282,9 @@ type call struct {
 	answer chan answer // buffered: the one answer
 	// gather is a scatter-gather: answered by parts and an end, never by a Reply.
 	gather bool
+	// inbox is a streaming query's: its parts and its end (or failure) in arrival order, as they
+	// come; answer is not used. Nil for any other request.
+	inbox *streamInbox
 	// parts collects a gather's parts until its end (under pendingCalls.mu); the local guard
 	// bounds how long.
 	parts []*hubpb.ReplyPart
@@ -323,16 +336,25 @@ func (p *pendingCalls) deliver(id string, a answer) bool {
 	if c == nil {
 		return false
 	}
-	c.answer <- a
+	c.finish(a)
 	return true
 }
 
-// reply hands a Reply's a to the unary call with id; a gather is never answered by a Reply,
-// so one for it is ignored.
+// finish hands a, the end of the call, to its caller.
+func (c *call) finish(a answer) {
+	if c.inbox != nil {
+		c.inbox.push(streamEvent{failure: a.failure, end: a.end})
+		return
+	}
+	c.answer <- a
+}
+
+// reply hands a Reply's a to the unary call with id; a gather or a stream is never answered by
+// a Reply, so one for it is ignored.
 func (p *pendingCalls) reply(id string, a answer) {
 	p.mu.Lock()
 	c := p.byID[id]
-	if c == nil || c.gather {
+	if c == nil || c.gather || c.inbox != nil {
 		p.mu.Unlock()
 		return
 	}
@@ -341,21 +363,26 @@ func (p *pendingCalls) reply(id string, a answer) {
 	c.answer <- a
 }
 
-// part adds a ReplyPart to the gather it belongs to; ignored for an unknown or unary request.
+// part adds a ReplyPart to the gather it belongs to, or passes it on to the stream; ignored for
+// an unknown or unary request.
 func (p *pendingCalls) part(rp *hubpb.ReplyPart) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if c := p.byID[rp.GetRequestId()]; c != nil && c.gather {
+	switch c := p.byID[rp.GetRequestId()]; {
+	case c == nil:
+	case c.gather:
 		c.parts = append(c.parts, rp)
+	case c.inbox != nil:
+		c.inbox.push(streamEvent{part: rp})
 	}
 }
 
-// end completes the gather a ReplyEnd belongs to with the parts it collected; ignored for an
-// unknown or unary request.
+// end completes the gather a ReplyEnd belongs to with the parts it collected, or the stream;
+// ignored for an unknown or unary request.
 func (p *pendingCalls) end(e *hubpb.ReplyEnd) {
 	p.mu.Lock()
 	c := p.byID[e.GetRequestId()]
-	if c == nil || !c.gather {
+	if c == nil || (!c.gather && c.inbox == nil) {
 		p.mu.Unlock()
 		return
 	}
@@ -363,7 +390,7 @@ func (p *pendingCalls) end(e *hubpb.ReplyEnd) {
 	parts := c.parts
 	c.parts = nil
 	p.mu.Unlock()
-	c.answer <- answer{parts: parts, end: e}
+	c.finish(answer{parts: parts, end: e})
 }
 
 // attempt sends tmpl once, with a fresh id and timeout chosen, to an acknowledged hub and waits
@@ -372,42 +399,12 @@ func (p *pendingCalls) end(e *hubpb.ReplyEnd) {
 // own failure.
 func (a *App) attempt(ctx context.Context, tmpl *hubpb.Request, chosen time.Duration) (answer, error) {
 	typ := tmpl.GetType()
-	a.mu.Lock()
-	p := a.pool
-	a.mu.Unlock()
-	if p == nil {
-		return answer{}, fmt.Errorf("%w: the app is not started (sending %s)", ErrNeverSent, typ)
-	}
-	conn, err := p.pick(tmpl.GetRoutingKey())
-	if err != nil {
-		return answer{}, fmt.Errorf("%w (sending %s)", err, typ)
-	}
-	ref, ack := conn.live()
-	if ref == nil {
-		return answer{}, fmt.Errorf("%w: the hub %s has no acknowledged stream (sending %s)", ErrNeverSent, conn.address, typ)
-	}
-	timeoutMS, guard := requestTiming(ack, typ, chosen)
 	c := &call{id: uuid.New(), answer: make(chan answer, 1), gather: tmpl.GetMode() == hubpb.RequestMode_SCATTER_GATHER}
-	req := &hubpb.Request{
-		Id:         c.id,
-		Kind:       tmpl.GetKind(),
-		Type:       typ,
-		RoutingKey: tmpl.GetRoutingKey(),
-		Payload:    tmpl.GetPayload(),
-		Headers:    tmpl.GetHeaders(),
-		TimeoutMs:  timeoutMS,
-		Priority:   tmpl.GetPriority(),
-		Mode:       tmpl.GetMode(),
-		MaxResults: tmpl.GetMaxResults(),
+	ref, guard, err := a.write(ctx, tmpl, chosen, c)
+	if err != nil {
+		return answer{}, err
 	}
-	a.calls.add(c)
 	defer a.calls.remove(c.id)
-	if err := ref.sendRequest(ctx, &hubpb.ClientMessage{Message: &hubpb.ClientMessage_Request{Request: req}}, c); err != nil {
-		if cerr := ctx.Err(); cerr != nil {
-			return answer{}, fmt.Errorf("%w: %w", ErrNeverSent, cerr)
-		}
-		return answer{}, fmt.Errorf("%w: the hub stream closed before %s was written", ErrNeverSent, typ)
-	}
 	timer := time.NewTimer(guard)
 	defer timer.Stop()
 	select {
@@ -433,6 +430,50 @@ func (a *App) attempt(ctx context.Context, tmpl *hubpb.Request, chosen time.Dura
 		}
 		return answer{}, fmt.Errorf("%w: %w", ErrOutcomeUnknown, ctx.Err())
 	}
+}
+
+// write queues tmpl as the request of c (with c's id and the timeout chosen) for an
+// acknowledged hub's stream, c recorded as pending, and returns that stream and the request's
+// local guard (the hub's bound plus 1 s). When it fails, nothing was sent and c is not pending.
+func (a *App) write(ctx context.Context, tmpl *hubpb.Request, chosen time.Duration, c *call) (*streamRef, time.Duration, error) {
+	typ := tmpl.GetType()
+	a.mu.Lock()
+	p := a.pool
+	a.mu.Unlock()
+	if p == nil {
+		return nil, 0, fmt.Errorf("%w: the app is not started (sending %s)", ErrNeverSent, typ)
+	}
+	conn, err := p.pick(tmpl.GetRoutingKey())
+	if err != nil {
+		return nil, 0, fmt.Errorf("%w (sending %s)", err, typ)
+	}
+	ref, ack := conn.live()
+	if ref == nil {
+		return nil, 0, fmt.Errorf("%w: the hub %s has no acknowledged stream (sending %s)", ErrNeverSent, conn.address, typ)
+	}
+	timeoutMS, guard := requestTiming(ack, typ, chosen)
+	req := &hubpb.Request{
+		Id:            c.id,
+		Kind:          tmpl.GetKind(),
+		Type:          typ,
+		RoutingKey:    tmpl.GetRoutingKey(),
+		Payload:       tmpl.GetPayload(),
+		Headers:       tmpl.GetHeaders(),
+		TimeoutMs:     timeoutMS,
+		Priority:      tmpl.GetPriority(),
+		Mode:          tmpl.GetMode(),
+		MaxResults:    tmpl.GetMaxResults(),
+		InitialCredit: tmpl.GetInitialCredit(),
+	}
+	a.calls.add(c)
+	if err := ref.sendRequest(ctx, &hubpb.ClientMessage{Message: &hubpb.ClientMessage_Request{Request: req}}, c); err != nil {
+		a.calls.remove(c.id)
+		if cerr := ctx.Err(); cerr != nil {
+			return nil, 0, fmt.Errorf("%w: %w", ErrNeverSent, cerr)
+		}
+		return nil, 0, fmt.Errorf("%w: the hub stream closed before %s was written", ErrNeverSent, typ)
+	}
+	return ref, guard, nil
 }
 
 // answered is the payload of ans, or its error as the caller sees it.

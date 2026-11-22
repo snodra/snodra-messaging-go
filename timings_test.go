@@ -1,6 +1,9 @@
 package snodra
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestDefaultTimings(t *testing.T) {
 	d := defaultTimings()
@@ -37,4 +40,6 @@ func TestDefaultTimings(t *testing.T) {
 	is(t, rollSettle, 50*ms)
 	is(t, rollPoll, 10*ms)
 	is(t, d.tokenFetchWait, 11*s)
+	is(t, d.creditWait, 10*time.Minute)
+	is(t, defaultCredit, uint32(64))
 }

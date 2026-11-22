@@ -39,6 +39,20 @@ reference library departs from it. In each case this library follows the referen
 - **Question:** should the specification name the budget without a caller's timeout, and the least time left for a
   retry?
 
+### SG-3: the local guards of a stream
+
+- **Specification:** [protocol.md, Timeouts](https://snodra.damoreira.com/library-authors/protocol/) sizes the
+  client-side request guard of a request as "the hub's bound for the request + 1 s"; for a streaming query, whose
+  answer is many parts, it names the hub's idle timeout ("no part within `Request.timeout_ms`", from the forward, reset
+  by every part) but not how long the sender's own guard waits for the first part and between parts.
+- **Reference library:** guards a stream like the hub's idle timeout: the hub's bound plus 1 s between parts, and
+  twice the bound plus 1 s for the first part (the hub bounds a queue wait by the timeout, then starts its idle clock
+  at the forward). When a guard fires the stream fails with `TIMEOUT` and is cancelled at the hub
+  (`Cancel{reason "local guard timeout"}`), so that the handler stops holding its permit. A subscription's guard
+  covers its initial result only (the bound plus 1 s).
+- **This library:** does the same for streams (`stream_client.go`); subscriptions come with them.
+- **Question:** should the specification size the guards of a stream (first part and idle) as it sizes the unary one?
+
 ### SG-5: when a JWT is renewed
 
 - **Specification:** [protocol.md, Credentials](https://snodra.damoreira.com/library-authors/protocol/) says "both
@@ -121,6 +135,22 @@ reference library departs from it. In each case this library follows the referen
 - **This library:** exposes the application-wide one, `App.Rejection`, never cleared by an acceptance (`app.go`,
   `connection.go`).
 - **Question:** is the kept rejection per connection and cleared on acceptance, or the application's latest refusal?
+
+### SG-12: a streaming request to a unary query handler
+
+- **Specification:** [protocol.md, Handling a request](https://snodra.damoreira.com/library-authors/protocol/) says
+  a request in the wrong mode for the handler ("a unary request to a streaming handler, for example") is
+  `INVALID_REQUEST`; [Streaming](https://snodra.damoreira.com/library-authors/protocol/) also lists what the hub does
+  with "a unary `Reply` to the target (a handler that does not stream)": it relays it as one part and an end, which
+  reads as if a unary query handler could answer a streaming request.
+- **Reference library:** answers a streaming request to a unary query handler with
+  `ReplyEnd{error = INVALID_REQUEST "<type> is not a streaming query handler (it answers mode UNARY)"}`, and a unary
+  request to a streaming handler with `Reply{error = INVALID_REQUEST "<type> is a streaming query: send it with ...
+  (mode STREAMING)"}` (the Kotlin library does both too). A streaming request of a type not served, or of a command
+  type, is `ReplyEnd{error = NO_HANDLER}`.
+- **This library:** does the same, naming its own call in the second text (`dispatch.go`).
+- **Question:** is the hub's relay of a unary `Reply` only for other clients, so that a library must refuse the wrong
+  mode both ways, or should a unary query handler answer a streaming request with one part?
 
 ### SG-15: a live stream closed with a refusal code
 
@@ -215,3 +245,17 @@ reference library departs from it. In each case this library follows the referen
 - **This library:** does the same (`options.go`, `credentials.go`).
 - **Question:** should the specification say that a token file must hold a token at startup, and that a changed
   token is sent on the live streams?
+
+### SG-21: retrying a stream
+
+- **Specification:** [protocol.md, Never sent or outcome unknown](https://snodra.damoreira.com/library-authors/protocol/)
+  says that when a library retries, "all attempts share the caller's time budget, and each attempt sends what is left
+  of it as `Request.timeout_ms`"; it says nothing of a streaming query, whose `Request.timeout_ms` is an idle timeout
+  (the longest wait for the next part), nor of when a stream stops being retried.
+- **Reference library:** retries a stream with the policy of a unary query, for the same errors, only until its first
+  part (or its end) arrives; a retry is a new stream with a fresh id that sends the caller's chosen idle timeout
+  again, not what is left of the budget (the budget only bounds when a retry may start). After the first part
+  nothing is retried.
+- **This library:** does the same (`stream_client.go`).
+- **Question:** should a retried stream send the remaining budget, as a unary request does, or its idle timeout
+  unchanged; and should the specification say that a stream is retried only before its first part?

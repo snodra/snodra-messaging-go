@@ -43,7 +43,7 @@ func started(t *testing.T, e env) (*snodra.App, *fakehub.Hub, *fakehub.Stream) {
 	if got := strings.Join(r.GetCommandTypes(), ","); got != "conformance.Done,conformance.Echo,conformance.Fail,conformance.Guarded,conformance.Relay,conformance.Send,conformance.Sleep,conformance.Strict" {
 		t.Fatalf("command types %s", got)
 	}
-	if got := strings.Join(r.GetQueryTypes(), ","); got != "conformance.EchoQuery,conformance.Outcome,conformance.SleepQuery,conformance.View" {
+	if got := strings.Join(r.GetQueryTypes(), ","); got != "conformance.EchoQuery,conformance.Outcome,conformance.SleepQuery,conformance.Stream,conformance.View" {
 		t.Fatalf("query types %s", got)
 	}
 	if got := strings.Join(r.GetSharedQueryTypes(), ","); got != "conformance.SharedQuery" {
@@ -257,8 +257,8 @@ func TestSendGoesThroughTheLibrary(t *testing.T) {
 	}
 
 	// An op this library cannot do yet.
-	s.Send(t, fakehub.Forward(&hubpb.Request{Id: "r-stream", Kind: cmd, Type: "conformance.Send",
-		Payload: []byte(`{"op":"stream","target":"probe-stream"}`)}))
+	s.Send(t, fakehub.Forward(&hubpb.Request{Id: "r-subscribe", Kind: cmd, Type: "conformance.Send",
+		Payload: []byte(`{"op":"subscribe","target":"probe-watch"}`)}))
 	_, reply = nextFrame(t, s)
 	if out := decode(t, reply); out["result"] != "unsupported" || out["reason"] == "" {
 		t.Fatalf("outcome %v", out)
@@ -400,4 +400,114 @@ func TestGuardedNeedsAnAcceptedCaller(t *testing.T) {
 			t.Fatalf("Guarded %s %v: %v, want %v", c.payload, c.headers, e, c.want)
 		}
 	}
+}
+
+func TestTheStreamHandlerStreamsTheCount(t *testing.T) {
+	app, _, s := started(t, env{service: "conformance-go", instance: "i-1", capacity: 4})
+	s.Ack(t, fakehub.Ack("hub-1"))
+	ready(t, app)
+	s.Send(t, fakehub.Forward(&hubpb.Request{Id: "s#1", Kind: hubpb.RequestKind_QUERY, Type: "conformance.Stream",
+		Mode: hubpb.RequestMode_STREAMING, InitialCredit: 2, Payload: []byte(`{"count":3,"delayMs":10}`)}))
+	for n := 1; n <= 2; n++ {
+		p := s.RecvPart(t)
+		if p.GetRequestId() != "s#1" || p.GetSeq() != uint64(n) || string(p.GetPayload()) != fmt.Sprintf(`{"n":%d}`, n) {
+			t.Fatalf("part %d: %v", n, p)
+		}
+	}
+	s.Nothing(t, 200*time.Millisecond, "part", "end")
+	s.Send(t, fakehub.Flow("s#1", 1))
+	if p := s.RecvPart(t); p.GetSeq() != 3 || string(p.GetPayload()) != `{"n":3}` {
+		t.Fatalf("part 3: %v", p)
+	}
+	if e := s.RecvEnd(t); e.GetRequestId() != "s#1" || e.GetError() != nil {
+		t.Fatalf("end %v", e)
+	}
+}
+
+func TestStreamGoesThroughTheLibrarysStream(t *testing.T) {
+	app, _, s := started(t, env{service: "conformance-go", instance: "i-1", capacity: 4})
+	s.Ack(t, fakehub.Ack("hub-1"))
+	ready(t, app)
+	const cmd = hubpb.RequestKind_COMMAND
+	part := func(id string, seq uint64) *hubpb.ServerMessage {
+		return &hubpb.ServerMessage{Message: &hubpb.ServerMessage_Part{Part: &hubpb.ReplyPart{RequestId: id, Seq: seq,
+			ResponderService: "conformance-runner", ResponderInstance: "p1", Payload: []byte(fmt.Sprintf(`{"i":%d}`, seq))}}}
+	}
+	end := func(id string, parts uint32) *hubpb.ServerMessage {
+		return &hubpb.ServerMessage{Message: &hubpb.ServerMessage_End{End: &hubpb.ReplyEnd{RequestId: id, Parts: parts}}}
+	}
+
+	// Read to the end, under the credit asked for.
+	s.Send(t, fakehub.Forward(&hubpb.Request{Id: "r-stream", Kind: cmd, Type: "conformance.Send",
+		Payload: []byte(`{"op":"stream","target":"probe-stream","payload":{"k":1},"initialCredit":2,"maxResults":5,"timeoutMs":3000}`)}))
+	req, _ := nextFrame(t, s)
+	if req.GetType() != "conformance.runner.ProbeStream" || req.GetMode() != hubpb.RequestMode_STREAMING ||
+		req.GetInitialCredit() != 2 || req.GetMaxResults() != 5 || req.GetTimeoutMs() != 3000 || string(req.GetPayload()) != `{"k":1}` {
+		t.Fatalf("the library sent %v", req)
+	}
+	s.Send(t, part(req.GetId(), 1))
+	s.Send(t, part(req.GetId(), 2))
+	if f := s.RecvFlow(t); f.GetRequestId() != req.GetId() || f.GetCredits() != 1 {
+		t.Fatalf("flow %v", f)
+	}
+	s.Send(t, end(req.GetId(), 2))
+	var reply *hubpb.Reply
+	for reply == nil {
+		m := streamFrameOf(t, s)
+		reply = m.GetReply()
+	}
+	out := decode(t, reply)
+	if out["result"] != "ok" || out["end"] != "completed" || fmt.Sprint(out["items"]) != "[map[i:1] map[i:2]]" {
+		t.Fatalf("outcome %v", out)
+	}
+
+	// Stop after read 1: the stream is cancelled.
+	s.Send(t, fakehub.Forward(&hubpb.Request{Id: "r-stream-2", Kind: cmd, Type: "conformance.Send",
+		Payload: []byte(`{"op":"stream","target":"stream","payload":{"count":4},"read":1}`)}))
+	req, _ = nextFrame(t, s)
+	if req.GetType() != "conformance.Stream" || req.GetInitialCredit() != 64 || string(req.GetPayload()) != `{"count":4,"delayMs":0}` {
+		t.Fatalf("the library sent %v", req)
+	}
+	s.Send(t, part(req.GetId(), 1))
+	if c := s.RecvCancel(t); c.GetRequestId() != req.GetId() {
+		t.Fatalf("cancel %v", c)
+	}
+	_, reply = nextFrame(t, s)
+	if out := decode(t, reply); out["result"] != "ok" || out["end"] != "stopped" || fmt.Sprint(out["items"]) != "[map[i:1]]" {
+		t.Fatalf("outcome %v", out)
+	}
+
+	// A gap: lost parts, with the items read before it.
+	s.Send(t, fakehub.Forward(&hubpb.Request{Id: "r-stream-3", Kind: cmd, Type: "conformance.Send",
+		Payload: []byte(`{"op":"stream","target":"probe-stream"}`)}))
+	req, _ = nextFrame(t, s)
+	s.Send(t, part(req.GetId(), 1))
+	s.Send(t, part(req.GetId(), 3))
+	s.RecvCancel(t)
+	_, reply = nextFrame(t, s)
+	out = decode(t, reply)
+	if e, _ := out["error"].(map[string]any); out["result"] != "error" || e["kind"] != "lost-parts" || fmt.Sprint(out["items"]) != "[map[i:1]]" {
+		t.Fatalf("outcome %v", out)
+	}
+
+	// A target that does not stream.
+	s.Send(t, fakehub.Forward(&hubpb.Request{Id: "r-stream-4", Kind: cmd, Type: "conformance.Send",
+		Payload: []byte(`{"op":"stream","target":"probe-query"}`)}))
+	_, reply = nextFrame(t, s)
+	if m := decode(t, reply); m["result"] != "unsupported" {
+		t.Fatalf("outcome %v", m)
+	}
+}
+
+// streamFrameOf is the next frame on s that is not a Permits, Heartbeat or InstanceStatus.
+func streamFrameOf(t *testing.T, s *fakehub.Stream) *hubpb.ClientMessage {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if m := s.Recv(t); m.GetPermits() == nil && m.GetHeartbeat() == nil && m.GetStatus() == nil {
+			return m
+		}
+	}
+	t.Fatal("no frame within 5 s")
+	return nil
 }

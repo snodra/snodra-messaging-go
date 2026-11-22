@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"iter"
 	"math"
 	"sync"
 	"time"
@@ -47,6 +48,8 @@ func (s *service) run(ctx context.Context, m Send) map[string]any {
 		out = s.unary(ctx, m)
 	case "scatter":
 		out = s.scatter(ctx, m)
+	case "stream":
+		out = s.stream(ctx, m)
 	default:
 		out = unsupported("op " + m.Op + " is not supported yet")
 	}
@@ -79,10 +82,15 @@ func options(m Send) []snodra.SendOption {
 		opts = append(opts, snodra.Retry(p))
 	}
 	if m.MaxResults != nil {
-		opts = append(opts, snodra.MaxResults(uint32(min(max(*m.MaxResults, 0), math.MaxUint32))))
+		opts = append(opts, snodra.MaxResults(clampUint32(*m.MaxResults)))
+	}
+	if m.InitialCredit != nil {
+		opts = append(opts, snodra.InitialCredit(clampUint32(*m.InitialCredit)))
 	}
 	return opts
 }
+
+func clampUint32(n int64) uint32 { return uint32(min(max(n, 0), math.MaxUint32)) }
 
 // unary sends m's target with the library's Send or Query and the options m names.
 func (s *service) unary(ctx context.Context, m Send) map[string]any {
@@ -145,6 +153,52 @@ func (s *service) scatter(ctx context.Context, m Send) map[string]any {
 		parts = append(parts, part)
 	}
 	return map[string]any{"result": "ok", "parts": parts, "failed": g.Failed, "timedOut": g.TimedOut}
+}
+
+// stream streams m's target with the library's Stream and the options m names, reading every
+// item (each after readDelayMs), or only read of them before it drops the stream, which cancels
+// it, as the reference service does.
+func (s *service) stream(ctx context.Context, m Send) map[string]any {
+	opts := options(m)
+	var items iter.Seq2[json.RawMessage, error]
+	switch m.Target {
+	case "probe-stream":
+		items = snodra.Stream[json.RawMessage](ctx, s.app, ProbeStream{m.Payload}, opts...)
+	case "stream":
+		var q Stream
+		if len(m.Payload) > 0 {
+			if err := json.Unmarshal(m.Payload, &q); err != nil {
+				return unsupported("payload of conformance.Stream: " + err.Error())
+			}
+		}
+		items = snodra.Stream[json.RawMessage](ctx, s.app, q, opts...)
+	default:
+		return unsupported("target " + m.Target + " is not a streaming target")
+	}
+	delay := time.Duration(0)
+	if m.ReadDelayMs != nil {
+		delay = time.Duration(*m.ReadDelayMs) * time.Millisecond
+	}
+	got := []json.RawMessage{}
+	for item, err := range items {
+		if err != nil {
+			return map[string]any{"result": "error", "error": classify(err), "items": got}
+		}
+		if m.Read != nil && int64(len(got)) >= *m.Read {
+			break // read 0: opened, then dropped
+		}
+		if delay > 0 {
+			time.Sleep(delay)
+		}
+		got = append(got, item)
+		if m.Read != nil && int64(len(got)) >= *m.Read {
+			return map[string]any{"result": "ok", "items": got, "end": "stopped"}
+		}
+	}
+	if m.Read != nil && int64(len(got)) >= *m.Read {
+		return map[string]any{"result": "ok", "items": got, "end": "stopped"}
+	}
+	return map[string]any{"result": "ok", "items": got, "end": "completed"}
 }
 
 // classify is the contract's error of a failed call, by the library's typed errors.

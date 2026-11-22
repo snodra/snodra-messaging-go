@@ -18,15 +18,16 @@ type handlerConfig struct {
 	err error
 }
 
-// A HandlerOption configures one handler in [HandleCommand] or [HandleQuery]: its guards
-// ([RequireAuthenticated], [RequireRole], [RequireCaller]) and, for a query, [Shared].
+// A HandlerOption configures one handler in [HandleCommand], [HandleQuery] or [HandleStream]:
+// its guards ([RequireAuthenticated], [RequireRole], [RequireCaller]) and, for a query or a
+// streaming query, [Shared].
 type HandlerOption func(*handlerConfig)
 
 // Shared registers a query type as shared (Register.shared_query_types): many services may own
 // it, each answering point queries on it like any query, and a [Gather] asks every instance of
 // every owner. Every owner must register it shared: the hub refuses a type one registrant
-// lists as exclusive and another as shared. Commands are never shared: [HandleCommand] with
-// Shared returns an error.
+// lists as exclusive and another as shared. A streaming query ([HandleStream]) may be shared
+// too. Commands are never shared: [HandleCommand] with Shared returns an error.
 // See https://snodra.damoreira.com/library-authors/protocol/ (Shared query types).
 func Shared() HandlerOption { return func(c *handlerConfig) { c.shared = true } }
 
@@ -36,19 +37,25 @@ type handlerKind int
 const (
 	kindCommand handlerKind = iota
 	kindQuery
+	kindStream // a streaming query: Register.query_types, served in mode STREAMING
 )
 
-func (k handlerKind) String() string { return [...]string{"command", "query"}[k] }
+func (k handlerKind) String() string { return [...]string{"command", "query", "streaming query"}[k] }
 
 // invoker runs a handler on a payload: decoded with the codec, encoded back. A payload that
 // does not decode is a *decodeError.
 type invoker func(ctx context.Context, codec PayloadCodec, payload []byte) ([]byte, error)
 
+// streamInvoker runs a streaming handler on a payload, its items written to out. A payload that
+// does not decode is a *decodeError.
+type streamInvoker func(ctx context.Context, codec PayloadCodec, payload []byte, out *streamOut) error
+
 // handler is a registered handler of one type.
 type handler struct {
 	kind   handlerKind
 	name   string
-	invoke invoker
+	invoke invoker       // a command or a query
+	stream streamInvoker // a streaming query
 	cfg    handlerConfig
 }
 
@@ -82,8 +89,15 @@ func register[M Message, R any](app *App, kind handlerKind, h func(context.Conte
 	if app == nil {
 		return errors.New("snodra: registration on a nil App")
 	}
+	name, cfg, err := handlerSetup[M](kind, h == nil, opts)
+	return app.addHandler(&handler{kind: kind, name: name, invoke: invokerOf(h), cfg: cfg}, err)
+}
+
+// handlerSetup is the type name and the configuration of a handler of M of kind, or why it
+// cannot be registered.
+func handlerSetup[M Message](kind handlerKind, nilHandler bool, opts []HandlerOption) (string, handlerConfig, error) {
 	name, err := messageTypeOf[M]()
-	if err == nil && h == nil {
+	if err == nil && nilHandler {
 		err = fmt.Errorf("snodra: nil handler for %s", name)
 	}
 	var cfg handlerConfig
@@ -95,10 +109,10 @@ func register[M Message, R any](app *App, kind handlerKind, h func(context.Conte
 	if err == nil && cfg.err != nil {
 		err = fmt.Errorf("%w (%s)", cfg.err, name)
 	}
-	if err == nil && cfg.shared && kind != kindQuery {
+	if err == nil && cfg.shared && kind == kindCommand {
 		err = fmt.Errorf("snodra: commands are never shared: Shared applies to a query (%s)", name)
 	}
-	return app.addHandler(&handler{kind: kind, name: name, invoke: invokerOf(h), cfg: cfg}, err)
+	return name, cfg, err
 }
 
 // messageTypeOf is the wire name of M, or why M cannot be registered.
@@ -122,13 +136,9 @@ func messageTypeOf[M Message]() (name string, err error) {
 // invokerOf adapts h to the dispatcher: decode a fresh M, run h, encode its answer.
 func invokerOf[M Message, R any](h func(context.Context, M) (R, error)) invoker {
 	return func(ctx context.Context, codec PayloadCodec, payload []byte) ([]byte, error) {
-		msg := newValue[M]()
-		var target any = &msg
-		if t := reflect.TypeFor[M](); t.Kind() == reflect.Pointer {
-			target = msg // already a fresh pointer: decode into what it points to
-		}
-		if err := codec.Unmarshal(payload, target); err != nil {
-			return nil, &decodeError{err}
+		msg, err := decodeMessage[M](codec, payload)
+		if err != nil {
+			return nil, err
 		}
 		result, err := h(ctx, msg)
 		if err != nil {
@@ -136,6 +146,21 @@ func invokerOf[M Message, R any](h func(context.Context, M) (R, error)) invoker 
 		}
 		return encodeResult(codec, result)
 	}
+}
+
+// decodeMessage decodes payload into a fresh M (into what a fresh pointer points to, for a
+// pointer type); a payload that does not decode is a *decodeError.
+func decodeMessage[M Message](codec PayloadCodec, payload []byte) (M, error) {
+	msg := newValue[M]()
+	var target any = &msg
+	if t := reflect.TypeFor[M](); t.Kind() == reflect.Pointer {
+		target = msg // already a fresh pointer: decode into what it points to
+	}
+	if err := codec.Unmarshal(payload, target); err != nil {
+		var zero M
+		return zero, &decodeError{err}
+	}
+	return msg, nil
 }
 
 // encodeResult encodes a handler's answer; Empty, a nil pointer and a nil interface are {}.
@@ -175,7 +200,7 @@ func (a *App) checkHandler(h *handler) error {
 	}
 	if prev, ok := a.handlers[h.name]; ok {
 		if prev.kind != h.kind {
-			return fmt.Errorf("snodra: %s is registered both as a command and as a query", h.name)
+			return fmt.Errorf("snodra: %s is registered both as a %s and as a %s", h.name, prev.kind, h.kind)
 		}
 		return fmt.Errorf("snodra: %s %s is already registered", h.kind, h.name)
 	}
@@ -196,7 +221,7 @@ func (a *App) freezeTypes() {
 		switch {
 		case h.kind == kindCommand:
 			a.commandTypes = append(a.commandTypes, name)
-		case h.cfg.shared:
+		case h.cfg.shared: // a query or a streaming query
 			a.sharedQueryTypes = append(a.sharedQueryTypes, name)
 		default:
 			a.queryTypes = append(a.queryTypes, name)

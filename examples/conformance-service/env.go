@@ -32,6 +32,9 @@ type env struct {
 	// clientCert and clientKey are the client certificate pair (CONFORMANCE_TLS_CLIENT_CERT,
 	// CONFORMANCE_TLS_CLIENT_KEY).
 	clientCert, clientKey string
+	// creditTimeout bounds a streaming handler's wait for credit
+	// (CONFORMANCE_STREAM_CREDIT_TIMEOUT_MS); 0: the library's default.
+	creditTimeout time.Duration
 }
 
 // readEnv reads the environment through getenv; a blank variable is an absent one.
@@ -66,6 +69,13 @@ func readEnv(getenv func(string) string) (env, error) {
 			return env{}, fmt.Errorf("CONFORMANCE_CAPACITY must be a positive integer, got %q", v)
 		}
 		e.capacity = n
+	}
+	if v := get("CONFORMANCE_STREAM_CREDIT_TIMEOUT_MS"); v != "" {
+		ms, err := strconv.Atoi(v)
+		if err != nil || ms < 1 {
+			return env{}, fmt.Errorf("CONFORMANCE_STREAM_CREDIT_TIMEOUT_MS must be a positive integer, got %q", v)
+		}
+		e.creditTimeout = time.Duration(ms) * time.Millisecond
 	}
 	if v := get("CONFORMANCE_RETRY_MAX_ATTEMPTS"); v != "" {
 		n, err := strconv.Atoi(v)
@@ -111,6 +121,9 @@ func (e env) options() []snodra.Option {
 	}
 	if e.clientCert != "" || e.clientKey != "" {
 		opts = append(opts, snodra.ClientCertificate(e.clientCert, e.clientKey))
+	}
+	if e.creditTimeout > 0 {
+		opts = append(opts, snodra.StreamCreditTimeout(e.creditTimeout))
 	}
 	return opts
 }

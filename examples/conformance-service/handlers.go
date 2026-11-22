@@ -39,7 +39,29 @@ func registerHandlers(app *snodra.App, e env) error {
 		snodra.HandleCommand(app, func(ctx context.Context, m Send) (json.RawMessage, error) { return s.send(ctx, m) }),
 		snodra.HandleQuery(app, func(ctx context.Context, m Outcome) (json.RawMessage, error) { return s.outcome(ctx, m) }),
 		snodra.HandleQuery(app, s.view),
+		snodra.HandleStream(app, stream),
 	)
+}
+
+// stream streams m.Count items {n}, n = 1, 2, ..., each after m.DelayMs, under the caller's
+// credit.
+func stream(ctx context.Context, m Stream, w *snodra.StreamWriter[StreamItem]) error {
+	delay := time.Duration(m.DelayMs) * time.Millisecond
+	for n := int64(1); n <= m.Count; n++ {
+		if delay > 0 {
+			timer := time.NewTimer(delay)
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			}
+		}
+		if err := w.Send(ctx, StreamItem{N: n}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *service) echo(ctx context.Context, payload []byte) EchoAnswer {

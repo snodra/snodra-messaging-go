@@ -343,6 +343,9 @@ func (c *hubConn) runStream() (reached bool, err error) {
 		}
 		c.mu.Unlock()
 		ref.end()
+		if n := c.app.running.streamLost(ref); n > 0 {
+			c.log.Debug("streaming requests cancelled: their hub stream was lost", "requests", n)
+		}
 		cancel()
 		wg.Wait()
 	}()
@@ -519,6 +522,8 @@ func (c *hubConn) serve(sr *streamRun) (reached bool, err error) {
 				c.app.calls.end(k.End)
 			case *hubpb.ServerMessage_Cancel:
 				c.app.cancelRequest(k.Cancel.GetRequestId(), k.Cancel.GetReason())
+			case *hubpb.ServerMessage_Flow:
+				c.app.flow(k.Flow.GetRequestId(), k.Flow.GetCredits())
 			}
 		case err := <-ended:
 			if errors.Is(err, io.EOF) {
