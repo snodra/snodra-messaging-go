@@ -1,0 +1,63 @@
+package main
+
+import (
+	"strings"
+	"testing"
+)
+
+func lookup(vars map[string]string) func(string) string {
+	return func(name string) string { return vars[name] }
+}
+
+func TestEnvMapsOntoOptions(t *testing.T) {
+	e, err := readEnv(lookup(map[string]string{
+		"CONFORMANCE_SERVICE_NAME": "conformance-go",
+		"CONFORMANCE_INSTANCE_ID":  "i-7",
+		"CONFORMANCE_HUBS":         "127.0.0.1:7000, 127.0.0.1:7100",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.service != "conformance-go" || e.instance != "i-7" || e.capacity != 64 {
+		t.Fatalf("got %+v", e)
+	}
+	if got := strings.Join(e.hubs, ","); got != "127.0.0.1:7000,127.0.0.1:7100" {
+		t.Fatalf("hubs %q", got)
+	}
+	if n := len(e.options()); n == 0 {
+		t.Fatal("no options")
+	}
+
+	e, err = readEnv(lookup(map[string]string{
+		"CONFORMANCE_SERVICE_NAME": "conformance-go",
+		"CONFORMANCE_INSTANCE_ID":  "i-7",
+		"CONFORMANCE_HUBS":         "127.0.0.1:7000",
+		"CONFORMANCE_CAPACITY":     "4",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.capacity != 4 {
+		t.Fatalf("capacity %d", e.capacity)
+	}
+
+	for _, missing := range []string{"CONFORMANCE_SERVICE_NAME", "CONFORMANCE_INSTANCE_ID", "CONFORMANCE_HUBS"} {
+		vars := map[string]string{
+			"CONFORMANCE_SERVICE_NAME": "conformance-go",
+			"CONFORMANCE_INSTANCE_ID":  "i-7",
+			"CONFORMANCE_HUBS":         "127.0.0.1:7000",
+		}
+		delete(vars, missing)
+		if _, err := readEnv(lookup(vars)); err == nil || !strings.Contains(err.Error(), missing) {
+			t.Fatalf("without %s: %v", missing, err)
+		}
+	}
+	if _, err := readEnv(lookup(map[string]string{
+		"CONFORMANCE_SERVICE_NAME": "conformance-go",
+		"CONFORMANCE_INSTANCE_ID":  "i-7",
+		"CONFORMANCE_HUBS":         "127.0.0.1:7000",
+		"CONFORMANCE_CAPACITY":     "lots",
+	})); err == nil || !strings.Contains(err.Error(), "CONFORMANCE_CAPACITY") {
+		t.Fatalf("a bad capacity: %v", err)
+	}
+}

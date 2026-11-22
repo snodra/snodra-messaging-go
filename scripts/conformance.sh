@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# Runs the Snodra conformance runner against examples/conformance-service.
+#
+#   scripts/conformance.sh [--hubs 1|2] [runner args...]
+#
+# Builds bin/conformance-service, fetches the runner (snodra-conformance v0.2.0) into bin/
+# unless SNODRA_CONFORMANCE_BIN names one, starts snodra/snodra-server:${SNODRA_SERVER_VERSION}
+# (default 0.5.4) on 127.0.0.1:7000 (and 127.0.0.1:7100 with --hubs 2), runs the runner with the
+# remaining arguments (for example --only L1-REGISTER-FIRST) and removes the hubs on exit.
+set -euo pipefail
+
+runner_version=v0.2.0
+server_image="snodra/snodra-server:${SNODRA_SERVER_VERSION:-0.5.4}"
+
+hubs=1
+if [[ "${1:-}" == "--hubs" ]]; then
+  hubs="${2:-}"
+  shift 2
+fi
+case "$hubs" in
+  1 | 2) ;;
+  *)
+    echo "--hubs takes 1 or 2" >&2
+    exit 2
+    ;;
+esac
+
+cd "$(dirname "$0")/.."
+mkdir -p bin
+go build -o bin/conformance-service ./examples/conformance-service
+
+runner="${SNODRA_CONFORMANCE_BIN:-}"
+if [[ -z "$runner" ]]; then
+  case "$(uname -s)-$(uname -m)" in
+    Linux-x86_64) target=x86_64-unknown-linux-musl ;;
+    Linux-aarch64 | Linux-arm64) target=aarch64-unknown-linux-musl ;;
+    Darwin-x86_64) target=x86_64-apple-darwin ;;
+    Darwin-arm64) target=aarch64-apple-darwin ;;
+    *)
+      echo "no runner binary for $(uname -s)-$(uname -m): set SNODRA_CONFORMANCE_BIN" >&2
+      exit 2
+      ;;
+  esac
+  runner="bin/snodra-conformance-$runner_version"
+  if [[ ! -x "$runner" ]]; then
+    archive="snodra-conformance-$runner_version-$target.tar.gz"
+    tmp="$(mktemp -d)"
+    curl -fsSL -o "$tmp/$archive" \
+      "https://github.com/snodra/snodra-conformance/releases/download/$runner_version/$archive"
+    tar -xzf "$tmp/$archive" -C "$tmp"
+    found="$(find "$tmp" -type f -name snodra-conformance | head -n 1)"
+    if [[ -z "$found" ]]; then
+      echo "no snodra-conformance binary in $archive" >&2
+      exit 2
+    fi
+    mv "$found" "$runner"
+    chmod +x "$runner"
+    rm -rf "$tmp"
+  fi
+fi
+
+containers=()
+cleanup() {
+  for c in ${containers[@]+"${containers[@]}"}; do
+    docker rm -f "$c" >/dev/null 2>&1 || true
+  done
+}
+trap cleanup EXIT
+
+hub_args=()
+for i in $(seq 1 "$hubs"); do
+  port=$((7000 + (i - 1) * 100))
+  name="snodra-conformance-hub-$port-$$"
+  docker run -d --rm --name "$name" -p "127.0.0.1:$port:7000" "$server_image" >/dev/null
+  containers+=("$name")
+  hub_args+=(--hub "127.0.0.1:$port")
+done
+
+# Wait for each hub's port (60 s at most).
+for i in $(seq 1 "$hubs"); do
+  port=$((7000 + (i - 1) * 100))
+  for _ in $(seq 1 120); do
+    if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+      break
+    fi
+    sleep 0.5
+  done
+done
+
+"$runner" run \
+  --service-cmd "'$PWD/bin/conformance-service'" \
+  --service conformance-go \
+  "${hub_args[@]}" \
+  --report text \
+  "$@"
