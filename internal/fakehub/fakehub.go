@@ -26,6 +26,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -72,15 +73,22 @@ type Hub struct {
 	refuse  bool
 	refCode codes.Code
 	refMsg  string
+
+	connecting atomic.Int32 // Connect handlers running (tests of the package)
+	buffer     int          // streams waiting for Next before Connect blocks
 }
+
+// withStreamBuffer sets how many streams wait for Next before Connect blocks (tests).
+func withStreamBuffer(n int) Option { return func(h *Hub) { h.buffer = n } }
 
 // Start listens on 127.0.0.1:0 and serves until the test ends.
 func Start(t testing.TB, opts ...Option) *Hub {
 	t.Helper()
-	h := &Hub{streams: make(chan *Stream, 1024)}
+	h := &Hub{buffer: 1024}
 	for _, o := range opts {
 		o(h)
 	}
+	h.streams = make(chan *Stream, h.buffer)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("fakehub: listen: %v", err)
@@ -196,6 +204,8 @@ func (h *Hub) Topology(_ context.Context, _ *hubpb.TopologyRequest) (*hubpb.Topo
 // Connect hands the stream to the script and holds it open until the script closes it or the
 // client leaves.
 func (h *Hub) Connect(srv grpc.BidiStreamingServer[hubpb.ClientMessage, hubpb.ServerMessage]) error {
+	h.connecting.Add(1)
+	defer h.connecting.Add(-1)
 	h.mu.Lock()
 	if h.refuse {
 		code, msg := h.refCode, h.refMsg
@@ -218,7 +228,11 @@ func (h *Hub) Connect(srv grpc.BidiStreamingServer[hubpb.ClientMessage, hubpb.Se
 			s.PeerCertificates = ti.State.PeerCertificates
 		}
 	}
-	h.streams <- s
+	select {
+	case h.streams <- s:
+	case <-srv.Context().Done(): // the client left before the script took the stream
+		return status.FromContextError(srv.Context().Err()).Err()
+	}
 	go s.pump()
 	select {
 	case <-s.done:
@@ -230,14 +244,15 @@ func (h *Hub) Connect(srv grpc.BidiStreamingServer[hubpb.ClientMessage, hubpb.Se
 
 // inbox is an unbounded queue of the frames the library wrote, in order.
 type inbox struct {
-	mu    sync.Mutex
-	q     []*hubpb.ClientMessage
-	ended bool
-	err   error
-	sig   chan struct{}
+	mu     sync.Mutex
+	q      []*hubpb.ClientMessage
+	ended  bool
+	err    error
+	sig    chan struct{}
+	endedC chan struct{} // closed by end
 }
 
-func newInbox() *inbox { return &inbox{sig: make(chan struct{}, 1)} }
+func newInbox() *inbox { return &inbox{sig: make(chan struct{}, 1), endedC: make(chan struct{})} }
 
 func (b *inbox) wake() {
 	select {
@@ -253,11 +268,30 @@ func (b *inbox) push(m *hubpb.ClientMessage) {
 	b.wake()
 }
 
+// end marks the stream ended with err (the first call wins).
 func (b *inbox) end(err error) {
 	b.mu.Lock()
-	b.ended, b.err = true, err
+	if !b.ended {
+		b.ended, b.err = true, err
+		close(b.endedC)
+	}
 	b.mu.Unlock()
 	b.wake()
+}
+
+// endErr is why the stream ended; call it once endedC is closed.
+func (b *inbox) endErr() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.err
+}
+
+// ended describes the end of a stream for a failed script step.
+func ended(err error) string {
+	if err == nil || errors.Is(err, io.EOF) {
+		return "fakehub: stream ended: the client half-closed (EOF)"
+	}
+	return "fakehub: stream ended: " + err.Error()
 }
 
 // pop waits for the next frame; ok is false, with err, when the stream ended, and timedOut
@@ -335,6 +369,7 @@ func (s *Stream) pump() {
 			first = false
 			if code, msg := checkFirst(m); code != codes.OK {
 				s.Close(code, msg)
+				s.in.end(status.Error(code, msg)) // the script learns of it at once
 				return
 			}
 		}
@@ -385,17 +420,23 @@ func checkFirst(m *hubpb.ClientMessage) (codes.Code, string) {
 // included. It fails the test after 5 s or when the stream has ended.
 func (s *Stream) Recv(t testing.TB) *hubpb.ClientMessage {
 	t.Helper()
+	return s.recvBy(t, time.Now().Add(bound))
+}
+
+// recvBy is Recv, failing the test at deadline.
+func (s *Stream) recvBy(t testing.TB, deadline time.Time) *hubpb.ClientMessage {
+	t.Helper()
 	if len(s.pushed) > 0 {
 		m := s.pushed[0]
 		s.pushed = s.pushed[1:]
 		return m
 	}
-	m, err, timedOut := s.in.pop(bound)
+	m, err, timedOut := s.in.pop(time.Until(deadline))
 	switch {
 	case timedOut:
 		t.Fatalf("fakehub: no frame within %v", bound)
 	case m == nil:
-		t.Fatalf("fakehub: the stream ended before the expected frame: %v", err)
+		t.Fatalf("%s (before the expected frame)", ended(err))
 	}
 	return m
 }
@@ -437,11 +478,13 @@ var knownKinds = map[string]bool{
 }
 
 // recvKind returns the next frame that is not a Heartbeat or an InstanceStatus and fails the
-// test unless it is of the wanted kind.
+// test unless it is of the wanted kind; the 5 s bound covers the whole wait, heartbeats and
+// statuses included.
 func recvKind[T any](t testing.TB, s *Stream, want string, get func(*hubpb.ClientMessage) T) T {
 	t.Helper()
+	deadline := time.Now().Add(bound)
 	for {
-		m := s.Recv(t)
+		m := s.recvBy(t, deadline)
 		switch m.GetMessage().(type) {
 		case *hubpb.ClientMessage_Heartbeat, *hubpb.ClientMessage_Status:
 			continue
@@ -527,8 +570,9 @@ func (s *Stream) Statuses() []*hubpb.InstanceStatus {
 // Nothing fails the test if a frame of one of kinds arrives within d. Kinds are the oneof
 // names in lower case: register, request, reply, heartbeat, permits, part, end, flow, cancel,
 // status, credentials, control_reply. With no kinds it watches every kind except heartbeat and
-// status. Frames of other kinds that arrive meanwhile stay available to Recv. This is the one
-// place the script waits for time to pass, because it asserts an absence.
+// status. Frames of other kinds that arrive meanwhile stay available to Recv. On a stream that
+// ended it returns at once (nothing more can arrive). This is the one place the script waits
+// for time to pass, because it asserts an absence.
 func (s *Stream) Nothing(t testing.TB, d time.Duration, kinds ...string) {
 	t.Helper()
 	watch := map[string]bool{}
@@ -599,13 +643,20 @@ func (s *Stream) Close(code codes.Code, msg string) {
 	})
 }
 
-// HalfClosed fails the test unless the library half-closed its side within d.
+// HalfClosed fails the test unless the library half-closed its side within d; it fails at
+// once when the stream ended otherwise.
 func (s *Stream) HalfClosed(t testing.TB, d time.Duration) {
 	t.Helper()
 	timer := time.NewTimer(d)
 	defer timer.Stop()
 	select {
 	case <-s.halfCl:
+	case <-s.in.endedC:
+		select {
+		case <-s.halfCl: // closed before the end is recorded
+		default:
+			t.Fatalf("%s (no half-close)", ended(s.in.endErr()))
+		}
 	case <-timer.C:
 		t.Fatalf("fakehub: the client did not half-close within %v", d)
 	}

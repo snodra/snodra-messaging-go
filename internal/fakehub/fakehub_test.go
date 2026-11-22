@@ -9,8 +9,10 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"errors"
+	"fmt"
 	"math/big"
 	"net"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -164,16 +166,32 @@ func TestRecvHelperFailsOnAnotherKind(t *testing.T) {
 type fakeT struct {
 	testing.TB
 	failed bool
+	msg    string
 }
 
 func (f *fakeT) Helper() {}
-func (f *fakeT) Fatalf(string, ...any) {
-	f.failed = true
+func (f *fakeT) Fatalf(format string, args ...any) {
+	f.failed, f.msg = true, fmt.Sprintf(format, args...)
 	panic("fatal")
 }
-func (f *fakeT) Fatal(...any) {
-	f.failed = true
+func (f *fakeT) Fatal(args ...any) {
+	f.failed, f.msg = true, fmt.Sprint(args...)
 	panic("fatal")
+}
+
+// fails runs step with a fakeT and returns the failure message, or fails the test when step
+// passed.
+func fails(t *testing.T, step func(testing.TB)) string {
+	t.Helper()
+	ft := &fakeT{TB: t}
+	func() {
+		defer func() { _ = recover() }()
+		step(ft)
+	}()
+	if !ft.failed {
+		t.Fatal("the step passed")
+	}
+	return ft.msg
 }
 
 func TestNothingFailsOnAMatchingKindAndKeepsTheRest(t *testing.T) {
@@ -460,5 +478,85 @@ func TestCredentialsAreRecorded(t *testing.T) {
 	s.RecvRegister(t)
 	if s.RecvCredentials(t) == nil {
 		t.Fatal("no credentials")
+	}
+}
+
+func TestARefusedStreamEndsAtOnceForTheScript(t *testing.T) {
+	hub := Start(t)
+	c := dial(t, hub.Addr())
+	send(t, c, heartbeat(1))
+	is(t, status.Code(recvErr(t, c)), codes.FailedPrecondition)
+	s := hub.Next(t)
+	s.Recv(t) // the offending frame
+	start := time.Now()
+	for name, step := range map[string]func(testing.TB){
+		"Recv":       func(tb testing.TB) { s.Recv(tb) },
+		"HalfClosed": func(tb testing.TB) { s.HalfClosed(tb, 3*time.Second) },
+	} {
+		msg := fails(t, step)
+		if !strings.Contains(msg, "stream ended") || !strings.Contains(msg, "FailedPrecondition") {
+			t.Fatalf("%s: %q", name, msg)
+		}
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("the script learnt of the end after %v", d)
+	}
+	s.Nothing(t, 2*time.Second) // nothing can arrive on an ended stream: passes at once
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("Nothing waited %v on an ended stream", d)
+	}
+}
+
+func TestConnectDoesNotBlockOnAStreamNobodyTakes(t *testing.T) {
+	hub := Start(t, withStreamBuffer(0))
+	conn, err := grpc.NewClient(hub.Addr(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	ctx, cancel := context.WithCancel(t.Context())
+	c, err := hubpb.NewHubClient(conn).Connect(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	send(t, c, register("orders-service", "i-1"))
+	waitUntil(t, func() bool { return hub.connecting.Load() == 1 }) // waiting for Next
+	cancel()
+	waitUntil(t, func() bool { return hub.connecting.Load() == 0 }) // and returned with the client
+}
+
+func waitUntil(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatal("condition not met within 1 s")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestARecvHelperGivesUpAfterFiveSecondsDespiteHeartbeats(t *testing.T) {
+	hub := Start(t)
+	c := dial(t, hub.Addr())
+	send(t, c, register("orders-service", "i-1"))
+	s := hub.Next(t)
+	s.RecvRegister(t)
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() { // a heartbeat every second: each frame comes well within the bound
+		for {
+			select {
+			case <-stop:
+				return
+			case <-time.After(time.Second):
+				_ = c.Send(heartbeat(1))
+			}
+		}
+	}()
+	start := time.Now()
+	msg := fails(t, func(tb testing.TB) { s.RecvReply(tb) })
+	if d := time.Since(start); d > 6*time.Second {
+		t.Fatalf("RecvReply gave up after %v (%s)", d, msg)
 	}
 }
