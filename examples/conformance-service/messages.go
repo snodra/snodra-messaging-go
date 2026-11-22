@@ -57,6 +57,14 @@ type Strict struct {
 // MessageType is the contract's type name.
 func (Strict) MessageType() string { return "conformance.Strict" }
 
+// Guarded is Strict for an authenticated caller only.
+type Guarded struct {
+	Count int64 `json:"count"`
+}
+
+// MessageType is the contract's type name.
+func (Guarded) MessageType() string { return "conformance.Guarded" }
+
 // View asks the instance for its own view of its connections (query).
 type View struct{ json.RawMessage }
 
@@ -155,6 +163,12 @@ type SleepAnswer struct {
 // StrictAnswer is the answer of Strict.
 type StrictAnswer struct {
 	Count int64 `json:"count"`
+}
+
+// GuardedAnswer is the answer of Guarded: the count and the caller's sub.
+type GuardedAnswer struct {
+	Count int64  `json:"count"`
+	User  string `json:"user"`
 }
 
 // ViewAnswer is the answer of View.

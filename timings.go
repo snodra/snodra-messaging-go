@@ -54,6 +54,16 @@ const (
 	outboundLimit = 256
 )
 
+// The checking of the callers' tokens (https://snodra.damoreira.com/library-authors/messages/,
+// Forwarded identity).
+const (
+	// jwksMinRefresh is how often, at most, a token with a key id the cached JWKS does not know
+	// fetches the JWKS again.
+	jwksMinRefresh = 60 * time.Second
+	// jwksFetchTimeout bounds a JWKS fetch.
+	jwksFetchTimeout = 5 * time.Second
+)
+
 // defaultTimings are the shipped values.
 func defaultTimings() timings {
 	return timings{

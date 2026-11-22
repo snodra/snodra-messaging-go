@@ -19,12 +19,16 @@ type env struct {
 	// retry is the policy of every send, from CONFORMANCE_RETRY_MAX_ATTEMPTS and
 	// CONFORMANCE_RETRY_INITIAL_BACKOFF_MS (default 100); nil when the first is not set.
 	retry *snodra.RetryPolicy
+	// jwksURL and issuer check the callers' tokens (CONFORMANCE_JWKS_URL, CONFORMANCE_ISSUER);
+	// without a URL the tokens are read unverified.
+	jwksURL, issuer string
 }
 
 // readEnv reads the environment through getenv; a blank variable is an absent one.
 func readEnv(getenv func(string) string) (env, error) {
 	get := func(name string) string { return strings.TrimSpace(getenv(name)) }
-	e := env{service: get("CONFORMANCE_SERVICE_NAME"), instance: get("CONFORMANCE_INSTANCE_ID"), capacity: 64}
+	e := env{service: get("CONFORMANCE_SERVICE_NAME"), instance: get("CONFORMANCE_INSTANCE_ID"), capacity: 64,
+		jwksURL: get("CONFORMANCE_JWKS_URL"), issuer: get("CONFORMANCE_ISSUER")}
 	for _, h := range strings.Split(get("CONFORMANCE_HUBS"), ",") {
 		if h = strings.TrimSpace(h); h != "" {
 			e.hubs = append(e.hubs, h)
@@ -74,6 +78,9 @@ func (e env) options() []snodra.Option {
 	}
 	if e.retry != nil {
 		opts = append(opts, snodra.DefaultRetry(*e.retry))
+	}
+	if e.jwksURL != "" {
+		opts = append(opts, snodra.JWKS(e.jwksURL, e.issuer))
 	}
 	return opts
 }

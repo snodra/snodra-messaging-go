@@ -57,10 +57,10 @@ func unsupported(reason string) map[string]any {
 
 // unary sends m's target with the library's Send or Query and the options m names.
 func (s *service) unary(ctx context.Context, m Send) map[string]any {
-	if len(m.Headers) > 0 {
-		return unsupported("headers are not supported yet")
-	}
 	var opts []snodra.SendOption
+	for name, value := range m.Headers {
+		opts = append(opts, snodra.Header(name, value))
+	}
 	if m.RoutingKey != nil {
 		opts = append(opts, snodra.RoutingKey(*m.RoutingKey))
 	}

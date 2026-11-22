@@ -19,6 +19,7 @@ type sendConfig struct {
 	priority    int32
 	hasPriority bool
 	retry       *RetryPolicy
+	headers     map[string]string // the caller's own, by Header
 }
 
 // A SendOption configures one [Send] or [Query].
@@ -62,10 +63,14 @@ func NoRetry() SendOption { return Retry(noRetry) }
 //     handler may or may not have run;
 //   - the context's error, when ctx ended first: with [ErrOutcomeUnknown] too once the request was
 //     written, else with [ErrNeverSent];
+//   - [ErrReservedHeader]: a [Header] the library sets itself; nothing was sent;
 //   - another error for a local failure (the message cannot be encoded, the answer not decoded,
 //     an invalid option).
 //
-// A deadline of ctx is the caller's timeout (see [Timeout]). See
+// A deadline of ctx is the caller's timeout (see [Timeout]). Sent while handling a request (with
+// the handler's ctx, or one derived from it), the request carries that request's correlation id,
+// its authorization header (see [ForwardJWT]) and its valid traceparent; outside any handling it
+// carries a new correlation id. See
 // https://snodra.damoreira.com/library-authors/protocol/ (Requests).
 func Send[R any](ctx context.Context, app *App, cmd Message, opts ...SendOption) (R, error) {
 	return request[R](ctx, app, hubpb.RequestKind_COMMAND, cmd, opts)
@@ -92,6 +97,9 @@ func request[R any](ctx context.Context, app *App, kind hubpb.RequestKind, m Mes
 		if o != nil {
 			o(&cfg)
 		}
+	}
+	if err := checkHeaders(cfg.headers, typ); err != nil {
+		return zero, err
 	}
 	if cfg.timeout < 0 {
 		return zero, fmt.Errorf("snodra: the Timeout of %s must not be negative, got %v", typ, cfg.timeout)
@@ -137,6 +145,7 @@ func request[R any](ctx context.Context, app *App, kind hubpb.RequestKind, m Mes
 		Payload:    payload,
 		Priority:   priority,
 		Mode:       hubpb.RequestMode_UNARY,
+		Headers:    outgoingHeaders(ctx, cfg.headers, app.cfg.forwardJWT),
 	}
 	var budget time.Duration
 	if policy.MaxAttempts > 1 {

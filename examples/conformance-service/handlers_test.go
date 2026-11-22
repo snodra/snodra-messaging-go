@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -39,7 +40,7 @@ func started(t *testing.T, e env) (*snodra.App, *fakehub.Hub, *fakehub.Stream) {
 	})
 	s := hub.Next(t)
 	r := s.RecvRegister(t)
-	if got := strings.Join(r.GetCommandTypes(), ","); got != "conformance.Done,conformance.Echo,conformance.Fail,conformance.Relay,conformance.Send,conformance.Sleep,conformance.Strict" {
+	if got := strings.Join(r.GetCommandTypes(), ","); got != "conformance.Done,conformance.Echo,conformance.Fail,conformance.Guarded,conformance.Relay,conformance.Send,conformance.Sleep,conformance.Strict" {
 		t.Fatalf("command types %s", got)
 	}
 	if got := strings.Join(r.GetQueryTypes(), ","); got != "conformance.EchoQuery,conformance.Outcome,conformance.SleepQuery,conformance.View" {
@@ -226,6 +227,32 @@ func TestSendGoesThroughTheLibrary(t *testing.T) {
 		t.Fatalf("outcome %v", out)
 	}
 
+	// Headers through the library's generic header option.
+	s.Send(t, fakehub.Forward(&hubpb.Request{Id: "r-headers", Kind: cmd, Type: "conformance.Send",
+		Payload: []byte(`{"op":"unary","target":"probe","headers":{"x-tenant":"t-1"},"payload":{"mark":"h1"}}`)}))
+	probe, _ = nextFrame(t, s)
+	if probe.GetHeaders()["x-tenant"] != "t-1" {
+		t.Fatalf("the library sent %v", probe)
+	}
+	s.Send(t, &hubpb.ServerMessage{Message: &hubpb.ServerMessage_Reply{Reply: &hubpb.Reply{
+		RequestId: probe.GetId(), Result: &hubpb.Reply_Payload{Payload: []byte(`{}`)}}}})
+	if _, reply = nextFrame(t, s); decode(t, reply)["result"] != "ok" {
+		t.Fatalf("outcome %s", reply.GetPayload())
+	}
+	// A header the library owns: refused, and nothing is sent (the next frame is the answer).
+	for _, name := range []string{"authorization", "CORRELATIONID", "correlation-id", "TraceParent", "tracestate"} {
+		s.Send(t, fakehub.Forward(&hubpb.Request{Id: "r-refused", Kind: cmd, Type: "conformance.Send",
+			Payload: []byte(`{"op":"unary","target":"probe","headers":{"` + name + `":"forged"}}`)}))
+		probe, reply = nextFrame(t, s)
+		if probe != nil {
+			t.Fatalf("%s: the library sent %v", name, probe)
+		}
+		out := decode(t, reply)
+		if e, _ := out["error"].(map[string]any); out["result"] != "error" || e["kind"] != "refused" {
+			t.Fatalf("%s: outcome %v", name, out)
+		}
+	}
+
 	// An op this library cannot do yet.
 	s.Send(t, fakehub.Forward(&hubpb.Request{Id: "r-stream", Kind: cmd, Type: "conformance.Send",
 		Payload: []byte(`{"op":"stream","target":"probe-stream"}`)}))
@@ -262,5 +289,37 @@ func TestRelayFailsWithTheNestedCallsError(t *testing.T) {
 	_, reply = nextFrame(t, s)
 	if out := decode(t, reply); fmt.Sprint(out["reply"]) != "map[ok:true]" {
 		t.Fatalf("Relay answered %v", out)
+	}
+}
+
+// token is a signed-looking token for sub; without a JWKS the service reads it unverified.
+func token(sub string) string {
+	seg := func(v string) string { return base64.RawURLEncoding.EncodeToString([]byte(v)) }
+	return seg(`{"alg":"RS256","typ":"JWT"}`) + "." + seg(`{"sub":"`+sub+`"}`) + "." + seg("signature")
+}
+
+func TestGuardedNeedsAnAcceptedCaller(t *testing.T) {
+	app, _, s := started(t, env{service: "conformance-go", instance: "i-1", capacity: 4})
+	s.Ack(t, fakehub.Ack("hub-1"))
+	ready(t, app)
+	const cmd = hubpb.RequestKind_COMMAND
+	auth := func(sub string) map[string]string { return map[string]string{"authorization": "Bearer " + token(sub)} }
+	if m := decode(t, call(t, s, cmd, "conformance.Guarded", `{"count":2}`, auth("alice"))); m["count"] != float64(2) || m["user"] != "alice" {
+		t.Fatalf("Guarded %v", m)
+	}
+	for _, c := range []struct {
+		payload string
+		headers map[string]string
+		want    hubpb.ErrorCode
+	}{
+		{`{"count":2}`, nil, hubpb.ErrorCode_UNAUTHENTICATED},
+		{`not json`, nil, hubpb.ErrorCode_UNAUTHENTICATED}, // decided before decoding
+		{`{"count":2}`, map[string]string{"authorization": "Bearer not-a-token"}, hubpb.ErrorCode_UNAUTHENTICATED},
+		{`{"count":2}`, auth("conformance-refused"), hubpb.ErrorCode_PERMISSION_DENIED},
+		{`{"count":"not a number"}`, auth("alice"), hubpb.ErrorCode_INVALID_REQUEST},
+	} {
+		if e := call(t, s, cmd, "conformance.Guarded", c.payload, c.headers).GetError(); e.GetCode() != c.want {
+			t.Fatalf("Guarded %s %v: %v, want %v", c.payload, c.headers, e, c.want)
+		}
 	}
 }

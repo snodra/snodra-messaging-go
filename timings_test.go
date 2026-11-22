@@ -22,4 +22,6 @@ func TestDefaultTimings(t *testing.T) {
 	is(t, defaultBudget, 5*s)
 	is(t, retryMinRemaining, 250*ms)
 	is(t, outboundLimit, 256)
+	is(t, jwksMinRefresh, 60*s)
+	is(t, jwksFetchTimeout, 5*s)
 }

@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/snodra/snodra-messaging-go/internal/hubpb"
+	"github.com/snodra/snodra-messaging-go/internal/traceparent"
 )
 
 // dispatch serves a request the hub forwarded on the stream ref, also before its RegisterAck.
@@ -31,12 +32,21 @@ func (a *App) dispatch(req *hubpb.Request, ref *streamRef, permits *streamPermit
 }
 
 // answer is the Reply to req; nil when the app was stopped hard before its handler could run.
+// In order: the caller (a token that fails is UNAUTHENTICATED, whatever the handler), the kind,
+// the handler, its guards, a handler slot, then the decode and the handler.
 func (a *App) answer(req *hubpb.Request) *hubpb.Reply {
 	id := req.GetId()
 	fail := func(code hubpb.ErrorCode, msg string) *hubpb.Reply {
 		return &hubpb.Reply{RequestId: id, Result: &hubpb.Reply_Error{Error: &hubpb.Error{
 			RequestId: id, Code: code, Message: lineBreaks.Replace(msg),
 		}}}
+	}
+	// TODO(spec-gap): SG-18 (every forwarded token is checked, also for a handler without a guard).
+	authorization := req.GetHeaders()[authorizationHeader]
+	caller, err := a.identity.resolve(a.handlerCtx, authorization)
+	if err != nil {
+		a.log.Debug("request refused: its caller's token", "request", id, "type", req.GetType(), "reason", err.Error())
+		return fail(hubpb.ErrorCode_UNAUTHENTICATED, err.Error())
 	}
 	var want handlerKind
 	switch req.GetKind() {
@@ -51,13 +61,33 @@ func (a *App) answer(req *hubpb.Request) *hubpb.Reply {
 	if h == nil || h.kind != want {
 		return fail(hubpb.ErrorCode_NO_HANDLER, noHandlerText(req.GetType()))
 	}
+	// Before decoding: an anonymous caller cannot probe the payload's shape.
+	if code, msg, refused := a.guardRefusal(h.cfg, req.GetType(), caller); refused {
+		return fail(hubpb.ErrorCode(code), msg)
+	}
 	select {
 	case a.slots <- struct{}{}:
 		defer func() { <-a.slots }()
 	case <-a.killed:
 		return nil
 	}
-	payload, werr := a.run(h, req)
+	scope := &handling{
+		info: MessageInfo{
+			ID:            id,
+			Type:          req.GetType(),
+			CorrelationID: req.GetHeaders()[correlationIDHeader],
+			Headers:       maps.Clone(req.GetHeaders()),
+		},
+		authorization: authorization,
+		caller:        caller,
+	}
+	if scope.info.CorrelationID == "" {
+		scope.info.CorrelationID = id
+	}
+	if tp := req.GetHeaders()[traceparentHeader]; traceparent.Valid(tp) {
+		scope.traceparent = tp
+	}
+	payload, werr := a.run(h, req, scope)
 	if werr != nil {
 		return &hubpb.Reply{RequestId: id, Result: &hubpb.Reply_Error{Error: werr}}
 	}
@@ -67,7 +97,7 @@ func (a *App) answer(req *hubpb.Request) *hubpb.Reply {
 // run runs h on req under recover: the answer's payload, or the error to answer. A panic, of
 // the handler or of its error, is HANDLER_ERROR "handler panicked", the reference library's
 // text: the panic value and the stack go to the log only.
-func (a *App) run(h *handler, req *hubpb.Request) (payload []byte, werr *hubpb.Error) {
+func (a *App) run(h *handler, req *hubpb.Request, scope *handling) (payload []byte, werr *hubpb.Error) {
 	defer func() {
 		if r := recover(); r != nil {
 			a.log.Error("handler panicked", "request", req.GetId(), "type", req.GetType(),
@@ -75,16 +105,7 @@ func (a *App) run(h *handler, req *hubpb.Request) (payload []byte, werr *hubpb.E
 			payload, werr = nil, errorToWire(req.GetId(), errors.New("handler panicked"))
 		}
 	}()
-	info := MessageInfo{
-		ID:            req.GetId(),
-		Type:          req.GetType(),
-		CorrelationID: req.GetHeaders()[correlationIDHeader],
-		Headers:       maps.Clone(req.GetHeaders()),
-	}
-	if info.CorrelationID == "" {
-		info.CorrelationID = info.ID
-	}
-	payload, err := h.invoke(withMessageInfo(a.handlerCtx, info), a.cfg.codec, req.GetPayload())
+	payload, err := h.invoke(withHandling(a.handlerCtx, scope), a.cfg.codec, req.GetPayload())
 	if err == nil {
 		return payload, nil
 	}

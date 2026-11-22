@@ -31,6 +31,10 @@ type config struct {
 	retry          *RetryPolicy     // the sends' retry policy; nil: no retry
 	priorities     map[string]int32 // Request.priority by type when a call chooses none
 
+	jwksURL, issuer string // the callers' tokens are verified against them; "": read unverified
+	rolesClaim      string // where a token's roles are; "": roles
+	forwardJWT      bool   // nested requests carry the handled request's authorization header
+
 	// writeHook, when set (tests), runs before a stream's writer takes each frame from the
 	// outbound buffer; ctx ends with the stream.
 	writeHook func(ctx context.Context, m *hubpb.ClientMessage)
@@ -42,6 +46,7 @@ func defaultConfig() config {
 		loadFactor:    100,
 		codec:         JSON,
 		timings:       defaultTimings(),
+		forwardJWT:    true,
 	}
 }
 
@@ -221,6 +226,9 @@ func (c *config) validate() error {
 	if err := checkBackoff(c.timings.backoffMin, c.timings.backoffMax,
 		"ReconnectBackoff, SNODRA_RECONNECT_BACKOFF_MIN_MS / SNODRA_RECONNECT_BACKOFF_MAX_MS"); err != nil {
 		return err
+	}
+	if c.jwksURL != "" && c.issuer == "" {
+		return errors.New("snodra: the issuer is required with the JWKS URL: set it with JWKS or SNODRA_ISSUER")
 	}
 	if c.instance == "" {
 		c.instance = uuid.New()

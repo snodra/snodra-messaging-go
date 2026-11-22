@@ -32,6 +32,10 @@ const defaultHubAddress = "static://snodra-server:7000"
 //     SNODRA_SERVER_RETRY_INITIAL_BACKOFF_MS (100), SNODRA_SERVER_RETRY_MULTIPLIER (2, a finite
 //     number of at least 1) and SNODRA_SERVER_RETRY_MAX_BACKOFF_MS (2000); default false. The
 //     policy variables are checked even when retry is off.
+//   - SNODRA_JWKS_URL, SNODRA_ISSUER: [JWKS] (the issuer is required with the URL; without a URL
+//     tokens are read unverified)
+//   - SNODRA_SECURITY_ROLES_CLAIM: [RolesClaim] (default "roles")
+//   - SNODRA_FORWARD_JWT: [ForwardJWT], true or false (default true)
 func FromEnv() Option {
 	return func(c *config) error { return c.applyEnv(os.Getenv) }
 }
@@ -102,7 +106,31 @@ func (c *config) applyEnv(getenv func(string) string) error {
 		}
 		c.tags = tags
 	}
+	if err := c.applySecurityEnv(get); err != nil {
+		return err
+	}
 	return c.applySendEnv(get)
+}
+
+// applySecurityEnv reads the settings of the callers' tokens.
+func (c *config) applySecurityEnv(get func(string) (string, bool)) error {
+	if v, ok := get("SNODRA_JWKS_URL"); ok {
+		c.jwksURL = v
+	}
+	if v, ok := get("SNODRA_ISSUER"); ok {
+		c.issuer = v
+	}
+	if v, ok := get("SNODRA_SECURITY_ROLES_CLAIM"); ok {
+		c.rolesClaim = v
+	}
+	if v, ok := get("SNODRA_FORWARD_JWT"); ok {
+		on, err := envFlag("SNODRA_FORWARD_JWT", v)
+		if err != nil {
+			return err
+		}
+		c.forwardJWT = on
+	}
+	return nil
 }
 
 // applySendEnv reads the sends' settings.
@@ -134,13 +162,11 @@ func (c *config) applySendEnv(get func(string) (string, bool)) error {
 	}
 	enabled := false
 	if v, ok := get("SNODRA_SERVER_RETRY_ENABLED"); ok {
-		switch strings.ToLower(v) {
-		case "true", "1", "yes":
-			enabled = true
-		case "false", "0", "no":
-		default:
-			return fmt.Errorf("snodra: SNODRA_SERVER_RETRY_ENABLED must be true or false, got %q", v)
+		on, err := envFlag("SNODRA_SERVER_RETRY_ENABLED", v)
+		if err != nil {
+			return err
 		}
+		enabled = on
 	}
 	p := RetryNeverRan
 	if v, ok := get("SNODRA_SERVER_RETRY_MAX_ATTEMPTS"); ok {
@@ -178,6 +204,17 @@ func (c *config) applySendEnv(get func(string) (string, bool)) error {
 		c.retry = &p
 	}
 	return nil
+}
+
+// envFlag reads true (true, 1, yes) or false (false, 0, no), in any letter case.
+func envFlag(name, v string) (bool, error) {
+	switch strings.ToLower(v) {
+	case "true", "1", "yes":
+		return true, nil
+	case "false", "0", "no":
+		return false, nil
+	}
+	return false, fmt.Errorf("snodra: %s must be true or false, got %q", name, v)
 }
 
 // envNumber reads a non-negative integer of at most limit.

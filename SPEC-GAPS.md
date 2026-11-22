@@ -39,6 +39,21 @@ reference library departs from it. In each case this library follows the referen
 - **Question:** should the specification name the budget without a caller's timeout, and the least time left for a
   retry?
 
+### SG-6: forwarded tokens without a JWKS
+
+- **Specification:** [messages.md, Forwarded identity](https://snodra.damoreira.com/library-authors/messages/) says a
+  library "must validate the token before it runs a handler that requires an authenticated caller, exactly as the
+  service validates a REST call (signature against the issuer's JWKS, expiry, issuer)"; it does not say what a
+  service configured without a JWKS does.
+- **Reference library:** without a JWKS URL, reads the claims of a signed token without checking its signature (the
+  caller's `verified` is false), logs a warning once, and lets the guards pass on those claims; it refuses an
+  unsigned token (`alg: none`, or an empty signature) and an encrypted one (five segments) with `UNAUTHENTICATED`. The
+  Kotlin library does the same without a `JwtDecoder`.
+- **This library:** does the same: without `JWKS` (or `SNODRA_JWKS_URL`), `Caller.Verified` is false, the warning
+  is logged once per `App`, and the guards pass on the unverified claims (`identity.go`, `internal/jwt`).
+- **Question:** may a library run a guarded handler on an unverified token, or must a guarded handler refuse every
+  caller when no JWKS is configured?
+
 ### SG-9: the bounds of a shutdown
 
 - **Specification:** [protocol.md, Shutting down](https://snodra.damoreira.com/library-authors/protocol/) fixes one
@@ -103,3 +118,16 @@ reference library departs from it. In each case this library follows the referen
   prefixed message for `CANCELLED`, the hub's message otherwise (`errors.go`).
 - **Question:** should a library keep the hub's message for every code (it is safe to log), or is it free to replace
   it for the codes no handler produces?
+
+### SG-18: a forwarded token that fails, for a handler without a guard
+
+- **Specification:** [messages.md, Forwarded identity](https://snodra.damoreira.com/library-authors/messages/) asks a
+  library to validate the token "before it runs a handler that requires an authenticated caller"; it says nothing of
+  a request that carries a token that fails (unreadable, expired, wrongly signed) to a handler that requires no
+  caller, nor of such a request to a type the instance does not serve.
+- **Reference library:** checks the token of every request first, before it looks the handler up: a token that fails
+  is answered `UNAUTHENTICATED` whatever the handler (also instead of `NO_HANDLER`); a request without a token is an
+  anonymous caller and runs. The Kotlin library does the same.
+- **This library:** does the same (`dispatch.go`, `identity.go`).
+- **Question:** is a failing token `UNAUTHENTICATED` for every handler, or only for a handler that requires an
+  authenticated caller (the others running as if the request carried no token)?

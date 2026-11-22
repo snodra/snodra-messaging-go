@@ -3,6 +3,8 @@ package main
 import (
 	"strings"
 	"testing"
+
+	snodra "github.com/snodra/snodra-messaging-go"
 )
 
 func lookup(vars map[string]string) func(string) string {
@@ -59,5 +61,44 @@ func TestEnvMapsOntoOptions(t *testing.T) {
 		"CONFORMANCE_CAPACITY":     "lots",
 	})); err == nil || !strings.Contains(err.Error(), "CONFORMANCE_CAPACITY") {
 		t.Fatalf("a bad capacity: %v", err)
+	}
+}
+
+func TestEnvReadsTheCallersIssuer(t *testing.T) {
+	base := map[string]string{
+		"CONFORMANCE_SERVICE_NAME": "conformance-go",
+		"CONFORMANCE_INSTANCE_ID":  "i-7",
+		"CONFORMANCE_HUBS":         "127.0.0.1:7000",
+	}
+	with := func(extra map[string]string) map[string]string {
+		vars := map[string]string{}
+		for k, v := range base {
+			vars[k] = v
+		}
+		for k, v := range extra {
+			vars[k] = v
+		}
+		return vars
+	}
+	e, err := readEnv(lookup(with(map[string]string{
+		"CONFORMANCE_JWKS_URL": "http://127.0.0.1:9000/jwks",
+		"CONFORMANCE_ISSUER":   "http://127.0.0.1:9000/conformance",
+	})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.jwksURL != "http://127.0.0.1:9000/jwks" || e.issuer != "http://127.0.0.1:9000/conformance" {
+		t.Fatalf("got %+v", e)
+	}
+	if _, err := snodra.New(e.options()...); err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// The URL without the issuer: the library refuses to start.
+	e, err = readEnv(lookup(with(map[string]string{"CONFORMANCE_JWKS_URL": "http://127.0.0.1:9000/jwks"})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := snodra.New(e.options()...); err == nil {
+		t.Fatal("New accepted a JWKS without an issuer")
 	}
 }

@@ -9,9 +9,15 @@ import (
 )
 
 // handlerConfig is what the [HandlerOption]s of a registration set.
-type handlerConfig struct{}
+type handlerConfig struct {
+	// guards must all accept the caller before the payload is decoded; none: any caller.
+	guards []func(Caller) bool
+	// err is an option's error, returned by the registration.
+	err error
+}
 
-// A HandlerOption configures one handler in [HandleCommand] or [HandleQuery].
+// A HandlerOption configures one handler in [HandleCommand] or [HandleQuery]: its guards
+// ([RequireAuthenticated], [RequireRole], [RequireCaller]).
 type HandlerOption func(*handlerConfig)
 
 // handlerKind is the request kind a handler serves.
@@ -48,7 +54,7 @@ func (e *decodeError) Unwrap() error { return e.err }
 //
 // Handlers are registered before [App.Start]. A registration error (after Start:
 // [ErrRegistrationClosed]; a type registered twice, as a command and a query, an empty type
-// name, an interface type parameter, a nil handler) is returned, and also kept: Start returns
+// name, an interface type parameter, a nil handler, a [RequireCaller] without a function) is returned, and also kept: Start returns
 // every one of them, joined, and does not start.
 // See https://snodra.damoreira.com/library-authors/protocol/ (Handling a request).
 func HandleCommand[C Message, R any](app *App, h func(context.Context, C) (R, error), opts ...HandlerOption) error {
@@ -74,6 +80,9 @@ func register[M Message, R any](app *App, kind handlerKind, h func(context.Conte
 		if o != nil {
 			o(&cfg)
 		}
+	}
+	if err == nil && cfg.err != nil {
+		err = fmt.Errorf("%w (%s)", cfg.err, name)
 	}
 	return app.addHandler(&handler{kind: kind, name: name, invoke: invokerOf(h), cfg: cfg}, err)
 }

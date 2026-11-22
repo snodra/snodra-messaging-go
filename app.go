@@ -46,6 +46,7 @@ type App struct {
 	handlers                 map[string]*handler
 	commandTypes, queryTypes []string
 	calls                    *pendingCalls // the sent requests awaiting their answer
+	identity                 *identityResolver
 
 	drainMu    sync.Mutex
 	drainUntil time.Time // when the shutdown's handler drain ends; zero before it
@@ -91,9 +92,10 @@ func New(opts ...Option) (*App, error) {
 		return nil, err
 	}
 	hctx, cancel := context.WithCancel(context.Background())
+	log := cfg.logger.With("service", cfg.service, "instance", cfg.instance)
 	return &App{
 		cfg:            cfg,
-		log:            cfg.logger.With("service", cfg.service, "instance", cfg.instance),
+		log:            log,
 		ready:          make(chan struct{}),
 		stopped:        make(chan struct{}),
 		closed:         make(chan struct{}),
@@ -104,6 +106,7 @@ func New(opts ...Option) (*App, error) {
 		inflight:       newInflight(),
 		handlers:       map[string]*handler{},
 		calls:          newPendingCalls(),
+		identity:       newIdentityResolver(cfg, log),
 	}, nil
 }
 

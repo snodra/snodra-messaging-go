@@ -20,15 +20,45 @@ type MessageInfo struct {
 // (https://snodra.damoreira.com/library-authors/messages/).
 const correlationIDHeader = "correlationId"
 
-type messageInfoKey struct{}
+// handling is what the dispatcher puts in a handler's context: the request being handled, what
+// the requests sent while handling it carry on, and its caller.
+type handling struct {
+	info MessageInfo
+	// authorization is the request's authorization header as it came ("Bearer <token>").
+	authorization string
+	// traceparent is the request's traceparent header when it is valid, else "".
+	traceparent string
+	// caller is who sent the request; nil for an anonymous caller.
+	caller *Caller
+}
+
+type handlingKey struct{}
+
+func withHandling(ctx context.Context, h *handling) context.Context {
+	return context.WithValue(ctx, handlingKey{}, h)
+}
+
+// handlingFrom is the request ctx is handling; nil outside a handler.
+func handlingFrom(ctx context.Context) *handling {
+	h, _ := ctx.Value(handlingKey{}).(*handling)
+	return h
+}
 
 // MessageFrom returns what the handler's context says of the request being handled, and false
 // outside a handler.
 func MessageFrom(ctx context.Context) (MessageInfo, bool) {
-	info, ok := ctx.Value(messageInfoKey{}).(MessageInfo)
-	return info, ok
+	if h := handlingFrom(ctx); h != nil {
+		return h.info, true
+	}
+	return MessageInfo{}, false
 }
 
-func withMessageInfo(ctx context.Context, info MessageInfo) context.Context {
-	return context.WithValue(ctx, messageInfoKey{}, info)
+// CallerFrom returns who sent the request being handled, read from its forwarded token, and
+// false for an anonymous caller (the request carried no token) and outside a handler. Do not
+// change the returned Roles.
+func CallerFrom(ctx context.Context) (Caller, bool) {
+	if h := handlingFrom(ctx); h != nil && h.caller != nil {
+		return *h.caller, true
+	}
+	return Caller{}, false
 }

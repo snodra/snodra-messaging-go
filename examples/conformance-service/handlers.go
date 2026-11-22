@@ -29,6 +29,8 @@ func registerHandlers(app *snodra.App, e env) error {
 		snodra.HandleQuery(app, func(ctx context.Context, m SleepQuery) (SleepAnswer, error) { return s.sleep(ctx, m.Ms) }),
 		snodra.HandleCommand(app, s.fail),
 		snodra.HandleCommand(app, func(_ context.Context, m Strict) (StrictAnswer, error) { return StrictAnswer(m), nil }),
+		// An authenticated caller, and not the subject the contract names as refused.
+		snodra.HandleCommand(app, guarded, snodra.RequireCaller(func(c snodra.Caller) bool { return c.Subject != "conformance-refused" })),
 		snodra.HandleCommand(app, s.relay),
 		snodra.HandleCommand(app, func(ctx context.Context, m Send) (json.RawMessage, error) { return s.send(ctx, m) }),
 		snodra.HandleQuery(app, func(ctx context.Context, m Outcome) (json.RawMessage, error) { return s.outcome(ctx, m) }),
@@ -43,6 +45,13 @@ func (s *service) echo(ctx context.Context, payload []byte) EchoAnswer {
 		a.RequestID = info.ID
 	}
 	return a
+}
+
+// guarded answers the count and the caller's subject; its guard ran before the payload was
+// decoded.
+func guarded(ctx context.Context, m Guarded) (GuardedAnswer, error) {
+	c, _ := snodra.CallerFrom(ctx)
+	return GuardedAnswer{Count: m.Count, User: c.Subject}, nil
 }
 
 func (s *service) sleep(ctx context.Context, ms int64) (SleepAnswer, error) {
