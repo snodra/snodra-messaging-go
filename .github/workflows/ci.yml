@@ -1,0 +1,60 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 1.27.x
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.15.0
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go-version: [1.26.x, 1.27.x]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go-version }}
+      - run: go test -race ./...
+
+  proto-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: snodra/snodra-server
+          ref: ${{ vars.SNODRA_SERVER_REF || 'main' }}
+          path: snodra-server
+      - run: bash scripts/check-proto-sync.sh
+        env:
+          SNODRA_PROTO_SOURCE: ${{ github.workspace }}/snodra-server/proto/hub.proto
+          SNODRA_PROTO_SYNC_REQUIRED: "true"
+
+  generated:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 1.27.x
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: "33.4"
+      - run: bash scripts/gen-proto.sh
+      - run: git diff --exit-code internal/hubpb
