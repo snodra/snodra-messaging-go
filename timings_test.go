@@ -42,4 +42,6 @@ func TestDefaultTimings(t *testing.T) {
 	is(t, d.tokenFetchWait, 11*s)
 	is(t, d.creditWait, 10*time.Minute)
 	is(t, defaultCredit, uint32(64))
+	is(t, defaultMaxSubscriptions, 1024)
+	is(t, defaultConfig().maxSubscriptions, 1024)
 }

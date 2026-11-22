@@ -17,15 +17,16 @@ import (
 
 // config is what the options set; New validates it.
 type config struct {
-	service       string
-	instance      string
-	hubs          []string // host:port, in order, without repeats
-	maxConcurrent int
-	loadFactor    uint32
-	tags          map[string]string
-	logger        *slog.Logger
-	codec         PayloadCodec
-	timings       timings
+	service          string
+	instance         string
+	hubs             []string // host:port, in order, without repeats
+	maxConcurrent    int
+	maxSubscriptions int // the subscriptions served at once ([MaxSubscriptions])
+	loadFactor       uint32
+	tags             map[string]string
+	logger           *slog.Logger
+	codec            PayloadCodec
+	timings          timings
 
 	defaultTimeout time.Duration    // the sends' timeout when a call chooses none; 0: none
 	retry          *RetryPolicy     // the sends' retry policy; nil: no retry
@@ -54,11 +55,12 @@ func (c config) Format(f fmt.State, _ rune) {
 
 func defaultConfig() config {
 	return config{
-		maxConcurrent: 256,
-		loadFactor:    100,
-		codec:         JSON,
-		timings:       defaultTimings(),
-		forwardJWT:    true,
+		maxConcurrent:    256,
+		maxSubscriptions: defaultMaxSubscriptions,
+		loadFactor:       100,
+		codec:            JSON,
+		timings:          defaultTimings(),
+		forwardJWT:       true,
 	}
 }
 

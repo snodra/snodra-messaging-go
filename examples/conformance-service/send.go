@@ -50,8 +50,10 @@ func (s *service) run(ctx context.Context, m Send) map[string]any {
 		out = s.scatter(ctx, m)
 	case "stream":
 		out = s.stream(ctx, m)
+	case "subscribe":
+		out = s.subscribe(ctx, m)
 	default:
-		out = unsupported("op " + m.Op + " is not supported yet")
+		out = unsupported("op " + m.Op + " is not a contract op")
 	}
 	out["elapsedMs"] = time.Since(start).Milliseconds()
 	return out
@@ -176,6 +178,36 @@ func (s *service) stream(ctx context.Context, m Send) map[string]any {
 		return unsupported("target " + m.Target + " is not a streaming target")
 	}
 	return readItems(ctx, items, m, nil)
+}
+
+// subscribe subscribes to m's target with the library's Subscribe and the options m names, and
+// reads its initial result and its updates as stream reads a stream's items (read counting the
+// initial result), closing the subscription when it stops.
+func (s *service) subscribe(ctx context.Context, m Send) map[string]any {
+	opts := options(m)
+	var (
+		sub *snodra.Subscription[json.RawMessage, json.RawMessage]
+		err error
+	)
+	switch m.Target {
+	case "probe-watch":
+		sub, err = snodra.Subscribe[json.RawMessage, json.RawMessage](ctx, s.app, ProbeWatch{m.Payload}, opts...)
+	case "watch":
+		var q Watch
+		if len(m.Payload) > 0 {
+			if err := json.Unmarshal(m.Payload, &q); err != nil {
+				return unsupported("payload of conformance.Watch: " + err.Error())
+			}
+		}
+		sub, err = snodra.Subscribe[json.RawMessage, json.RawMessage](ctx, s.app, q, opts...)
+	default:
+		return unsupported("target " + m.Target + " is not a subscription target")
+	}
+	if err != nil {
+		return map[string]any{"result": "error", "error": classify(err), "items": []json.RawMessage{}}
+	}
+	defer sub.Close()
+	return readItems(ctx, sub.Updates(), m, []json.RawMessage{sub.Initial})
 }
 
 // readItems ranges over items after got (a subscription's initial result), waiting readDelayMs

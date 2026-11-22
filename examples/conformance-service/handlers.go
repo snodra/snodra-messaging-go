@@ -12,16 +12,23 @@ import (
 
 // service holds what the handlers answer with.
 type service struct {
-	app *snodra.App
-	env env
-	ops *operations // the asynchronous conformance.Send calls
+	app     *snodra.App
+	env     env
+	ops     *operations            // the asynchronous conformance.Send calls
+	watches *snodra.Updates[Watch] // the conformance.Watch subscriptions served here
 }
 
 // registerHandlers registers every type of the conformance contract the service handles so
 // far, as an application would.
 func registerHandlers(app *snodra.App, e env) error {
 	s := &service{app: app, env: e, ops: newOperations()}
+	watches, err := snodra.HandleSubscription(app, func(_ context.Context, m Watch) (WatchInitial, error) {
+		return WatchInitial{Topic: m.Topic, Value: 0, InstanceID: e.instance}, nil
+	})
+	s.watches = watches
 	return errors.Join(
+		err,
+		snodra.HandleCommand(app, s.emit),
 		snodra.HandleCommand(app, func(ctx context.Context, m Echo) (EchoAnswer, error) { return s.echo(ctx, m.RawMessage), nil }),
 		snodra.HandleQuery(app, func(ctx context.Context, m EchoQuery) (EchoAnswer, error) { return s.echo(ctx, m.RawMessage), nil }),
 		snodra.HandleCommand(app, func(context.Context, Done) (snodra.Empty, error) { return snodra.Empty{}, nil }),
@@ -120,12 +127,28 @@ func (s *service) relay(ctx context.Context, m Relay) (RelayAnswer, error) {
 	return RelayAnswer{Reply: reply}, nil
 }
 
+// emit emits each value to the Watch subscriptions of the topic, then completes or fails them.
+func (s *service) emit(_ context.Context, m Emit) (snodra.Empty, error) {
+	ofTopic := func(w Watch) bool { return w.Topic == m.Topic }
+	for _, v := range m.Values {
+		s.watches.Emit(ofTopic, WatchUpdate{Topic: m.Topic, Value: v})
+	}
+	switch {
+	case m.Fail != nil:
+		s.watches.Fail(ofTopic, errors.New(*m.Fail))
+	case m.Complete:
+		s.watches.Complete(ofTopic)
+	}
+	return snodra.Empty{}, nil
+}
+
 func (s *service) view(context.Context, View) (ViewAnswer, error) {
 	a := ViewAnswer{
-		Service:    s.env.service,
-		InstanceID: s.env.instance,
-		HubIDs:     s.app.HubIDs(),
-		Retry:      s.env.retry != nil,
+		Service:             s.env.service,
+		InstanceID:          s.env.instance,
+		HubIDs:              s.app.HubIDs(),
+		SubscriptionsServed: s.app.SubscriptionsServed(),
+		Retry:               s.env.retry != nil,
 	}
 	if a.HubIDs == nil {
 		a.HubIDs = []string{}

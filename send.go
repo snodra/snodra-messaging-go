@@ -25,7 +25,7 @@ type sendConfig struct {
 	initialCredit uint32
 }
 
-// A SendOption configures one [Send], [Query], [Gather] or [Stream].
+// A SendOption configures one [Send], [Query], [Gather], [Stream] or [Subscribe].
 type SendOption func(*sendConfig)
 
 // RoutingKey sends the request with key (Request.routing_key): commands of one type with the
@@ -53,9 +53,10 @@ func Retry(p RetryPolicy) SendOption { return func(c *sendConfig) { c.retry = &p
 // NoRetry sends this call once, whatever [DefaultRetry] says.
 func NoRetry() SendOption { return Retry(noRetry) }
 
-// MaxResults ends a [Gather] after n successful parts, or a [Stream] after n items
-// (Request.max_results): the hub sends the end then and cancels the targets or the handler still
-// working. 0, the default, is no limit. [Send] and [Query] ignore it.
+// MaxResults ends a [Gather] after n successful parts, a [Stream] after n items, or a
+// [Subscribe] after n updates, the initial result not counted (Request.max_results): the hub
+// sends the end then and cancels the targets or the handler still working. 0, the default, is
+// no limit. [Send] and [Query] ignore it.
 func MaxResults(n uint32) SendOption { return func(c *sendConfig) { c.maxResults = n } }
 
 // Send sends the command cmd through a hub to the instance that handles its type and returns the
@@ -212,8 +213,9 @@ func prepare(ctx context.Context, app *App, kind hubpb.RequestKind, mode hubpb.R
 		// the reference library.
 		tmpl.RoutingKey = ""
 		tmpl.MaxResults = cfg.maxResults
-	case hubpb.RequestMode_STREAMING:
-		// A stream goes to a hub unkeyed and carries no routing key, as in the reference library.
+	case hubpb.RequestMode_STREAMING, hubpb.RequestMode_SUBSCRIPTION:
+		// A stream or a subscription goes to a hub unkeyed and carries no routing key, as in the
+		// reference library.
 		tmpl.RoutingKey = ""
 		tmpl.MaxResults = cfg.maxResults
 		tmpl.InitialCredit = cfg.initialCredit

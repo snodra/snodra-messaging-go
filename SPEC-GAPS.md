@@ -50,7 +50,7 @@ reference library departs from it. In each case this library follows the referen
   at the forward). When a guard fires the stream fails with `TIMEOUT` and is cancelled at the hub
   (`Cancel{reason "local guard timeout"}`), so that the handler stops holding its permit. A subscription's guard
   covers its initial result only (the bound plus 1 s).
-- **This library:** does the same for streams (`stream_client.go`); subscriptions come with them.
+- **This library:** does the same (`stream_client.go`, `subscribe.go`).
 - **Question:** should the specification size the guards of a stream (first part and idle) as it sizes the unary one?
 
 ### SG-5: when a JWT is renewed
@@ -149,8 +149,31 @@ reference library departs from it. In each case this library follows the referen
   (mode STREAMING)"}` (the Kotlin library does both too). A streaming request of a type not served, or of a command
   type, is `ReplyEnd{error = NO_HANDLER}`.
 - **This library:** does the same, naming its own call in the second text (`dispatch.go`).
+- **Subscriptions:** the reference library answers a subscription request to a unary query handler or to a streaming
+  handler with `ReplyEnd{error = INVALID_REQUEST "<type> is not a subscription query handler (it answers mode UNARY)"}`
+  (or `STREAMING`), one of a type not served or of a command type with `ReplyEnd{error = NO_HANDLER}`, and a
+  streaming request to a subscription handler with `ReplyEnd{error = NO_HANDLER}` (it looks for a streaming handler
+  only). The Kotlin library answers a subscription request of a type it does not serve as a subscription with
+  `INVALID_REQUEST` "no subscription handler for <type> on this instance". This library does what the reference
+  library does (`subscription_handler.go`, `dispatch.go`).
 - **Question:** is the hub's relay of a unary `Reply` only for other clients, so that a library must refuse the wrong
-  mode both ways, or should a unary query handler answer a streaming request with one part?
+  mode both ways, or should a unary query handler answer a streaming request with one part? And which code answers a
+  request of a mode no handler of the type serves (`INVALID_REQUEST` throughout, or `NO_HANDLER` where no handler of
+  that mode exists)?
+
+### SG-13: the initial request of a subscription and scatter-gather target ids
+
+- **Specification:** [protocol.md, Subscription](https://snodra.damoreira.com/library-authors/protocol/) says the
+  handler of a subscription type "recognises the initial request by its `#0` id and answers any other unary request
+  with `ErrorCode.INVALID_REQUEST`"; [Scatter-gather](https://snodra.damoreira.com/library-authors/protocol/) numbers
+  the targets `<id>#0`, `<id>#1`, ... too.
+- **Reference library:** recognises the initial request by the `#0` suffix alone, as the specification says, and
+  notes the collision: a scatter-gather of a subscription type would have its target `<id>#0` answered with the
+  initial result (and the other targets with `INVALID_REQUEST`). Only a raw client can send one: the typed calls never
+  gather a subscription type. The Kotlin library recognises it by the suffix alone too.
+- **This library:** does what the reference library does (`dispatch.go`).
+- **Question:** should the initial request carry something no scatter-gather target can (its own mode, or a header),
+  or should the hub refuse a scatter-gather of a subscription type?
 
 ### SG-15: a live stream closed with a refusal code
 
@@ -255,7 +278,9 @@ reference library departs from it. In each case this library follows the referen
 - **Reference library:** retries a stream with the policy of a unary query, for the same errors, only until its first
   part, a clean end or an error it does not retry; a retry is a new stream with a fresh id that sends the caller's
   chosen idle timeout again, not what is left of the budget (the budget only bounds when a retry may start). After the
-  first part nothing is retried. The Kotlin library does the same.
+  first part nothing is retried. The Kotlin library does the same. A subscription is retried the same way until its
+  initial result, but each attempt sends what is left of the budget, as a unary request does: there
+  `Request.timeout_ms` bounds the initial result only.
 - **This library:** does the same (`stream_client.go`).
 - **Question:** should a retried stream send the remaining budget, as a unary request does, or its idle timeout
   unchanged; and should the specification say that a stream is retried only before its first part?

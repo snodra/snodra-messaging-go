@@ -35,6 +35,9 @@ type env struct {
 	// creditTimeout bounds a streaming handler's wait for credit
 	// (CONFORMANCE_STREAM_CREDIT_TIMEOUT_MS); 0: the library's default.
 	creditTimeout time.Duration
+	// maxSubscriptions is how many subscriptions the instance serves at once
+	// (CONFORMANCE_MAX_SUBSCRIPTIONS); 0: the library's default.
+	maxSubscriptions int
 }
 
 // readEnv reads the environment through getenv; a blank variable is an absent one.
@@ -76,6 +79,13 @@ func readEnv(getenv func(string) string) (env, error) {
 			return env{}, fmt.Errorf("CONFORMANCE_STREAM_CREDIT_TIMEOUT_MS must be a positive integer, got %q", v)
 		}
 		e.creditTimeout = time.Duration(ms) * time.Millisecond
+	}
+	if v := get("CONFORMANCE_MAX_SUBSCRIPTIONS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			return env{}, fmt.Errorf("CONFORMANCE_MAX_SUBSCRIPTIONS must be a positive integer, got %q", v)
+		}
+		e.maxSubscriptions = n
 	}
 	if v := get("CONFORMANCE_RETRY_MAX_ATTEMPTS"); v != "" {
 		n, err := strconv.Atoi(v)
@@ -121,6 +131,9 @@ func (e env) options() []snodra.Option {
 	}
 	if e.clientCert != "" || e.clientKey != "" {
 		opts = append(opts, snodra.ClientCertificate(e.clientCert, e.clientKey))
+	}
+	if e.maxSubscriptions > 0 {
+		opts = append(opts, snodra.MaxSubscriptions(e.maxSubscriptions))
 	}
 	if e.creditTimeout > 0 {
 		opts = append(opts, snodra.StreamCreditTimeout(e.creditTimeout))

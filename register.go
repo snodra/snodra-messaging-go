@@ -18,16 +18,18 @@ type handlerConfig struct {
 	err error
 }
 
-// A HandlerOption configures one handler in [HandleCommand], [HandleQuery] or [HandleStream]:
-// its guards ([RequireAuthenticated], [RequireRole], [RequireCaller]) and, for a query or a
-// streaming query, [Shared].
+// A HandlerOption configures one handler in [HandleCommand], [HandleQuery], [HandleStream] or
+// [HandleSubscription]: its guards ([RequireAuthenticated], [RequireRole], [RequireCaller]) and,
+// for a query, a streaming query or a subscription query, [Shared].
 type HandlerOption func(*handlerConfig)
 
 // Shared registers a query type as shared (Register.shared_query_types): many services may own
 // it, each answering point queries on it like any query, and a [Gather] asks every instance of
 // every owner. Every owner must register it shared: the hub refuses a type one registrant
 // lists as exclusive and another as shared. A streaming query ([HandleStream]) may be shared
-// too. Commands are never shared: [HandleCommand] with Shared returns an error.
+// too, and so may a subscription query ([HandleSubscription]): a subscription then reaches every
+// instance of every owner. Commands are never shared: [HandleCommand] with Shared returns an
+// error.
 // See https://snodra.damoreira.com/library-authors/protocol/ (Shared query types).
 func Shared() HandlerOption { return func(c *handlerConfig) { c.shared = true } }
 
@@ -37,10 +39,13 @@ type handlerKind int
 const (
 	kindCommand handlerKind = iota
 	kindQuery
-	kindStream // a streaming query: Register.query_types, served in mode STREAMING
+	kindStream       // a streaming query: Register.query_types, served in mode STREAMING
+	kindSubscription // a subscription query: Register.query_types, served in mode SUBSCRIPTION
 )
 
-func (k handlerKind) String() string { return [...]string{"command", "query", "streaming query"}[k] }
+func (k handlerKind) String() string {
+	return [...]string{"command", "query", "streaming query", "subscription query"}[k]
+}
 
 // invoker runs a handler on a payload: decoded with the codec, encoded back. A payload that
 // does not decode is a *decodeError.
@@ -50,12 +55,17 @@ type invoker func(ctx context.Context, codec PayloadCodec, payload []byte) ([]by
 // does not decode is a *decodeError.
 type streamInvoker func(ctx context.Context, codec PayloadCodec, payload []byte, out *streamOut) error
 
+// queryDecoder decodes a subscription query's payload into the registered type, for the
+// matches of [Updates]. A payload that does not decode is a *decodeError.
+type queryDecoder func(codec PayloadCodec, payload []byte) (any, error)
+
 // handler is a registered handler of one type.
 type handler struct {
 	kind   handlerKind
 	name   string
-	invoke invoker       // a command or a query
+	invoke invoker       // a command, a query, or a subscription query's initial result
 	stream streamInvoker // a streaming query
+	decode queryDecoder  // a subscription query
 	cfg    handlerConfig
 }
 

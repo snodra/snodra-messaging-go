@@ -134,6 +134,39 @@ type StreamItem struct {
 	N int64 `json:"n"`
 }
 
+// Watch is the contract's subscription query: by Topic.
+type Watch struct {
+	Topic string `json:"topic"`
+}
+
+// MessageType is the contract's type name.
+func (Watch) MessageType() string { return "conformance.Watch" }
+
+// WatchInitial is the initial result of Watch.
+type WatchInitial struct {
+	Topic      string `json:"topic"`
+	Value      int    `json:"value"`
+	InstanceID string `json:"instanceId"`
+}
+
+// WatchUpdate is an update of Watch: any JSON value.
+type WatchUpdate struct {
+	Topic string          `json:"topic"`
+	Value json.RawMessage `json:"value"`
+}
+
+// Emit emits each of Values to every Watch of Topic this instance serves, then completes them
+// (Complete) or fails them (Fail, a message).
+type Emit struct {
+	Topic    string            `json:"topic"`
+	Values   []json.RawMessage `json:"values,omitempty"`
+	Complete bool              `json:"complete,omitempty"`
+	Fail     *string           `json:"fail,omitempty"`
+}
+
+// MessageType is the contract's type name.
+func (Emit) MessageType() string { return "conformance.Emit" }
+
 // The runner's types, sent by conformance.Send and Relay; their payload passes through as it
 // is (the runner scripts its answers with it).
 
@@ -154,6 +187,12 @@ type ProbeStream struct{ json.RawMessage }
 
 // MessageType is the contract's type name.
 func (ProbeStream) MessageType() string { return "conformance.runner.ProbeStream" }
+
+// ProbeWatch is the runner's subscription query.
+type ProbeWatch struct{ json.RawMessage }
+
+// MessageType is the contract's type name.
+func (ProbeWatch) MessageType() string { return "conformance.runner.ProbeWatch" }
 
 // Missing is a command nobody serves.
 type Missing struct{ json.RawMessage }

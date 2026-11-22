@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"runtime/debug"
+	"strings"
 	"sync"
 
 	"github.com/snodra/snodra-messaging-go/internal/hubpb"
@@ -21,6 +22,11 @@ import (
 // finished: a streaming request holds it until its end.
 // See https://snodra.damoreira.com/library-authors/protocol/ (Handling a request).
 func (a *App) dispatch(req *hubpb.Request, ref *streamRef, permits *streamPermits) {
+	if req.GetMode() == hubpb.RequestMode_SUBSCRIPTION {
+		// A subscription target is passive: no permit, no handler slot, not in flight.
+		a.subscribe(req, ref)
+		return
+	}
 	permits.arrived()
 	a.inflight.add()
 	var credit *streamCredit
@@ -51,13 +57,17 @@ func (a *App) dispatch(req *hubpb.Request, ref *streamRef, permits *streamPermit
 // scatter-gather target or a streaming request, say): the handler's context is cancelled and
 // nothing more is sent for the request, whatever the handler returns or streams; its permit goes
 // back once the handler returned (at once for a handler that watches its context, or one still
-// waiting for a handler slot). A Cancel for an id that is not running (it already ended) is
-// ignored.
+// waiting for a handler slot). A subscription target (<id>#n) is removed: nothing more is
+// emitted to it. A Cancel for an id that is not running (it already ended) is ignored.
 // See https://snodra.damoreira.com/library-authors/protocol/ (Cancel).
 func (a *App) cancelRequest(id, reason string) {
 	if run := a.running.take(id); run != nil {
 		a.log.Debug("request cancelled by the hub", "request", id, "reason", reason)
 		run.cancelRun()
+		return
+	}
+	if a.subs.cancel(id) {
+		a.log.Debug("subscription cancelled by the hub", "request", id, "reason", reason)
 		return
 	}
 	a.log.Debug("cancel for an unknown request ignored", "request", id, "reason", reason)
@@ -258,6 +268,17 @@ func (a *App) lookup(req *hubpb.Request, streaming bool) (*handler, hubpb.ErrorC
 	switch {
 	case h == nil || h.kind == kindCommand:
 		return nil, hubpb.ErrorCode_NO_HANDLER, noHandlerText(typ)
+	case streaming && h.kind == kindSubscription:
+		// As in the reference library: no streaming handler of the type.
+		return nil, hubpb.ErrorCode_NO_HANDLER, noHandlerText(typ)
+	case !streaming && h.kind == kindSubscription:
+		// A subscription's initial result is the unary request <id>#0, answered by the
+		// subscription's initial handler; any other unary request used the wrong call.
+		// TODO(spec-gap): SG-13 (recognised by the #0 suffix alone, which scatter-gather target ids share).
+		if strings.HasSuffix(req.GetId(), "#0") {
+			return h, 0, ""
+		}
+		return nil, hubpb.ErrorCode_INVALID_REQUEST, typ + " is a subscription query: send it with Subscribe (mode SUBSCRIPTION)"
 	case streaming && h.kind != kindStream:
 		// TODO(spec-gap): SG-12 (a streaming request to a unary query handler is INVALID_REQUEST).
 		return nil, hubpb.ErrorCode_INVALID_REQUEST, typ + " is not a streaming query handler (it answers mode UNARY)"

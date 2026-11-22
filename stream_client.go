@@ -2,6 +2,7 @@ package snodra
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"sync"
@@ -11,10 +12,11 @@ import (
 	"github.com/snodra/snodra-messaging-go/internal/uuid"
 )
 
-// InitialCredit is a [Stream]'s credit window (Request.initial_credit): the items the handler
-// may send before the first refill. The stream gives back half of it every time half of it was
-// read, so the handler never runs more than a window ahead of the caller. 0, the default, reads
-// as 64. The other calls ignore it.
+// InitialCredit is the credit window of a [Stream] or a [Subscribe] (Request.initial_credit):
+// the parts the hub may relay before the first refill (a subscription's initial result
+// included). The caller gives back half of it every time half of it was read, so the hub never
+// relays more than a window ahead of the caller. 0, the default, reads as 64. The other calls
+// ignore it.
 func InitialCredit(n uint32) SendOption { return func(c *sendConfig) { c.initialCredit = n } }
 
 // Stream streams the result of the streaming query q from one instance of its owner ([HandleStream]
@@ -130,31 +132,42 @@ func (b *streamInbox) pop() (streamEvent, bool) {
 	return e, true
 }
 
-// streaming is one streaming query written (or being written) to a hub stream: its parts as they
-// arrive, checked, then its end. Flow and Cancel go to the stream it was written to.
+// streaming is one streaming query or subscription written (or being written) to a hub stream:
+// its parts as they arrive, checked, then its end. Flow and Cancel go to the stream it was
+// written to.
 type streaming struct {
 	app      *App
 	typ      string
 	c        *call
 	ref      *streamRef
-	guard    time.Duration // the idle guard: the hub's bound plus 1 s
-	refill   uint32        // the credit given back every time that many items were read
-	first    bool          // no part arrived yet
-	received uint64        // parts received: the next must carry seq received+1
-	read     uint32        // items read since the last refill
-	done     bool          // ended: nothing more to read, nothing to cancel
+	what     string          // "stream" or "subscription", for the errors
+	closed   <-chan struct{} // a subscription's Close; nil for a stream
+	guard    time.Duration   // the hub's bound plus 1 s: a stream's idle guard, a subscription's for its initial part
+	refill   uint32          // the credit given back every time that many items were read
+	first    bool            // no part arrived yet
+	received uint64          // parts received: the next must carry seq received+1
+	read     uint32          // items read since the last refill
+	done     bool            // ended: nothing more to read, nothing to cancel
 }
 
-// openStream writes a new streaming query of tmpl (fresh id, idle timeout chosen) to a hub.
+// openStream writes a new streaming query or subscription of tmpl (fresh id, timeout chosen) to
+// a hub.
 func (a *App) openStream(ctx context.Context, tmpl *hubpb.Request, chosen time.Duration) (*streaming, error) {
 	c := &call{id: uuid.New(), inbox: newStreamInbox()}
 	ref, guard, err := a.write(ctx, tmpl, chosen, c)
 	if err != nil {
 		return nil, err
 	}
-	return &streaming{app: a, typ: tmpl.GetType(), c: c, ref: ref, guard: guard,
+	what := "stream"
+	if tmpl.GetMode() == hubpb.RequestMode_SUBSCRIPTION {
+		what = "subscription"
+	}
+	return &streaming{app: a, typ: tmpl.GetType(), c: c, ref: ref, what: what, guard: guard,
 		refill: max(1, tmpl.GetInitialCredit()/2), first: true}, nil
 }
+
+// errClosed ends the reading of a subscription its owner closed.
+var errClosed = errors.New("snodra: the subscription is closed")
 
 // firstPartGuard is the local guard of a stream's first part, from its idle guard: twice the
 // hub's bound plus 1 s (the hub bounds a queue wait by the timeout, then starts its idle clock
@@ -164,7 +177,8 @@ func firstPartGuard(idle time.Duration) time.Duration {
 	return idle + max(idle-guardMargin, 0)
 }
 
-// next is the stream's next part; nil at its clean end. An error ends the stream.
+// next is the stream's next part; nil at its clean end. An error ends the stream; errClosed
+// is a subscription its owner closed (it is not cancelled here).
 func (s *streaming) next(ctx context.Context) (*hubpb.ReplyPart, error) {
 	if s.done {
 		return nil, nil
@@ -174,12 +188,17 @@ func (s *streaming) next(ctx context.Context) (*hubpb.ReplyPart, error) {
 	if ctx.Err() != nil {
 		return nil, s.dropped(ctx)
 	}
-	wait := s.guard
-	if s.first {
-		wait = firstPartGuard(s.guard)
+	select {
+	case <-s.closed:
+		return nil, errClosed
+	default:
 	}
-	timer := time.NewTimer(wait)
-	defer timer.Stop()
+	var expired <-chan time.Time
+	if wait, ok := s.guardNow(); ok {
+		timer := time.NewTimer(wait)
+		defer timer.Stop()
+		expired = timer.C
+	}
 	for {
 		if e, ok := s.c.inbox.pop(); ok {
 			return s.handle(e)
@@ -194,8 +213,13 @@ func (s *streaming) next(ctx context.Context) (*hubpb.ReplyPart, error) {
 			if s.ref.withdraw(s.c) {
 				return nil, fmt.Errorf("%w: the hub stream closed before %s was written", ErrNeverSent, s.typ)
 			}
-			return nil, fmt.Errorf("%w: the hub stream closed during the stream of %s", ErrOutcomeUnknown, s.typ)
-		case <-timer.C:
+			return nil, fmt.Errorf("%w: the hub stream closed during the %s of %s", ErrOutcomeUnknown, s.what, s.typ)
+		case <-s.closed:
+			if ctx.Err() != nil {
+				return nil, s.dropped(ctx)
+			}
+			return nil, errClosed
+		case <-expired:
 			// The hub ends an idle stream itself; the guard covers a hub that never does (told to
 			// cancel, so that the handler stops holding its permit).
 			s.cancel("local guard timeout")
@@ -204,6 +228,20 @@ func (s *streaming) next(ctx context.Context) (*hubpb.ReplyPart, error) {
 			return nil, s.dropped(ctx)
 		}
 	}
+}
+
+// guardNow is how long the local guard waits for the next part, and false when nothing guards
+// it: twice the hub's bound plus 1 s for a stream's first part, the bound plus 1 s between its
+// parts and for a subscription's initial part, nothing after that (a quiet subscription is not a
+// broken one).
+func (s *streaming) guardNow() (time.Duration, bool) {
+	switch {
+	case s.what == "subscription":
+		return s.guard, s.first
+	case s.first:
+		return firstPartGuard(s.guard), true
+	}
+	return s.guard, true
 }
 
 // dropped cancels the stream of a caller whose ctx ended and is its error: ctx's error, with
@@ -229,7 +267,7 @@ func (s *streaming) handle(e streamEvent) (*hubpb.ReplyPart, error) {
 			return nil, s.lost(seq - expected)
 		case seq < expected:
 			s.cancel("part out of order")
-			return nil, fmt.Errorf("snodra: stream %s part %d out of order (expected %d)", s.typ, seq, expected)
+			return nil, fmt.Errorf("snodra: %s %s part %d out of order (expected %d)", s.what, s.typ, seq, expected)
 		}
 		s.received, s.first = expected, false
 		return e.part, nil
@@ -252,7 +290,7 @@ func (s *streaming) handle(e streamEvent) (*hubpb.ReplyPart, error) {
 // lost is the error of n parts the hub sent (or counted) that never arrived, with the reference
 // library's text.
 func (s *streaming) lost(n uint64) error {
-	return fmt.Errorf("%w: stream %s lost %d part(s)", ErrLostParts, s.typ, n)
+	return fmt.Errorf("%w: %s %s lost %d part(s)", ErrLostParts, s.what, s.typ, n)
 }
 
 // consumed counts an item the caller read: every refill items, the hub gets a Flow for that many.

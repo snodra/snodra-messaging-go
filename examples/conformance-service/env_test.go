@@ -59,6 +59,23 @@ func TestEnvMapsOntoOptions(t *testing.T) {
 	if e.creditTimeout != 2*time.Second {
 		t.Fatalf("credit timeout %v", e.creditTimeout)
 	}
+	e, err = readEnv(lookup(map[string]string{
+		"CONFORMANCE_SERVICE_NAME":      "conformance-go",
+		"CONFORMANCE_INSTANCE_ID":       "i-7",
+		"CONFORMANCE_HUBS":              "127.0.0.1:7000",
+		"CONFORMANCE_MAX_SUBSCRIPTIONS": "2",
+	}))
+	if err != nil || e.maxSubscriptions != 2 {
+		t.Fatalf("max subscriptions %d, %v", e.maxSubscriptions, err)
+	}
+	if _, err := readEnv(lookup(map[string]string{
+		"CONFORMANCE_SERVICE_NAME":      "conformance-go",
+		"CONFORMANCE_INSTANCE_ID":       "i-7",
+		"CONFORMANCE_HUBS":              "127.0.0.1:7000",
+		"CONFORMANCE_MAX_SUBSCRIPTIONS": "0",
+	})); err == nil || !strings.Contains(err.Error(), "CONFORMANCE_MAX_SUBSCRIPTIONS") {
+		t.Fatalf("a bad subscription limit: %v", err)
+	}
 	if _, err := snodra.New(append(e.options(), snodra.Hubs("127.0.0.1:7000"))...); err != nil {
 		t.Fatal(err)
 	}

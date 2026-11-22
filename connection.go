@@ -346,6 +346,9 @@ func (c *hubConn) runStream() (reached bool, err error) {
 		if n := c.app.running.streamLost(ref); n > 0 {
 			c.log.Debug("streaming requests cancelled: their hub stream was lost", "requests", n)
 		}
+		if n := c.app.subs.streamLost(ref); n > 0 {
+			c.log.Debug("subscriptions removed: their hub stream was lost", "subscriptions", n)
+		}
 		cancel()
 		wg.Wait()
 	}()
@@ -669,6 +672,7 @@ type streamRef struct {
 	ended     bool // the stream is gone
 	wake      chan struct{}
 	room      chan struct{} // closed when a request may have room; nil while no send waits
+	emptied   chan struct{} // closed when the queue is next empty; nil while nobody waits for it
 	gone      chan struct{} // closed when the stream is gone
 	hook      func(ctx context.Context, m *hubpb.ClientMessage)
 }
@@ -755,10 +759,35 @@ func (r *streamRef) withdraw(c *call) bool {
 			r.queue = append(r.queue[:i], r.queue[i+1:]...)
 			r.requests--
 			r.freeRoom()
+			r.signalEmptied()
 			break
 		}
 	}
 	return true
+}
+
+// flushed is closed once the writer has taken every frame queued now (the queue is empty), or
+// the stream is gone.
+func (r *streamRef) flushed() <-chan struct{} {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.queue) == 0 || r.ended {
+		done := make(chan struct{})
+		close(done)
+		return done
+	}
+	if r.emptied == nil {
+		r.emptied = make(chan struct{})
+	}
+	return r.emptied
+}
+
+// signalEmptied wakes the waits of flushed once the queue is empty. Called with r.mu held.
+func (r *streamRef) signalEmptied() {
+	if r.emptied != nil && (len(r.queue) == 0 || r.ended) {
+		close(r.emptied)
+		r.emptied = nil
+	}
 }
 
 // closeSend half-closes the stream once what is queued is written; later sends fail.
@@ -784,6 +813,7 @@ func (r *streamRef) end() {
 		r.ended = true
 		close(r.gone)
 	}
+	r.signalEmptied()
 }
 
 // next waits for the next frame to write (half true when the half-close is due) and takes it
@@ -814,6 +844,7 @@ func (r *streamRef) next(ctx context.Context, done <-chan struct{}) (m *hubpb.Cl
 				r.requests--
 				r.freeRoom()
 			}
+			r.signalEmptied()
 			r.mu.Unlock()
 			return f.m, false, true
 		}

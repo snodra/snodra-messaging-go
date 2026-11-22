@@ -29,6 +29,7 @@ const defaultHubAddress = "static://snodra-server:7000"
 //   - SNODRA_SERVER_PRIORITIES: [Priorities] as "type=n,type=n"
 //   - SNODRA_SERVER_STREAM_CREDIT_TIMEOUT_MS: [StreamCreditTimeout] in milliseconds, at least 1
 //     (default 600000, 10 minutes)
+//   - SNODRA_SERVER_MAX_SUBSCRIPTIONS: [MaxSubscriptions], at least 1 (default 1024)
 //   - SNODRA_SERVER_RETRY_ENABLED: true sets [DefaultRetry] to the policy of
 //     SNODRA_SERVER_RETRY_MAX_ATTEMPTS (default 3, at least 1),
 //     SNODRA_SERVER_RETRY_INITIAL_BACKOFF_MS (100), SNODRA_SERVER_RETRY_MULTIPLIER (2, a finite
@@ -228,6 +229,16 @@ func (c *config) applySendEnv(get func(string) (string, bool)) error {
 			}
 			c.priorities[k] = int32(n)
 		}
+	}
+	if v, ok := get("SNODRA_SERVER_MAX_SUBSCRIPTIONS"); ok {
+		n, err := envNumber("SNODRA_SERVER_MAX_SUBSCRIPTIONS", v, math.MaxInt32)
+		if err != nil {
+			return err
+		}
+		if n < 1 {
+			return fmt.Errorf("snodra: SNODRA_SERVER_MAX_SUBSCRIPTIONS must be at least 1, got %q", v)
+		}
+		c.maxSubscriptions = int(n)
 	}
 	if v, ok := get("SNODRA_SERVER_STREAM_CREDIT_TIMEOUT_MS"); ok {
 		d, err := millis("SNODRA_SERVER_STREAM_CREDIT_TIMEOUT_MS", v)

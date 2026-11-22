@@ -47,6 +47,7 @@ type App struct {
 	commandTypes, queryTypes, sharedQueryTypes []string
 	calls                                      *pendingCalls    // the sent requests awaiting their answer
 	running                                    *runningRequests // the forwarded requests being served, for the hub's Cancel
+	subs                                       *servedSubscriptions
 	identity                                   *identityResolver
 	tokens                                     *tokenProvider // the access tokens towards the hubs; nil without JWT
 
@@ -117,6 +118,7 @@ func New(opts ...Option) (*App, error) {
 		handlers:       map[string]*handler{},
 		calls:          newPendingCalls(),
 		running:        newRunningRequests(),
+		subs:           newServedSubscriptions(cfg.maxSubscriptions, log),
 		identity:       newIdentityResolver(cfg, log),
 		tokens:         tokens,
 	}, nil
@@ -183,7 +185,8 @@ func (a *App) Run(ctx context.Context) error {
 
 // Shutdown leaves the hubs in order: a Register with no types to every acknowledged hub (so
 // it routes elsewhere at once), waiting at most 1 s for its acks; then the handlers in flight
-// finish; then each stream is half-closed and the hub gets at most 2 s to finish its side.
+// finish (at most 10 s); then every subscription served here completes with a ReplyEnd (written
+// within 2 s); then each stream is half-closed and the hub gets at most 2 s to finish its side.
 // Every wait is also bounded by ctx: when ctx ends first, the streams are dropped and ctx's
 // error is returned, at most 50 ms after ctx's deadline (the time given to the dropped streams'
 // goroutines to end). A second call waits for the first and returns its result.
@@ -250,6 +253,16 @@ func (a *App) leave(ctx context.Context, p *pool) error {
 	if n := a.inflight.count(); n > 0 {
 		a.log.Warn("handlers still running after the drain; closing the hub streams anyway",
 			"handlers", n, "waited", a.cfg.timings.handlerDrain)
+	}
+	// Then every served subscription completes, its end written before the half-close.
+	if refs := a.subs.endAll(); len(refs) > 0 {
+		flushed := make([]<-chan struct{}, len(refs))
+		for i, ref := range refs {
+			flushed[i] = ref.flushed()
+		}
+		if err := waitAll(ctx, a.cfg.timings.subscriptionEnd, flushed); err != nil {
+			return err
+		}
 	}
 	for _, c := range p.conns {
 		c.close()

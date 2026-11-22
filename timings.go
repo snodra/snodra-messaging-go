@@ -72,6 +72,9 @@ const (
 	// defaultCredit is a stream's Request.initial_credit when the caller chose none (what the hub
 	// reads 0 as).
 	defaultCredit uint32 = 64
+	// defaultMaxSubscriptions is how many subscriptions an instance serves at once when nothing
+	// sets it ([MaxSubscriptions]): the hub's own default limit per instance.
+	defaultMaxSubscriptions = 1024
 )
 
 // The checking of the callers' tokens (https://snodra.damoreira.com/library-authors/messages/,
