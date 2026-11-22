@@ -7,10 +7,18 @@
 # unless SNODRA_CONFORMANCE_BIN names one, starts snodra/snodra-server:${SNODRA_SERVER_VERSION}
 # (default 0.5.4) on 127.0.0.1:7000 (and 127.0.0.1:7100 with --hubs 2), runs the runner with the
 # remaining arguments (for example --only L1-REGISTER-FIRST) and removes the hubs on exit.
+#
+# SNODRA_HUB_PORT moves the hubs to other local ports (the second hub is 100 above): on macOS
+# the AirPlay Receiver holds port 7000, so run there with, say, SNODRA_HUB_PORT=17000.
 set -euo pipefail
 
 runner_version=v0.2.0
 server_image="snodra/snodra-server:${SNODRA_SERVER_VERSION:-0.5.4}"
+base_port="${SNODRA_HUB_PORT:-7000}"
+if ! [[ "$base_port" =~ ^[0-9]+$ ]] || ((base_port < 1 || base_port > 65435)); then
+  echo "SNODRA_HUB_PORT must be a port number from 1 to 65435, got '$base_port'" >&2
+  exit 2
+fi
 
 hubs=1
 if [[ "${1:-}" == "--hubs" ]]; then
@@ -69,7 +77,7 @@ trap cleanup EXIT
 
 hub_args=()
 for i in $(seq 1 "$hubs"); do
-  port=$((7000 + (i - 1) * 100))
+  port=$((base_port + (i - 1) * 100))
   name="snodra-conformance-hub-$port-$$"
   docker run -d --rm --name "$name" -p "127.0.0.1:$port:7000" "$server_image" >/dev/null
   containers+=("$name")
@@ -78,7 +86,7 @@ done
 
 # Wait for each hub's port (60 s at most).
 for i in $(seq 1 "$hubs"); do
-  port=$((7000 + (i - 1) * 100))
+  port=$((base_port + (i - 1) * 100))
   up=no
   for _ in $(seq 1 120); do
     if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
