@@ -64,6 +64,12 @@ func TestTheHandledIDStandsInForAMissingCorrelationID(t *testing.T) {
 	is(t, trace, false)
 }
 
+func TestAnEmptyCorrelationIDIsReplacedByAFreshOne(t *testing.T) { // as the reference library
+	s := relaying(t)
+	h := nested(t, s, "r-1", map[string]string{"correlationId": ""}).GetHeaders()
+	is(t, uuidV4.MatchString(h["correlationId"]), true) // not the handled id
+}
+
 var uuidV4 = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 
 func TestOutsideAnyHandlingTheCorrelationIDIsFresh(t *testing.T) {

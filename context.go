@@ -10,7 +10,9 @@ type MessageInfo struct {
 	ID string
 	// Type is the message type, for example "orders.PlaceOrder".
 	Type string
-	// CorrelationID is the request's correlationId header, else its ID.
+	// CorrelationID is the request's correlationId header, else (no such header) its ID. It is
+	// empty when the header is present but empty; the requests sent while handling then carry a
+	// new correlation id.
 	CorrelationID string
 	// Headers are the request's headers, as the hub forwarded them.
 	Headers map[string]string

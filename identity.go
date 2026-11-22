@@ -29,22 +29,27 @@ type Caller struct {
 // HasRole reports whether the caller has role.
 func (c Caller) HasRole(role string) bool { return slices.Contains(c.Roles, role) }
 
-// RequireAuthenticated lets only a caller with a valid token run the handler: a request without
-// one is answered UNAUTHENTICATED, decided before the payload is decoded.
+// RequireAuthenticated lets only a caller with a token run the handler: a request without one is
+// answered UNAUTHENTICATED, decided before the payload is decoded. With [JWKS] the token is
+// verified (signature, issuer, expiry) first; without it the claims of any signed token are read
+// unverified and can be forged by whoever reaches the hub (see [Caller].Verified).
 func RequireAuthenticated() HandlerOption {
 	return RequireCaller(func(Caller) bool { return true })
 }
 
 // RequireRole lets only a caller with role run the handler: an anonymous caller is answered
 // UNAUTHENTICATED, a caller without the role PERMISSION_DENIED, decided before the payload is
-// decoded.
+// decoded. The roles come from the token's claims, verified only with [JWKS] (see
+// [Caller].Verified).
 func RequireRole(role string) HandlerOption {
 	return RequireCaller(func(c Caller) bool { return c.HasRole(role) })
 }
 
 // RequireCaller lets only a caller allow accepts run the handler: an anonymous caller is
 // answered UNAUTHENTICATED, a caller allow refuses PERMISSION_DENIED, decided before the
-// payload is decoded. When a handler has several of these options, every one must accept.
+// payload is decoded. When a handler has several of these options, every one must accept. The
+// Caller is read from the token's claims, verified only with [JWKS]: without it, allow can check
+// [Caller].Verified to refuse unverified callers.
 func RequireCaller(allow func(Caller) bool) HandlerOption {
 	return func(c *handlerConfig) {
 		if allow == nil {

@@ -81,7 +81,9 @@ func (a *App) answer(req *hubpb.Request) *hubpb.Reply {
 		authorization: authorization,
 		caller:        caller,
 	}
-	if scope.info.CorrelationID == "" {
+	// The id stands in only for a missing header: a present but empty one stays empty, and the
+	// requests sent while handling get a new correlation id, as in the reference library.
+	if _, present := req.GetHeaders()[correlationIDHeader]; !present {
 		scope.info.CorrelationID = id
 	}
 	if tp := req.GetHeaders()[traceparentHeader]; traceparent.Valid(tp) {

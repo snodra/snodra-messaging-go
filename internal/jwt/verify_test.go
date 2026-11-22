@@ -12,6 +12,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -209,6 +210,64 @@ func TestAnUnreachableJWKSIsSigningKeysUnavailable(t *testing.T) {
 	gone.Close()
 	_, err = jwt.NewVerifier(gone.URL, issuer, nil, time.Minute).Verify(context.Background(), token)
 	is(t, reason(err), "signing keys unavailable")
+}
+
+func TestConcurrentFirstLoadsOfAHangingJWKSFailTogether(t *testing.T) {
+	key, _ := keys(t)
+	release := make(chan struct{})
+	var fetches atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		fetches.Add(1)
+		select { // never answers: the client's timeout ends the fetch
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(release) }) // runs first: the handlers return before Close waits
+	const timeout = 300 * time.Millisecond
+	v := jwt.NewVerifier(srv.URL, issuer, &http.Client{Timeout: timeout}, time.Minute)
+	token := sign(t, key, header("k1"), claims("u-1", time.Minute))
+	const n = 5
+	type result struct {
+		err     error
+		elapsed time.Duration
+	}
+	results := make(chan result, n)
+	start := time.Now()
+	for range n {
+		go func() {
+			_, err := v.Verify(context.Background(), token)
+			results <- result{err, time.Since(start)}
+		}()
+	}
+	for range n {
+		r := <-results
+		is(t, reason(r.err), "signing keys unavailable")
+		if r.elapsed > timeout+timeout/2 {
+			t.Fatalf("a verify returned after %v, want within about one fetch timeout (%v)", r.elapsed, timeout)
+		}
+	}
+	// A failed first load is not remembered: the next token fetches again, as in the reference.
+	before := fetches.Load()
+	_, err := v.Verify(context.Background(), token)
+	is(t, reason(err), "signing keys unavailable")
+	is(t, fetches.Load(), before+1)
+}
+
+func TestATokenOfManyDotsIsRefusedCheaply(t *testing.T) {
+	dots := strings.Repeat(".", 1<<20)
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	_, err := jwt.Unverified(dots)
+	is(t, reason(err), "unreadable token")
+	_, err = jwt.NewVerifier("http://127.0.0.1:1/jwks", issuer, nil, time.Minute).Verify(context.Background(), dots)
+	is(t, reason(err), "unreadable token")
+	runtime.ReadMemStats(&after)
+	if grew := after.TotalAlloc - before.TotalAlloc; grew > 1<<20 {
+		t.Fatalf("refusing a token of 1 MiB of dots allocated %d bytes", grew)
+	}
 }
 
 func TestAnUnknownKidRefreshesAtMostOncePerInterval(t *testing.T) {

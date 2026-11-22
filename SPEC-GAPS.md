@@ -138,15 +138,19 @@ reference library departs from it. In each case this library follows the referen
   "must drop a stream that brought no echo for three heartbeat intervals"; it does not say when the library looks, nor
   how far past three intervals the drop may come.
 - **Reference library:** looks on each heartbeat tick, before sending that tick's heartbeat, and drops the stream when
-  more than three intervals have passed since the last echo it received (also before the `RegisterAck`, with the
-  3 s interval, where the 10 s handshake timeout comes first in practice). Since an echo normally arrives just after
-  its tick, the drop normally comes on the fourth tick after the last echoed heartbeat; a tick that fires a little
-  late, or an echo that is unusually fast, makes the third tick see "more than three intervals" and drop one tick
-  earlier, exactly three intervals after the last echo. The Kotlin library also looks on the tick, from the
+  more than three intervals have passed since the last echo it received. It also does so before the `RegisterAck`,
+  with the 3 s interval and the stream's opening as the first sign of life: a stream that brings neither an ack nor
+  an echo is dropped on its 9 s tick (which, firing a little after its deadline, sees more than 9 s), before its
+  10 s handshake timeout. Since an echo normally arrives just after its tick, the drop normally comes on the fourth
+  tick after the last echoed heartbeat; a tick that fires a little late, or an echo that is unusually fast, makes the
+  third tick see "more than three intervals" and drop one tick earlier, exactly three intervals after the last echo.
+  The Kotlin library also looks on the tick, from the
   `RegisterAck` on, and drops when the oldest unanswered heartbeat is more than three intervals old.
 - **This library:** looks on each heartbeat tick from the `RegisterAck` on, with the reference library's comparison
   (more than three intervals since the last echo, or since the ack), and also waits until three heartbeats sent since
   that echo are unanswered: the drop always comes on the tick after the third unanswered heartbeat, between three and
-  four intervals after the last echo (`connection.go`, `hubSilent`).
+  four intervals after the last echo (`connection.go`, `hubSilent`). Before the `RegisterAck` it does not look: a
+  stream that brings neither an ack nor an echo is closed by the 10 s handshake timeout, about 1 s later than in the
+  reference library (as the Kotlin library, whose ticks start at the ack).
 - **Question:** should the specification name the drop moment (for example "on the first heartbeat tick after three
   unanswered heartbeats"), so that every library drops a silent hub within the same window?

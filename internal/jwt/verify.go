@@ -45,12 +45,11 @@ type Verifier struct {
 	hc          *http.Client
 	minRefresh  time.Duration
 
-	fetchMu sync.Mutex // one fetch at a time
-
 	mu         sync.Mutex
 	fetched    bool
 	keys       map[string]*rsa.PublicKey // by key id; nil: published but unusable
 	lastForced time.Time                 // the last fetch an unknown key id caused
+	inflight   *flight                   // the fetch in progress, shared; nil when none
 }
 
 // NewVerifier checks tokens of issuer against the JWKS at jwksURL, fetched with hc (nil: a
@@ -71,7 +70,7 @@ type header struct {
 // Verify returns the claims of token once its signature, issuer, expiry and not-before hold; an
 // *Error otherwise ("signing keys unavailable" when the JWKS cannot be fetched).
 func (v *Verifier) Verify(ctx context.Context, token string) (map[string]any, error) {
-	parts := strings.Split(token, ".")
+	parts := strings.SplitN(token, ".", 6) // at most 6: a token of many dots costs nothing
 	if len(parts) != 3 {
 		return nil, refused("unreadable token", nil)
 	}
@@ -135,7 +134,7 @@ func (v *Verifier) check(claims map[string]any, now time.Time) error {
 // without a JWKS. It refuses an unsigned token (alg "none", or no signature), an encrypted one
 // (five segments) and anything that is not a JWS.
 func Unverified(token string) (map[string]any, error) {
-	parts := strings.Split(token, ".")
+	parts := strings.SplitN(token, ".", 6) // at most 6: a token of many dots costs nothing
 	if len(parts) == 5 {
 		return nil, refused("unsupported token", nil)
 	}
