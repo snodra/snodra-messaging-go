@@ -49,7 +49,9 @@ func (v *Verifier) lookup(kid string) (*rsa.PublicKey, bool) {
 // the attempts after a failure; a forced one (an unknown key id) at most once per minRefresh,
 // whether it succeeds or not. No lock is held across the fetch: a request that needs the keys
 // while a fetch is in flight waits for that fetch (or its own ctx) and shares its outcome, so
-// concurrent requests all fail within one fetch's timeout when the endpoint is down.
+// concurrent requests all fail within one fetch's timeout when the endpoint is down. The fetch
+// runs on its own goroutine, detached from the context of the request that started it (the HTTP
+// client's timeout bounds it): that request giving up does not fail the others.
 func (v *Verifier) load(ctx context.Context, forced bool) error {
 	v.mu.Lock()
 	switch {
@@ -60,37 +62,45 @@ func (v *Verifier) load(ctx context.Context, forced bool) error {
 		v.mu.Unlock()
 		return nil
 	}
-	if f := v.inflight; f != nil {
-		v.mu.Unlock()
-		select {
-		case <-f.done:
-			if f.err != nil {
-				return refused("signing keys unavailable", f.err)
-			}
-			return nil
-		case <-ctx.Done():
-			return refused("signing keys unavailable", ctx.Err())
+	f := v.inflight
+	if f == nil {
+		if forced {
+			v.lastForced = time.Now()
 		}
+		f = &flight{done: make(chan struct{})}
+		v.inflight = f
+		go v.run(context.WithoutCancel(ctx), f)
 	}
-	if forced {
-		v.lastForced = time.Now()
-	}
-	f := &flight{done: make(chan struct{})}
-	v.inflight = f
 	v.mu.Unlock()
+	select {
+	case <-f.done:
+		if f.err != nil {
+			return refused("signing keys unavailable", f.err)
+		}
+		return nil
+	case <-ctx.Done():
+		return refused("signing keys unavailable", ctx.Err())
+	}
+}
 
-	keys, err := v.fetch(ctx)
-	v.mu.Lock()
-	if err == nil {
-		v.keys, v.fetched = keys, true
-	}
-	v.inflight, f.err = nil, err
-	v.mu.Unlock()
-	close(f.done)
-	if err != nil {
-		return refused("signing keys unavailable", err)
-	}
-	return nil
+// run performs the fetch of f and publishes its outcome; the in-flight entry is cleared even
+// when the fetch panics (its panic becomes the fetch's error), so no later caller waits on it.
+func (v *Verifier) run(ctx context.Context, f *flight) {
+	var keys map[string]*rsa.PublicKey
+	var err error
+	defer func() {
+		if r := recover(); r != nil {
+			keys, err = nil, fmt.Errorf("the JWKS fetch failed: %v", r)
+		}
+		v.mu.Lock()
+		if err == nil {
+			v.keys, v.fetched = keys, true
+		}
+		v.inflight, f.err = nil, err
+		v.mu.Unlock()
+		close(f.done)
+	}()
+	keys, err = v.fetch(ctx)
 }
 
 // flight is a JWKS fetch in progress; err is set before done is closed.

@@ -325,3 +325,76 @@ func TestUnverifiedReadsOnlySignedTokens(t *testing.T) {
 		}
 	}
 }
+
+func TestALeaderCancelledMidFetchDoesNotFailTheOthers(t *testing.T) {
+	key, _ := keys(t)
+	arrived, release := make(chan struct{}, 4), make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		arrived <- struct{}{}
+		<-release
+		_ = json.NewEncoder(w).Encode(map[string]any{"keys": []any{jwk("k1", key)}})
+	}))
+	t.Cleanup(srv.Close)
+	v := jwt.NewVerifier(srv.URL, issuer, &http.Client{Timeout: 5 * time.Second}, time.Minute)
+	token := sign(t, key, header("k1"), claims("u-1", time.Minute))
+
+	leaderCtx, cancelLeader := context.WithCancel(context.Background())
+	leader := make(chan error, 1)
+	go func() {
+		_, err := v.Verify(leaderCtx, token)
+		leader <- err
+	}()
+	<-arrived // the leader's fetch is in flight
+	waiter := make(chan error, 1)
+	go func() {
+		_, err := v.Verify(context.Background(), token)
+		waiter <- err
+	}()
+	cancelLeader()
+	select {
+	case err := <-leader:
+		is(t, reason(err), "signing keys unavailable")
+	case <-time.After(2 * time.Second):
+		t.Fatal("the cancelled leader did not return")
+	}
+	close(release)
+	select {
+	case err := <-waiter:
+		is(t, err, nil)
+	case <-time.After(2 * time.Second):
+		t.Fatal("the waiter did not get the shared fetch's keys")
+	}
+}
+
+// panicky is a transport whose first round trip panics.
+type panicky struct {
+	calls atomic.Int32
+	next  http.RoundTripper
+}
+
+func (p *panicky) RoundTrip(r *http.Request) (*http.Response, error) {
+	if p.calls.Add(1) == 1 {
+		panic("transport defect")
+	}
+	return p.next.RoundTrip(r)
+}
+
+func TestAPanickingFetchLeavesNoCallerBlocked(t *testing.T) {
+	key, _ := keys(t)
+	j := newJWKS(t, jwk("k1", key))
+	v := jwt.NewVerifier(j.URL, issuer, &http.Client{Timeout: time.Second, Transport: &panicky{next: http.DefaultTransport}}, time.Minute)
+	token := sign(t, key, header("k1"), claims("u-1", time.Minute))
+	_, err := v.Verify(context.Background(), token)
+	is(t, reason(err), "signing keys unavailable")
+	done := make(chan error, 1)
+	go func() {
+		_, err := v.Verify(context.Background(), token)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		is(t, err, nil)
+	case <-time.After(2 * time.Second):
+		t.Fatal("a later caller is blocked on the panicked fetch")
+	}
+}
