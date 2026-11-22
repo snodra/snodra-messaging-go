@@ -184,7 +184,7 @@ func TestOutcomesAreMessagesNeverADroppedStream(t *testing.T) {
 		{"an error", &hubpb.Request{Kind: hubpb.RequestKind_COMMAND, Type: "orders.PlaceOrder", Payload: []byte(`{"sku":"none"}`)},
 			hubpb.ErrorCode_HANDLER_ERROR, "out of stock"},
 		{"a panic", &hubpb.Request{Kind: hubpb.RequestKind_COMMAND, Type: "orders.PlaceOrder", Payload: []byte(`{"sku":"panic"}`)},
-			hubpb.ErrorCode_HANDLER_ERROR, "boom"},
+			hubpb.ErrorCode_HANDLER_ERROR, "handler panicked"},
 		{"a coded error", &hubpb.Request{Kind: hubpb.RequestKind_COMMAND, Type: "orders.PlaceOrder", Payload: []byte(`{"sku":"denied"}`)},
 			hubpb.ErrorCode_PERMISSION_DENIED, "orders-user required"},
 	}
@@ -196,6 +196,9 @@ func TestOutcomesAreMessagesNeverADroppedStream(t *testing.T) {
 			t.Fatalf("%s: got %v %q, want %v containing %q", c.name, e.GetCode(), e.GetMessage(), c.code, c.msg)
 		}
 		is(t, e.GetRequestId(), c.req.Id)
+		if c.name == "a panic" {
+			is(t, e.GetMessage(), "handler panicked") // the reference library's text; the value goes to the log
+		}
 		ok := "ok-" + string(rune('a'+i))
 		s.Send(t, command(ok, "orders.PlaceOrder", `{"orderId":"o-1"}`)) // the stream is still up
 		r := nextReply(t, s)
@@ -207,14 +210,16 @@ func TestOutcomesAreMessagesNeverADroppedStream(t *testing.T) {
 
 func TestTheReplyGoesOnlyToTheArrivalStream(t *testing.T) {
 	hub := fakehub.Start(t)
+	started := make(chan struct{}, 1)
 	_, s := serving(t, hub, func(app *App) {
 		is(t, HandleCommand(app, func(context.Context, PlaceOrder) (Empty, error) {
+			started <- struct{}{}
 			time.Sleep(200 * ms)
 			return Empty{}, nil
 		}), nil)
 	})
 	s.Send(t, command("r-1", "orders.PlaceOrder", `{}`))
-	time.Sleep(20 * ms)
+	receive(t, started) // the handler runs: its stream closes under it
 	s.Close(codes.Unavailable, "restart")
 	s2 := hub.Next(t)
 	s2.RecvRegister(t)

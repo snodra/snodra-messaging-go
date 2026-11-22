@@ -65,14 +65,14 @@ func (a *App) answer(req *hubpb.Request) *hubpb.Reply {
 }
 
 // run runs h on req under recover: the answer's payload, or the error to answer. A panic, of
-// the handler or of its error, is HANDLER_ERROR: a message, never a stack trace (the stack goes
-// to the log).
+// the handler or of its error, is HANDLER_ERROR "handler panicked", the reference library's
+// text: the panic value and the stack go to the log only.
 func (a *App) run(h *handler, req *hubpb.Request) (payload []byte, werr *hubpb.Error) {
 	defer func() {
 		if r := recover(); r != nil {
 			a.log.Error("handler panicked", "request", req.GetId(), "type", req.GetType(),
 				"panic", fmt.Sprint(r), "stack", string(debug.Stack()))
-			payload, werr = nil, errorToWire(req.GetId(), fmt.Errorf("handler panicked: %v", r))
+			payload, werr = nil, errorToWire(req.GetId(), errors.New("handler panicked"))
 		}
 	}()
 	info := MessageInfo{

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -14,12 +15,14 @@ import (
 	"github.com/snodra/snodra-messaging-go/internal/hubpb"
 )
 
-// started runs the service's handlers on a fake hub and returns the acknowledged stream.
-func started(t *testing.T, e env) (*fakehub.Hub, *fakehub.Stream) {
+// started runs the service's handlers on a fake hub and returns its first stream, not
+// acknowledged yet. The reconnect backoff is short (a refusal waits 160-200 ms), well inside
+// the fake hub's 5 s wait for the next stream.
+func started(t *testing.T, e env) (*snodra.App, *fakehub.Hub, *fakehub.Stream) {
 	t.Helper()
 	hub := fakehub.Start(t)
 	e.hubs = []string{hub.Addr()}
-	app, err := snodra.New(e.options()...)
+	app, err := snodra.New(append(e.options(), snodra.ReconnectBackoff(50*time.Millisecond, 200*time.Millisecond))...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,15 +45,29 @@ func started(t *testing.T, e env) (*fakehub.Hub, *fakehub.Stream) {
 	if got := strings.Join(r.GetQueryTypes(), ","); got != "conformance.EchoQuery,conformance.SleepQuery,conformance.View" {
 		t.Fatalf("query types %s", got)
 	}
-	return hub, s
+	return app, hub, s
 }
 
-// call forwards a request and returns its Reply.
+// ready waits (at most 1 s) until app counts a hub as registered.
+func ready(t *testing.T, app *snodra.App) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := app.Ready(ctx); err != nil {
+		t.Fatalf("not registered: %v", err)
+	}
+}
+
+// call forwards a request and returns its Reply; it fails the test after 5 s.
 func call(t *testing.T, s *fakehub.Stream, kind hubpb.RequestKind, typ, payload string, headers map[string]string) *hubpb.Reply {
 	t.Helper()
 	id := "r-" + typ
 	s.Send(t, fakehub.Forward(&hubpb.Request{Id: id, Kind: kind, Type: typ, Payload: []byte(payload), Headers: headers}))
+	deadline := time.Now().Add(5 * time.Second)
 	for {
+		if time.Now().After(deadline) {
+			t.Fatalf("no Reply to %s within 5 s", id)
+		}
 		m := s.Recv(t)
 		if r := m.GetReply(); r != nil {
 			if r.GetRequestId() != id {
@@ -75,7 +92,7 @@ func decode(t *testing.T, r *hubpb.Reply) map[string]any {
 
 func TestTheServiceAnswersAsTheContractSays(t *testing.T) {
 	e := env{service: "conformance-go", instance: "i-1", capacity: 4, retry: true}
-	_, s := started(t, e)
+	app, _, s := started(t, e)
 	const cmd, qry = hubpb.RequestKind_COMMAND, hubpb.RequestKind_QUERY
 
 	// View before the ack: no hub, no rejection.
@@ -85,8 +102,8 @@ func TestTheServiceAnswersAsTheContractSays(t *testing.T) {
 		t.Fatalf("View %v", v)
 	}
 	s.Ack(t, fakehub.Ack("hub-1"))
-	time.Sleep(50 * time.Millisecond)
-	if v := decode(t, call(t, s, qry, "conformance.View", `{}`, nil)); v["hubIds"].([]any)[0] != "hub-1" {
+	ready(t, app)
+	if v := decode(t, call(t, s, qry, "conformance.View", `{}`, nil)); fmt.Sprint(v["hubIds"]) != "[hub-1]" {
 		t.Fatalf("View after the ack %v", v)
 	}
 
@@ -125,11 +142,12 @@ func TestTheServiceAnswersAsTheContractSays(t *testing.T) {
 }
 
 func TestViewExposesTheLastRejection(t *testing.T) {
-	hub, s := started(t, env{service: "conformance-go", instance: "i-1", capacity: 4})
+	app, hub, s := started(t, env{service: "conformance-go", instance: "i-1", capacity: 4})
 	s.Close(codes.PermissionDenied, "conformance refusal 4: permission denied")
 	s = hub.Next(t)
 	s.RecvRegister(t)
 	s.Ack(t, fakehub.Ack("hub-1"))
+	ready(t, app)
 	v := decode(t, call(t, s, hubpb.RequestKind_QUERY, "conformance.View", `{}`, nil))
 	if v["lastRejection"] != "PERMISSION_DENIED: conformance refusal 4: permission denied" || v["retry"] != false {
 		t.Fatalf("View %v", v)
