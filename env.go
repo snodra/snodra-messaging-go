@@ -18,8 +18,11 @@ const defaultHubAddress = "static://snodra-server:7000"
 //
 //   - SNODRA_SERVICE_NAME: [Service]
 //   - SNODRA_INSTANCE_ID: [Instance] (default: a fresh random UUID)
-//   - SNODRA_SERVER_ADDRESS: [Hubs], a comma-separated list of host:port, "static://" optional
-//     (default "static://snodra-server:7000" when no hub is configured yet)
+//   - SNODRA_SERVER_ADDRESS: [Hubs], a comma-separated list of host:port ("static://" optional),
+//     or one dns:///name:port (default "static://snodra-server:7000" when no hub is configured
+//     yet)
+//   - SNODRA_SERVER_STATUS_INTERVAL_MS: [StatusInterval] in milliseconds, at least 1 (default
+//     5000)
 //   - SNODRA_MAX_CONCURRENT_HANDLERS: [MaxConcurrent] (default 256)
 //   - SNODRA_RECONNECT_BACKOFF_MIN_MS, SNODRA_RECONNECT_BACKOFF_MAX_MS: [ReconnectBackoff] in
 //     milliseconds (default 500 and 5000)
@@ -76,11 +79,11 @@ func (c *config) applyEnv(getenv func(string) string) error {
 				entries = append(entries, e)
 			}
 		}
-		hubs, err := parseHubs(entries)
+		targets, err := parseTargets(entries)
 		if err != nil {
 			return err
 		}
-		c.hubs = hubs
+		c.hubs = targetStrings(targets)
 	}
 	if v, ok := get("SNODRA_MAX_CONCURRENT_HANDLERS"); ok {
 		n, err := envNumber("SNODRA_MAX_CONCURRENT_HANDLERS", v, math.MaxUint32)
@@ -239,6 +242,16 @@ func (c *config) applySendEnv(get func(string) (string, bool)) error {
 			return fmt.Errorf("snodra: SNODRA_SERVER_MAX_SUBSCRIPTIONS must be at least 1, got %q", v)
 		}
 		c.maxSubscriptions = int(n)
+	}
+	if v, ok := get("SNODRA_SERVER_STATUS_INTERVAL_MS"); ok {
+		d, err := millis("SNODRA_SERVER_STATUS_INTERVAL_MS", v)
+		if err != nil {
+			return err
+		}
+		if d < time.Millisecond {
+			return fmt.Errorf("snodra: SNODRA_SERVER_STATUS_INTERVAL_MS must be at least 1, got %q", v)
+		}
+		c.timings.statusInterval = d
 	}
 	if v, ok := get("SNODRA_SERVER_STREAM_CREDIT_TIMEOUT_MS"); ok {
 		d, err := millis("SNODRA_SERVER_STREAM_CREDIT_TIMEOUT_MS", v)

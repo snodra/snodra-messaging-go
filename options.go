@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"maps"
 	"math"
-	"net"
 	"strings"
 	"time"
 
@@ -19,7 +18,8 @@ import (
 type config struct {
 	service          string
 	instance         string
-	hubs             []string // host:port, in order, without repeats
+	hubs             []string // host:port, in order, without repeats; or one dns:///name:port
+	resolve          resolver // resolves a dns:/// target
 	maxConcurrent    int
 	maxSubscriptions int // the subscriptions served at once ([MaxSubscriptions])
 	loadFactor       uint32
@@ -61,6 +61,7 @@ func defaultConfig() config {
 		codec:            JSON,
 		timings:          defaultTimings(),
 		forwardJWT:       true,
+		resolve:          lookupTargets,
 	}
 }
 
@@ -90,16 +91,42 @@ func Instance(id string) Option {
 	}
 }
 
-// Hubs are the hubs to connect to, each "host:port" (a "static://" prefix is accepted). The
-// instance opens one stream to every one of them. Required (or SNODRA_SERVER_ADDRESS with
-// [FromEnv]).
+// Hubs are the hubs to connect to: each "host:port" (a "static://", "http://" or "https://"
+// prefix is accepted), or one "dns:///name:port" whose every address is a hub, resolved again
+// every 30 s (an address that leaves the answer is drained and closed, a new one connected).
+// The instance opens one stream to every hub, each with the identical registration, and knows a
+// hub by its RegisterAck.hub_id: a second address answering an id already served is closed. See
+// https://snodra.damoreira.com/library-authors/protocol/ (Several hubs). Required (or
+// SNODRA_SERVER_ADDRESS with [FromEnv]).
 func Hubs(addresses ...string) Option {
 	return func(c *config) error {
-		hubs, err := parseHubs(addresses)
+		targets, err := parseTargets(addresses)
 		if err != nil {
 			return err
 		}
-		c.hubs = hubs
+		c.hubs = targetStrings(targets)
+		return nil
+	}
+}
+
+// targetStrings are the targets as configured.
+func targetStrings(targets []target) []string {
+	out := make([]string, len(targets))
+	for i, t := range targets {
+		out[i] = t.String()
+	}
+	return out
+}
+
+// StatusInterval is how often every hub with an acknowledged stream gets an InstanceStatus (the
+// hubs it is connected to, its handlers in flight). The default is 5 s, which is what the
+// protocol asks for at most; it must be at least 1 ms.
+func StatusInterval(d time.Duration) Option {
+	return func(c *config) error {
+		if d < time.Millisecond {
+			return fmt.Errorf("snodra: StatusInterval must be at least 1ms, got %v", d)
+		}
+		c.timings.statusInterval = d
 		return nil
 	}
 }
@@ -314,24 +341,4 @@ func (c *config) validateCredentials() error {
 		}
 	}
 	return nil
-}
-
-// parseHubs reads hub addresses: "host:port", with an optional "static://" prefix, in order,
-// exact repeats removed.
-func parseHubs(addresses []string) ([]string, error) {
-	var hubs []string
-	seen := map[string]bool{}
-	for _, a := range addresses {
-		entry := strings.TrimSpace(a)
-		hostport := strings.TrimPrefix(entry, "static://")
-		host, port, err := net.SplitHostPort(hostport)
-		if err != nil || host == "" || port == "" {
-			return nil, fmt.Errorf("snodra: hub address %q (Hubs, SNODRA_SERVER_ADDRESS) is not host:port", a)
-		}
-		if !seen[hostport] {
-			seen[hostport] = true
-			hubs = append(hubs, hostport)
-		}
-	}
-	return hubs, nil
 }

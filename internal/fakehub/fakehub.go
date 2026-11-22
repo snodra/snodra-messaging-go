@@ -344,6 +344,7 @@ type Stream struct {
 	hbs     []time.Time
 	echoed  []time.Time // the arrival of every heartbeat that was echoed
 	statuss []*hubpb.InstanceStatus
+	statusT []time.Time // the arrival of every InstanceStatus, as statuss
 }
 
 type echoMode int
@@ -396,6 +397,7 @@ func (s *Stream) observe(m *hubpb.ClientMessage) {
 	case *hubpb.ClientMessage_Status:
 		s.sendMu.Lock()
 		s.statuss = append(s.statuss, k.Status)
+		s.statusT = append(s.statusT, time.Now())
 		s.sendMu.Unlock()
 	}
 }
@@ -593,6 +595,14 @@ func (s *Stream) Statuses() []*hubpb.InstanceStatus {
 	s.sendMu.Lock()
 	defer s.sendMu.Unlock()
 	return append([]*hubpb.InstanceStatus(nil), s.statuss...)
+}
+
+// StatusTimes returns the arrival time of every InstanceStatus received so far, in the order of
+// [Stream.Statuses].
+func (s *Stream) StatusTimes() []time.Time {
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
+	return append([]time.Time(nil), s.statusT...)
 }
 
 // Nothing fails the test if a frame of one of kinds arrives within d. Kinds are the oneof

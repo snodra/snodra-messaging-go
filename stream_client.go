@@ -138,6 +138,9 @@ func (b *streamInbox) pop() (streamEvent, bool) {
 type streaming struct {
 	app      *App
 	typ      string
+	tmpl     *hubpb.Request // what a move to another hub writes again
+	chosen   time.Duration  // the timeout the request is written with
+	moves    int            // the moves to another hub of a request never written
 	c        *call
 	ref      *streamRef
 	what     string          // "stream" or "subscription", for the errors
@@ -158,7 +161,7 @@ type streaming struct {
 // a hub.
 func (a *App) openStream(ctx context.Context, tmpl *hubpb.Request, chosen time.Duration) (*streaming, error) {
 	c := &call{id: uuid.New(), inbox: newStreamInbox()}
-	ref, guard, err := a.write(ctx, tmpl, chosen, c)
+	ref, guard, _, err := a.write(ctx, tmpl, chosen, c, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -166,8 +169,29 @@ func (a *App) openStream(ctx context.Context, tmpl *hubpb.Request, chosen time.D
 	if tmpl.GetMode() == hubpb.RequestMode_SUBSCRIPTION {
 		what = "subscription"
 	}
-	return &streaming{app: a, typ: tmpl.GetType(), c: c, ref: ref, what: what, guard: guard,
+	return &streaming{app: a, typ: tmpl.GetType(), tmpl: tmpl, chosen: chosen, c: c, ref: ref, what: what, guard: guard,
 		refill: max(1, tmpl.GetInitialCredit()/2), first: true}, nil
+}
+
+// move writes the request, never written to its lost stream, to the next hub with the same id:
+// it was never sent (https://snodra.damoreira.com/library-authors/protocol/, Several hubs), at
+// most maxUnwrittenMoves times.
+// TODO(spec-gap): SG-10 (at most 8 moves).
+func (s *streaming) move(ctx context.Context) error {
+	s.moves++
+	if s.moves > maxUnwrittenMoves {
+		return fmt.Errorf("%w: '%s' not written: %d hub streams lost before it was", ErrNeverSent, s.typ, s.moves)
+	}
+	s.app.log.Debug("the hub stream was lost before the "+s.what+" was written; trying the next hub", "type", s.typ, "request", s.c.id)
+	c := &call{id: s.c.id, inbox: newStreamInbox()}
+	ref, guard, _, err := s.app.write(ctx, s.tmpl, s.chosen, c, nil)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.c, s.ref, s.guard = c, ref, guard
+	s.mu.Unlock()
+	return nil
 }
 
 // errClosed ends the reading of a subscription its owner closed.
@@ -202,12 +226,23 @@ func (s *streaming) next(ctx context.Context) (*hubpb.ReplyPart, error) {
 		return nil, errClosed
 	default:
 	}
+	var timer *time.Timer
 	var expired <-chan time.Time
-	if wait, ok := s.guardNow(); ok {
-		timer := time.NewTimer(wait)
-		defer timer.Stop()
-		expired = timer.C
+	arm := func() {
+		if timer != nil {
+			timer.Stop()
+		}
+		if wait, ok := s.guardNow(); ok {
+			timer = time.NewTimer(wait)
+			expired = timer.C
+		}
 	}
+	arm()
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
 	for {
 		if e, ok := s.c.inbox.pop(); ok {
 			return s.handle(e)
@@ -218,10 +253,16 @@ func (s *streaming) next(ctx context.Context) (*hubpb.ReplyPart, error) {
 			if e, ok := s.c.inbox.pop(); ok { // what came before the loss first
 				return s.handle(e)
 			}
-			s.finish()
 			if s.ref.withdraw(s.c) {
-				return nil, fmt.Errorf("%w: the hub stream closed before %s was written", ErrNeverSent, s.typ)
+				// Never written: the next hub gets it, with the same id and a new guard.
+				if err := s.move(ctx); err != nil {
+					s.finish()
+					return nil, err
+				}
+				arm()
+				continue
 			}
+			s.finish()
 			return nil, fmt.Errorf("%w: the hub stream closed during the %s of %s", ErrOutcomeUnknown, s.what, s.typ)
 		case <-s.closed:
 			if ctx.Err() != nil {
@@ -352,16 +393,21 @@ func (s *streaming) cancel(reason string) bool {
 
 // cancelOnce is cancel, also reporting whether this call ended the stream.
 func (s *streaming) cancelOnce(reason string) (ended, written bool) {
-	if !s.end() {
+	s.mu.Lock()
+	was := s.done
+	s.done = true
+	c, ref := s.c, s.ref
+	s.mu.Unlock()
+	if was {
 		return false, true
 	}
-	s.app.calls.remove(s.c.id)
-	if s.ref.withdraw(s.c) {
+	s.app.calls.remove(c.id)
+	if ref.withdraw(c) {
 		return true, false
 	}
-	msg := &hubpb.ClientMessage{Message: &hubpb.ClientMessage_Cancel{Cancel: &hubpb.Cancel{RequestId: s.c.id, Reason: reason}}}
-	if err := s.ref.send(msg); err != nil {
-		s.app.log.Debug("cancel not written: its hub stream is gone", "request", s.c.id, "type", s.typ)
+	msg := &hubpb.ClientMessage{Message: &hubpb.ClientMessage_Cancel{Cancel: &hubpb.Cancel{RequestId: c.id, Reason: reason}}}
+	if err := ref.send(msg); err != nil {
+		s.app.log.Debug("cancel not written: its hub stream is gone", "request", c.id, "type", s.typ)
 	}
 	return true, true
 }

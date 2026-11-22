@@ -95,7 +95,7 @@ func (c *hubConn) transport(id *clientIdentity) (credentials.TransportCredential
 	if t == nil {
 		return insecure.NewCredentials(), nil
 	}
-	cfg := &tls.Config{MinVersion: tls.VersionTLS12, ServerName: t.ServerName}
+	cfg := &tls.Config{MinVersion: tls.VersionTLS12, ServerName: c.tlsServerName()}
 	if t.CAFile != "" {
 		pool, err := readCAFile(t.CAFile)
 		if err != nil {
@@ -109,6 +109,15 @@ func (c *hubConn) transport(id *clientIdentity) (credentials.TransportCredential
 		cfg.GetClientCertificate = func(*tls.CertificateRequestInfo) (*tls.Certificate, error) { return &cert, nil }
 	}
 	return credentials.NewTLS(cfg), nil
+}
+
+// tlsServerName is the name the hub's certificate is checked against: the configured one; else,
+// for a resolved address, its DNS name, not its IP; else "" (the dialled host).
+func (c *hubConn) tlsServerName() string {
+	if t := c.app.cfg.tls; t != nil && t.ServerName != "" {
+		return t.ServerName
+	}
+	return c.serverName
 }
 
 // serviceSANPrefix is the URI SAN prefix that names a service.
@@ -395,7 +404,7 @@ func (w *certWatch) check() {
 	if disk = w.waitBeforeRolling(disk); disk == nil {
 		return
 	}
-	for _, c := range w.p.conns {
+	for _, c := range w.p.all() {
 		if w.stopping() {
 			return
 		}
@@ -432,7 +441,7 @@ func (w *certWatch) noteProblem(err error) {
 // life (at most the last day) and the files hold no other one.
 func (w *certWatch) warnNearExpiry(disk *clientIdentity, now time.Time) {
 	var presented *clientIdentity
-	for _, c := range w.p.conns {
+	for _, c := range w.p.all() {
 		if presented = c.presented(); presented != nil {
 			break
 		}
@@ -457,7 +466,7 @@ func (w *certWatch) waitBeforeRolling(disk *clientIdentity) *clientIdentity {
 		return disk
 	}
 	remaining, stale := time.Duration(0), false
-	for _, c := range w.p.conns {
+	for _, c := range w.p.all() {
 		if p := c.presented(); p != nil && p.digest != disk.digest {
 			if left := time.Until(p.notAfter); !stale || left < remaining {
 				remaining, stale = left, true

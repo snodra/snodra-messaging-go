@@ -113,3 +113,19 @@ func TestPermitsGoBackOnTheArrivalStream(t *testing.T) {
 	is(t, sb.RecvPermits(t).GetCount(), uint32(1))
 	sa.Nothing(t, 200*ms, "reply", "permits")
 }
+
+func TestTheLowWaterMarkUsesTheOfferedTotal(t *testing.T) { // SG-4
+	l := permitLedger{offered: 3}
+	is(t, l.raise(5), uint32(2)) // topped up to 5: Permits{count 2, grant 5}
+	is(t, l.raise(4), uint32(0)) // never lowered
+	is(t, l.raise(5), uint32(0)) // offered already
+	is(t, l.offered, uint32(5))
+	for range 3 {
+		l.arrived()
+	}
+	n, arm := l.finished()
+	// The hub holds 5 - 3 = 2 <= min(16, 5/2): at once (with the Register's 3 the mark would be
+	// 1, and the grant would wait for the batch).
+	is(t, n, uint32(1))
+	is(t, arm, false)
+}

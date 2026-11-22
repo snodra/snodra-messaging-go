@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc"
@@ -47,9 +48,19 @@ var errStreamGone = errors.New("snodra: the hub stream is gone")
 // it alive with heartbeats and opens another after a backoff when it ends, until shutdown.
 type hubConn struct {
 	app     *App
+	pool    *pool  // the pool the connection belongs to; nil for a connection on its own (tests)
 	address string // host:port
 	t       timings
 	log     *slog.Logger
+	// serverName is the name a TLS hub certificate is checked against when the configuration
+	// names none: the DNS name of a resolved address; "" for a configured host:port.
+	serverName string
+
+	role       memberRole    // the connection's role in its pool; guarded by pool.mu
+	failedOnce atomic.Bool   // a stream ended: the first connect attempt is over
+	withdrawn  atomic.Bool   // the address left the DNS answer: every Register carries no types
+	parked     bool          // closed for good as a second address of a hub (the goroutine's own)
+	reregReq   chan struct{} // write the Register again to the acknowledged stream (buffered)
 
 	stopping  chan struct{} // closed when shutdown begins: no reconnect, the empty Register
 	closing   chan struct{} // closed when the stream must be half-closed
@@ -73,6 +84,7 @@ type hubConn struct {
 	mu            sync.Mutex
 	state         connState
 	current       *streamRef         // the open stream, nil between streams
+	permits       *streamPermits     // the current stream's permits, nil between streams
 	acked         *hubpb.RegisterAck // the current stream's RegisterAck, nil until it came
 	presentedCert *clientIdentity    // the client certificate of the current stream
 	rolling       bool               // being rolled over to a renewed client certificate
@@ -98,6 +110,54 @@ func newHubConn(a *App, address string) *hubConn {
 		deregDone: make(chan struct{}),
 		done:      make(chan struct{}),
 		rollReq:   make(chan *streamRef, 1),
+		reregReq:  make(chan struct{}, 1),
+	}
+}
+
+// livePermits are the permits of the acknowledged stream; nil while there is none.
+func (c *hubConn) livePermits() *streamPermits {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.acked == nil {
+		return nil
+	}
+	return c.permits
+}
+
+// reregister asks the acknowledged stream for the Register again, with the types the
+// connection registers now (none once withdrawn); dropped when there is no such stream.
+func (c *hubConn) reregister() {
+	select {
+	case c.reregReq <- struct{}{}:
+	default:
+	}
+}
+
+// idle is true when nothing of the instance is in flight on the current stream: no request
+// written to it awaits its answer (the streams and subscriptions it reads included) and no
+// handler of its requests runs.
+func (c *hubConn) idle() bool {
+	c.mu.Lock()
+	ref, perms := c.current, c.permits
+	c.mu.Unlock()
+	if ref == nil {
+		return true
+	}
+	return !perms.busy() && c.app.calls.writtenTo(ref, true) == 0
+}
+
+// initialPermits is what the connection's next stream offers: its share of MaxConcurrent.
+func (c *hubConn) initialPermits() uint32 {
+	if c.pool == nil {
+		return uint32(c.app.cfg.maxConcurrent)
+	}
+	return c.pool.initialPermits(c)
+}
+
+// changed tells the pool that the set of live hubs may have changed.
+func (c *hubConn) changed() {
+	if c.pool != nil {
+		c.pool.changed()
 	}
 }
 
@@ -184,7 +244,13 @@ func (c *hubConn) run() {
 	for !c.stopRequested() {
 		c.setState(stateConnecting)
 		reached, err := c.runStream()
-		if c.stopRequested() {
+		// The first attempt is over: the pool no longer counts this hub in its split unless it
+		// is acknowledged again.
+		first := !c.failedOnce.Swap(true)
+		if reached || first || c.parked {
+			c.changed()
+		}
+		if c.parked || c.stopRequested() {
 			return
 		}
 		if reached {
@@ -326,20 +392,19 @@ func (c *hubConn) runStream() (reached bool, err error) {
 	}
 
 	ref := newStreamRef(c.app.cfg.writeHook)
-	register := c.app.registerMsg()
-	register.Credentials = c.credentials()
+	register := c.register(c.initialPermits())
 	permits := newStreamPermits(ref, register.GetInitialPermits(), c.t.permitFlushAfter)
 	_ = ref.send(&hubpb.ClientMessage{Message: &hubpb.ClientMessage_Register{Register: register}})
 	_ = ref.send(heartbeat())
 	c.mu.Lock()
-	c.state, c.current = stateAwaitingAck, ref
+	c.state, c.current, c.permits = stateAwaitingAck, ref, permits
 	c.mu.Unlock()
 
 	var wg sync.WaitGroup
 	defer func() {
 		c.mu.Lock()
 		if c.current == ref {
-			c.current, c.acked = nil, nil
+			c.current, c.acked, c.permits = nil, nil, nil
 		}
 		c.mu.Unlock()
 		ref.end()
@@ -479,6 +544,12 @@ func (c *hubConn) serve(sr *streamRun) (reached bool, err error) {
 					c.log.Debug("ignored a RegisterAck that arrived during the shutdown")
 					break
 				}
+				if !reached && c.pool != nil && !c.pool.accept(c, k.RegisterAck) {
+					// Another address of this hub was acknowledged first: closed for good.
+					// TODO(spec-gap): SG-22 (a duplicate is closed for good, not retried).
+					c.parked = true
+					return false, nil
+				}
 				if !reached {
 					reached, handshake = true, nil
 					if n := k.RegisterAck.GetHeartbeatIntervalMs(); n > 0 {
@@ -564,7 +635,7 @@ func (c *hubConn) serve(sr *streamRun) (reached bool, err error) {
 			}
 			rolling = true
 			registers++
-			_ = ref.send(&hubpb.ClientMessage{Message: &hubpb.ClientMessage_Register{Register: c.emptyRegister()}})
+			_ = ref.send(&hubpb.ClientMessage{Message: &hubpb.ClientMessage_Register{Register: c.emptyRegister(permits.offeredNow())}})
 			rollUntil = time.Now().Add(c.t.rollIdleLimit)
 			rollTimer.Reset(rollSettle)
 			rollCheck = rollTimer.C
@@ -591,7 +662,13 @@ func (c *hubConn) serve(sr *streamRun) (reached bool, err error) {
 			c.setState(stateDraining)
 			registers++
 			deregisterAt = registers
-			_ = ref.send(&hubpb.ClientMessage{Message: &hubpb.ClientMessage_Register{Register: c.emptyRegister()}})
+			_ = ref.send(&hubpb.ClientMessage{Message: &hubpb.ClientMessage_Register{Register: c.emptyRegister(permits.offeredNow())}})
+		case <-c.reregReq:
+			if !reached || halfClosed || rolling || stopping == nil {
+				break // nothing acknowledged to change, or the stream is leaving anyway
+			}
+			registers++
+			_ = ref.send(&hubpb.ClientMessage{Message: &hubpb.ClientMessage_Register{Register: c.register(permits.offeredNow())}})
 		case <-closing:
 			// A request this stream forwarded after the shutdown's drain found no handler
 			// running is still answered: the half-close waits for the handlers in flight, until
@@ -645,12 +722,13 @@ func (c *hubConn) wentLive(ref *streamRef, ack *hubpb.RegisterAck, interval time
 		c.log.Info("presenting a renewed client certificate", "fingerprint", id.fingerprint, "not_after", id.notAfter)
 	}
 	c.app.connLive()
+	c.changed()
 }
 
 // streamIdle is true when no handler of the stream's requests runs and none of the requests
 // written to it awaits its answer (the streams and subscriptions this instance reads aside).
 func (c *hubConn) streamIdle(ref *streamRef, permits *streamPermits) bool {
-	return !permits.busy() && c.app.calls.writtenTo(ref) == 0
+	return !permits.busy() && c.app.calls.writtenTo(ref, false) == 0
 }
 
 func heartbeat() *hubpb.ClientMessage {

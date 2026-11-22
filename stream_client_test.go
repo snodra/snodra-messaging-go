@@ -434,8 +434,10 @@ func TestTheRolloverIgnoresWhatThisInstanceConsumes(t *testing.T) {
 		c.on.Store(ref)
 		p.add(c)
 	}
-	is(t, p.writtenTo(ref), 2) // the rollover waits for these two only, as the reference library does
+	is(t, p.writtenTo(ref, false), 2) // the rollover waits for these two only, as the reference library does
+	is(t, p.writtenTo(ref, true), 3)  // the drain of an address that left DNS waits for the stream too
 	p.remove("u")
 	p.remove("g")
-	is(t, p.writtenTo(ref), 0)
+	is(t, p.writtenTo(ref, false), 0)
+	is(t, p.writtenTo(ref, true), 1)
 }

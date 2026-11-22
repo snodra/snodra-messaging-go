@@ -53,6 +53,18 @@ reference library departs from it. In each case this library follows the referen
 - **This library:** does the same (`stream_client.go`, `subscribe.go`).
 - **Question:** should the specification size the guards of a stream (first part and idle) as it sizes the unary one?
 
+### SG-4: the low-water mark of a stream that was topped up
+
+- **Specification:** [protocol.md, Flow control](https://snodra.damoreira.com/library-authors/protocol/) gives a
+  finished request's permit back at once when the hub holds at most `min(16, initial_permits / 2)` of the stream's
+  permits; with several hubs ([Several hubs](https://snodra.damoreira.com/library-authors/protocol/)) a stream is
+  topped up with `Permits{count, grant}` when another hub leaves, and the page does not say whether the mark follows.
+- **Reference library:** computes the mark from what the stream offered in all: its `Register.initial_permits` plus
+  every top-up.
+- **This library:** does the same (`permits.go`).
+- **Question:** should the specification say that `initial_permits` in the low-water mark means the permits the
+  stream offered in all, top-ups included?
+
 ### SG-5: when a JWT is renewed
 
 - **Specification:** [protocol.md, Credentials](https://snodra.damoreira.com/library-authors/protocol/) says "both
@@ -125,6 +137,18 @@ reference library departs from it. In each case this library follows the referen
   the streams are dropped and `Shutdown` returns the context's error) (`app.go`).
 - **Question:** should the specification name these values, or leave them to each library?
 
+### SG-10: how often an unwritten request moves to another hub
+
+- **Specification:** [protocol.md, Several hubs](https://snodra.damoreira.com/library-authors/protocol/) says a
+  request never handed to a stream's transport "goes to the next hub with the same id"; it does not say how often,
+  should the next stream be lost too before it writes the request.
+- **Reference library:** moves such a request at most 8 times; the ninth loss fails the call as never sent
+  ("'<type>' not written: 9 hub streams lost before it was"). A request whose stream is gone before it could even be
+  queued goes to the next hub without counting as a move. Unary requests, scatter-gathers, streams and subscriptions
+  move alike.
+- **This library:** does the same (`send.go`, `stream_client.go`), failing with `ErrNeverSent`.
+- **Question:** should the specification bound the moves, and with which number?
+
 ### SG-11: which refusal a library keeps
 
 - **Specification:** [protocol.md, Connect and register](https://snodra.damoreira.com/library-authors/protocol/) says
@@ -174,6 +198,17 @@ reference library departs from it. In each case this library follows the referen
 - **This library:** does what the reference library does (`dispatch.go`).
 - **Question:** should the initial request carry something no scatter-gather target can (its own mode, or a header),
   or should the hub refuse a scatter-gather of a subscription type?
+
+### SG-14: the prefixes stripped from a target that stands for a hub id
+
+- **Specification:** [protocol.md, Several hubs](https://snodra.damoreira.com/library-authors/protocol/) says a hub
+  whose `RegisterAck.hub_id` is empty is known by its target as `host:port`, "with a `static://` prefix (and in the
+  Rust library `http://` or `https://`) stripped".
+- **Reference library:** strips `static://`, `http://` and `https://`, and accepts all three prefixes in the hub
+  address list.
+- **This library:** does the same (`targets.go`).
+- **Question:** should the `http://` and `https://` prefixes be part of the specification for every library, or
+  dropped from the reference library?
 
 ### SG-15: a live stream closed with a refusal code
 
@@ -284,3 +319,16 @@ reference library departs from it. In each case this library follows the referen
 - **This library:** does the same (`stream_client.go`; subscriptions in `subscribe.go`).
 - **Question:** should a retried stream send the remaining budget, as a unary request does, or its idle timeout
   unchanged; and should the specification say that a stream is retried only before its first part?
+
+### SG-22: a second target answering a hub id already served
+
+- **Specification:** [protocol.md, Several hubs](https://snodra.damoreira.com/library-authors/protocol/) says a later
+  target answering a `hub_id` another target owns "is closed and parked [...] and is retried only once the owner is
+  gone".
+- **Reference library:** closes such a target for good: it is never retried, also when the owner later answers
+  another id or reconnects elsewhere; with a `dns:///` target it is dropped once its address leaves the answer. The
+  Kotlin library parks it and retries it once the owner is gone (no longer resolved, or answering another id).
+- **This library:** does what the reference library does (`pool.go`, `connection.go`): the duplicate's connection
+  ends and opens no stream again.
+- **Question:** should a parked target be retried once its owner is gone, as the page and the Kotlin library say, or
+  closed for good as the reference library does?

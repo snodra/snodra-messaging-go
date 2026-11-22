@@ -825,9 +825,23 @@ func (c *hubConn) credentials() *hubpb.Credentials {
 	return nil
 }
 
-// emptyRegister is the Register with no types (a shutdown or a rollover), with the credentials.
-func (c *hubConn) emptyRegister() *hubpb.Register {
+// emptyRegister is the Register with no types (a shutdown, a rollover, an address that left the
+// DNS answer), with the credentials, offering the permits the stream offered so far.
+func (c *hubConn) emptyRegister(offered uint32) *hubpb.Register {
 	r := c.app.emptyRegisterMsg()
+	r.InitialPermits = offered
+	r.Credentials = c.credentials()
+	return r
+}
+
+// register is the Register of the connection's streams offering permits: the instance's types,
+// none once the connection is withdrawn (its address left the DNS answer).
+func (c *hubConn) register(permits uint32) *hubpb.Register {
+	if c.withdrawn.Load() {
+		return c.emptyRegister(permits)
+	}
+	r := c.app.registerMsg()
+	r.InitialPermits = permits
 	r.Credentials = c.credentials()
 	return r
 }

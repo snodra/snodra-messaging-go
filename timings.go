@@ -43,6 +43,10 @@ type timings struct {
 	// creditWait bounds how long a streaming handler waits for credit before its stream ends
 	// with TIMEOUT "no credit within ..." ([StreamCreditTimeout]).
 	creditWait time.Duration
+	// statusInterval is how often every live hub gets an InstanceStatus ([StatusInterval]).
+	statusInterval time.Duration
+	// dnsRefresh is how often a dns:/// target is resolved again.
+	dnsRefresh time.Duration
 }
 
 // permitBatch pending permit grants are written at once; it also caps the low-water mark
@@ -75,6 +79,18 @@ const (
 	// defaultMaxSubscriptions is how many subscriptions an instance serves at once when nothing
 	// sets it ([MaxSubscriptions]): the hub's own default limit per instance.
 	defaultMaxSubscriptions = 1024
+)
+
+// Several hubs (https://snodra.damoreira.com/library-authors/protocol/, Several hubs).
+const (
+	// maxUnwrittenMoves is how often one request may move to another hub because its stream was
+	// lost before the request was written; past that the call fails with [ErrNeverSent].
+	maxUnwrittenMoves = 8
+	// dnsDrainLimit bounds how long a hub address that left the DNS answer stays open for the
+	// requests of the instance in flight on it.
+	dnsDrainLimit = 65 * time.Second
+	// dnsDrainPoll is how often a hub address that left the DNS answer is checked for being idle.
+	dnsDrainPoll = 100 * time.Millisecond
 )
 
 // The checking of the callers' tokens (https://snodra.damoreira.com/library-authors/messages/,
@@ -130,6 +146,8 @@ func defaultTimings() timings {
 		rollReconnectLimit: 30 * time.Second,
 		tokenFetchWait:     tokenFetchTimeout + time.Second,
 		creditWait:         10 * time.Minute,
+		statusInterval:     5 * time.Second,
+		dnsRefresh:         30 * time.Second,
 	}
 }
 

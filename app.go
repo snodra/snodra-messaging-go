@@ -212,11 +212,12 @@ func (a *App) Shutdown(ctx context.Context) error {
 	if p == nil {
 		return nil
 	}
-	err := a.leave(ctx, p)
+	conns := p.closeMembership()
+	err := a.leave(ctx, conns)
 	a.kill()
 	// Every wait of a connection also watches killed, so they end at once; the grace only
 	// keeps a defect there from holding Shutdown past its deadline.
-	_ = waitAll(context.Background(), killGrace, p.dones())
+	_ = waitAll(context.Background(), killGrace, dones(conns))
 	a.mu.Lock()
 	a.stopErr = err
 	a.mu.Unlock()
@@ -236,11 +237,11 @@ func (a *App) kill() {
 
 // leave runs the shutdown's steps; the error is ctx's when it ended first.
 // TODO(spec-gap): SG-9 (only the 1 s for the empty Register's acks is specified).
-func (a *App) leave(ctx context.Context, p *pool) error {
-	for _, c := range p.conns {
+func (a *App) leave(ctx context.Context, conns []*hubConn) error {
+	for _, c := range conns {
 		c.stop()
 	}
-	if err := waitAll(ctx, a.cfg.timings.deregisterWait, p.deregistered()); err != nil {
+	if err := waitAll(ctx, a.cfg.timings.deregisterWait, deregistered(conns)); err != nil {
 		return err
 	}
 	// The handlers in flight finish; their replies still go out. Requests the hubs forward
@@ -264,10 +265,10 @@ func (a *App) leave(ctx context.Context, p *pool) error {
 			return err
 		}
 	}
-	for _, c := range p.conns {
+	for _, c := range conns {
 		c.close()
 	}
-	return waitAll(ctx, 0, p.dones()) // each connection bounds its own close wait
+	return waitAll(ctx, 0, dones(conns)) // each connection bounds its own close wait
 }
 
 // setDrainDeadline sets when the handler drain of the shutdown ends.
@@ -305,7 +306,9 @@ func waitAll(ctx context.Context, bound time.Duration, chans []<-chan struct{}) 
 	return nil
 }
 
-// HubIDs are the RegisterAck.hub_id of every hub whose stream is acknowledged now, sorted.
+// HubIDs are the RegisterAck.hub_id of every hub whose stream is acknowledged now, sorted (a
+// second address of one hub, closed as a duplicate, is not among them; an empty hub_id reads
+// as the hub's host:port).
 func (a *App) HubIDs() []string {
 	a.mu.Lock()
 	p := a.pool
@@ -314,22 +317,11 @@ func (a *App) HubIDs() []string {
 		return nil
 	}
 	var ids []string
-	for _, c := range p.conns {
-		if ack := c.ack(); ack != nil {
-			ids = append(ids, hubID(ack, c.address))
-		}
+	for _, h := range p.live() {
+		ids = append(ids, h.id)
 	}
 	slices.Sort(ids)
 	return slices.Compact(ids)
-}
-
-// hubID is the hub's own id, or its address for an ack without one (a real hub always names
-// itself).
-func hubID(ack *hubpb.RegisterAck, address string) string {
-	if id := ack.GetHubId(); id != "" {
-		return id
-	}
-	return address
 }
 
 // Rejection is the latest refusal of the Register by any hub, and false while none ever

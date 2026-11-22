@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -316,15 +317,16 @@ func (p *pendingCalls) remove(id string) {
 	p.mu.Unlock()
 }
 
-// writtenTo counts the calls written to ref that await their answer, except the streams and
-// subscriptions this instance reads: they end when their owners decide, so a certificate
-// rollover does not wait for them (it cuts them), as in the reference library.
-func (p *pendingCalls) writtenTo(ref *streamRef) int {
+// writtenTo counts the calls written to ref that await their answer. Without consumers it
+// leaves out the streams and subscriptions this instance reads: they end when their owners
+// decide, so a certificate rollover does not wait for them (it cuts them), as in the reference
+// library; the drain of an address that left the DNS answer waits for them.
+func (p *pendingCalls) writtenTo(ref *streamRef, consumers bool) int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	n := 0
 	for _, c := range p.byID {
-		if c.on.Load() == ref && c.inbox == nil {
+		if c.on.Load() == ref && (consumers || c.inbox == nil) {
 			n++
 		}
 	}
@@ -397,18 +399,70 @@ func (p *pendingCalls) end(e *hubpb.ReplyEnd) {
 	c.finish(answer{parts: parts, end: e})
 }
 
-// attempt sends tmpl once, with a fresh id and timeout chosen, to an acknowledged hub and waits
-// for its answer (a gather's: its parts and end), the local guard, the end of its stream or the
-// end of ctx. The answer may carry the hub's or the handler's error; the error is the attempt's
-// own failure.
+// attempt sends tmpl once, with a fresh id and timeout chosen, and waits for its answer (a
+// gather's: its parts and end), the local guard, the end of its stream or the end of ctx. The
+// answer may carry the hub's or the handler's error; the error is the attempt's own failure.
+//
+// Within the attempt the request keeps its id while it goes from hub to hub
+// (https://snodra.damoreira.com/library-authors/protocol/, Several hubs): when the stream it
+// was queued on is lost before the request was written, it goes to the next hub, at most
+// maxUnwrittenMoves times; and a unary request a hub answers with NO_HANDLER (never delivered)
+// goes to each other live hub in turn, at most once each, within what is left of chosen; when
+// every hub declined, the last answer is the attempt's.
 func (a *App) attempt(ctx context.Context, tmpl *hubpb.Request, chosen time.Duration) (answer, error) {
 	typ := tmpl.GetType()
-	c := &call{id: uuid.New(), answer: make(chan answer, 1), gather: tmpl.GetMode() == hubpb.RequestMode_SCATTER_GATHER}
-	ref, guard, err := a.write(ctx, tmpl, chosen, c)
-	if err != nil {
-		return answer{}, err
+	id := uuid.New()
+	defer a.calls.remove(id)
+	unary := tmpl.GetMode() == hubpb.RequestMode_UNARY
+	started := time.Now()
+	moves := 0
+	var declined []*hubConn // the hubs that answered NO_HANDLER
+	var noHandler *answer   // the last of those answers
+	for {
+		timeout := chosen
+		if noHandler != nil && chosen > 0 {
+			left := chosen - time.Since(started)
+			if left <= 0 {
+				return *noHandler, nil
+			}
+			timeout = max(left, minTimeout)
+		}
+		c := &call{id: id, answer: make(chan answer, 1), gather: tmpl.GetMode() == hubpb.RequestMode_SCATTER_GATHER}
+		ref, guard, conn, err := a.write(ctx, tmpl, timeout, c, declined)
+		if err != nil {
+			if noHandler != nil && ctx.Err() == nil {
+				return *noHandler, nil // no other hub left to try
+			}
+			return answer{}, err
+		}
+		ans, err := a.await(ctx, typ, c, ref, guard)
+		switch {
+		case errors.Is(err, errNotWritten):
+			// TODO(spec-gap): SG-10 (an unwritten request moves to another hub at most 8 times).
+			moves++
+			if moves > maxUnwrittenMoves {
+				return answer{}, fmt.Errorf("%w: '%s' not written: %d hub streams lost before it was", ErrNeverSent, typ, moves)
+			}
+			a.log.Debug("the hub stream was lost before the request was written; trying the next hub", "type", typ, "request", id)
+		case err != nil:
+			return answer{}, err
+		case unary && ans.failure.GetCode() == hubpb.ErrorCode_NO_HANDLER:
+			a.log.Debug("no handler on this hub; trying the others", "type", typ, "request", id, "hub", conn.address)
+			declined = append(declined, conn)
+			noHandler = &ans
+		default:
+			return ans, nil
+		}
 	}
-	defer a.calls.remove(c.id)
+}
+
+// errNotWritten is the end of a request whose stream was lost before the request was written:
+// it may go to another hub with the same id.
+var errNotWritten = errors.New("snodra: the hub stream was lost before the request was written")
+
+// await waits for the answer of c, written (or being written) to ref: the answer, the local
+// guard, the end of ref (errNotWritten when the request was never written) or the end of ctx.
+func (a *App) await(ctx context.Context, typ string, c *call, ref *streamRef, guard time.Duration) (answer, error) {
 	timer := time.NewTimer(guard)
 	defer timer.Stop()
 	select {
@@ -421,7 +475,7 @@ func (a *App) attempt(ctx context.Context, tmpl *hubpb.Request, chosen time.Dura
 		default:
 		}
 		if ref.withdraw(c) {
-			return answer{}, fmt.Errorf("%w: the hub stream closed before %s was written", ErrNeverSent, typ)
+			return answer{}, errNotWritten
 		}
 		return answer{}, fmt.Errorf("%w: the hub stream closed before the reply to %s", ErrOutcomeUnknown, typ)
 	case <-timer.C:
@@ -436,48 +490,62 @@ func (a *App) attempt(ctx context.Context, tmpl *hubpb.Request, chosen time.Dura
 	}
 }
 
-// write queues tmpl as the request of c (with c's id and the timeout chosen) for an
-// acknowledged hub's stream, c recorded as pending, and returns that stream and the request's
-// local guard (the hub's bound plus 1 s). When it fails, nothing was sent and c is not pending.
-func (a *App) write(ctx context.Context, tmpl *hubpb.Request, chosen time.Duration, c *call) (*streamRef, time.Duration, error) {
+// write queues tmpl as the request of c (with c's id and the timeout chosen) for the first hub
+// in the routing order of its key that takes it, skipping the hubs in skip, c recorded as
+// pending, and returns that stream, the request's local guard (the hub's bound plus 1 s) and
+// the hub. A hub whose stream is gone before the request is queued is passed over for the next
+// one (nothing was written). When it fails, nothing was sent and c is not pending.
+func (a *App) write(ctx context.Context, tmpl *hubpb.Request, chosen time.Duration, c *call, skip []*hubConn) (*streamRef, time.Duration, *hubConn, error) {
 	typ := tmpl.GetType()
 	a.mu.Lock()
 	p := a.pool
 	a.mu.Unlock()
 	if p == nil {
-		return nil, 0, fmt.Errorf("%w: the app is not started (sending %s)", ErrNeverSent, typ)
+		return nil, 0, nil, fmt.Errorf("%w: the app is not started (sending %s)", ErrNeverSent, typ)
 	}
-	conn, err := p.pick(tmpl.GetRoutingKey())
-	if err != nil {
-		return nil, 0, fmt.Errorf("%w (sending %s)", err, typ)
+	ranked := p.ranked(tmpl.GetRoutingKey())
+	if len(ranked) == 0 {
+		return nil, 0, nil, fmt.Errorf("%w: no hub has acknowledged the registration (sending %s)", ErrNeverSent, typ)
 	}
-	ref, ack := conn.live()
-	if ref == nil {
-		return nil, 0, fmt.Errorf("%w: the hub %s has no acknowledged stream (sending %s)", ErrNeverSent, conn.address, typ)
-	}
-	timeoutMS, guard := requestTiming(ack, typ, chosen)
-	req := &hubpb.Request{
-		Id:            c.id,
-		Kind:          tmpl.GetKind(),
-		Type:          typ,
-		RoutingKey:    tmpl.GetRoutingKey(),
-		Payload:       tmpl.GetPayload(),
-		Headers:       tmpl.GetHeaders(),
-		TimeoutMs:     timeoutMS,
-		Priority:      tmpl.GetPriority(),
-		Mode:          tmpl.GetMode(),
-		MaxResults:    tmpl.GetMaxResults(),
-		InitialCredit: tmpl.GetInitialCredit(),
-	}
-	a.calls.add(c)
-	if err := ref.sendRequest(ctx, &hubpb.ClientMessage{Message: &hubpb.ClientMessage_Request{Request: req}}, c); err != nil {
-		a.calls.remove(c.id)
-		if cerr := ctx.Err(); cerr != nil {
-			return nil, 0, fmt.Errorf("%w: %w", ErrNeverSent, cerr)
+	tried := false
+	for _, conn := range ranked {
+		if slices.Contains(skip, conn) {
+			continue
 		}
-		return nil, 0, fmt.Errorf("%w: the hub stream closed before %s was written", ErrNeverSent, typ)
+		ref, ack := conn.live()
+		if ref == nil {
+			continue
+		}
+		tried = true
+		timeoutMS, guard := requestTiming(ack, typ, chosen)
+		req := &hubpb.Request{
+			Id:            c.id,
+			Kind:          tmpl.GetKind(),
+			Type:          typ,
+			RoutingKey:    tmpl.GetRoutingKey(),
+			Payload:       tmpl.GetPayload(),
+			Headers:       tmpl.GetHeaders(),
+			TimeoutMs:     timeoutMS,
+			Priority:      tmpl.GetPriority(),
+			Mode:          tmpl.GetMode(),
+			MaxResults:    tmpl.GetMaxResults(),
+			InitialCredit: tmpl.GetInitialCredit(),
+		}
+		a.calls.add(c)
+		if err := ref.sendRequest(ctx, &hubpb.ClientMessage{Message: &hubpb.ClientMessage_Request{Request: req}}, c); err != nil {
+			a.calls.remove(c.id)
+			if cerr := ctx.Err(); cerr != nil {
+				return nil, 0, nil, fmt.Errorf("%w: %w", ErrNeverSent, cerr)
+			}
+			a.log.Debug("not written, trying the next hub", "type", typ, "request", c.id, "hub", conn.address)
+			continue
+		}
+		return ref, guard, conn, nil
 	}
-	return ref, guard, nil
+	if !tried && len(skip) > 0 {
+		return nil, 0, nil, fmt.Errorf("%w: no other hub to send %s to", ErrNeverSent, typ)
+	}
+	return nil, 0, nil, fmt.Errorf("%w: the hub stream closed before %s was written", ErrNeverSent, typ)
 }
 
 // answered is the payload of ans, or its error as the caller sees it.

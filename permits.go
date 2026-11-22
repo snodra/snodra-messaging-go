@@ -11,9 +11,10 @@ import (
 // (https://snodra.damoreira.com/library-authors/protocol/, Flow control). The hub holds
 // offered - received + returned of the stream's permits; a finished request's grant goes back
 // at once when that is at or below min(permitBatch, offered/2) (with one permit: every
-// completion) or when permitBatch grants are pending, else when the timer fires.
+// completion) or when permitBatch grants are pending, else when the timer fires. offered counts
+// the top-ups too (SG-4).
 type permitLedger struct {
-	offered  uint32 // Register.initial_permits (plus top-ups, with several hubs)
+	offered  uint32 // Register.initial_permits plus the top-ups (several hubs)
 	received uint32 // requests that arrived on the stream
 	returned uint32 // grants written in Permits messages
 	pending  uint32 // finished requests whose grant is not written yet
@@ -23,6 +24,17 @@ type permitLedger struct {
 // arrived counts a request the hub forwarded on the stream (it spent one of the permits).
 func (l *permitLedger) arrived() { l.received++ }
 
+// raise tops the stream up to share permits in all when it offered fewer, and returns the
+// permits to add (the Permits count); it never lowers them.
+func (l *permitLedger) raise(share uint32) uint32 {
+	if share <= l.offered {
+		return 0
+	}
+	n := share - l.offered
+	l.offered = share
+	return n
+}
+
 // finished counts a finished request: flushNow grants to write at once (0: none), armTimer
 // when the flush timer must be started.
 func (l *permitLedger) finished() (flushNow uint32, armTimer bool) {
@@ -30,6 +42,7 @@ func (l *permitLedger) finished() (flushNow uint32, armTimer bool) {
 	// The counters may wrap; their difference, the permits the hub spent and did not get
 	// back, is small, so it is read as a signed 32-bit number.
 	held := int64(l.offered) - int64(int32(l.received-l.returned))
+	// TODO(spec-gap): SG-4 (the mark of a stream that was topped up uses what it offered in all).
 	lowWater := int64(min(permitBatch, l.offered/2))
 	switch {
 	case held <= lowWater || l.pending >= permitBatch:
@@ -99,6 +112,26 @@ func (p *streamPermits) flush() {
 	n := p.ledger.timerFired()
 	p.mu.Unlock()
 	p.write(n)
+}
+
+// offeredNow is what the stream offered the hub so far: its Register's permits and the top-ups.
+func (p *streamPermits) offeredNow() uint32 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.ledger.offered
+}
+
+// topUp raises the stream's permits to share in all, when it offered fewer, with one
+// Permits{count = share - offered, grant = share}: the grant raises the hub's cap on the session
+// before the count is added, so the stream keeps them. Best effort, as every permit write.
+func (p *streamPermits) topUp(share uint32) (count uint32) {
+	p.mu.Lock()
+	count = p.ledger.raise(share)
+	p.mu.Unlock()
+	if count > 0 {
+		_ = p.ref.send(&hubpb.ClientMessage{Message: &hubpb.ClientMessage_Permits{Permits: &hubpb.Permits{Count: count, Grant: share}}})
+	}
+	return count
 }
 
 // write sends Permits{count n}; best effort: a stream that is gone takes its permits with it.

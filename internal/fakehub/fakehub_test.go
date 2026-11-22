@@ -145,6 +145,9 @@ func TestRecvHelpersSkipHeartbeatsAndStatuses(t *testing.T) {
 	if s.Heartbeats()[0].IsZero() {
 		t.Fatal("heartbeat arrival time not recorded")
 	}
+	if times := s.StatusTimes(); len(times) != 1 || times[0].IsZero() {
+		t.Fatalf("status arrival times %v", times)
+	}
 }
 
 func TestRecvHelperFailsOnAnotherKind(t *testing.T) {
