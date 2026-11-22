@@ -118,7 +118,7 @@ func TestASilentHubIsDroppedAfterThreeIntervals(t *testing.T) {
 func TestTheBackoffResetsAfterAnAck(t *testing.T) {
 	hub := fakehub.Start(t)
 	startApp(t, Hubs(hub.Addr()))
-	// Three refused attempts take the backoff to its 200 ms cap (50, 100, 200).
+	// Three UNAVAILABLE closes take the backoff to its 200 ms cap (50, 100, 200).
 	for i := 0; i < 3; i++ {
 		s := hub.Next(t)
 		s.RecvRegister(t)
@@ -246,7 +246,8 @@ func TestShutdownReturnsByItsDeadline(t *testing.T) {
 	start := time.Now()
 	err := app.Shutdown(ctxWithin(t, 50*ms)) // shorter than the 100 ms deregister wait
 	is(t, errors.Is(err, context.DeadlineExceeded), true)
-	within(t, time.Since(start), 0, 100*ms)
+	// The deadline, plus at most the 50 ms grace for the stopped connections, plus slack.
+	within(t, time.Since(start), 0, 50*ms+killGrace+100*ms)
 	is(t, len(app.HubIDs()), 0)
 }
 
@@ -362,6 +363,12 @@ func TestTheConnectionFollowsTheStateDiagram(t *testing.T) {
 }
 
 func TestShutdownLeavesNoGoroutineBehind(t *testing.T) {
+	for name, budget := range map[string]time.Duration{"in time": 5 * time.Second, "context expired": 20 * ms} {
+		t.Run(name, func(t *testing.T) { shutdownLeavesNoGoroutineBehind(t, budget) })
+	}
+}
+
+func shutdownLeavesNoGoroutineBehind(t *testing.T, budget time.Duration) {
 	hub := fakehub.Start(t)
 	before := runtime.NumGoroutine()
 	app, err := New(Service("orders-service"), Instance("i-1"), withTimings(scaled()), Hubs(hub.Addr(), "127.0.0.1:1"))
@@ -371,7 +378,12 @@ func TestShutdownLeavesNoGoroutineBehind(t *testing.T) {
 	s.RecvRegister(t)
 	s.Ack(t, fakehub.Ack("hub-1"))
 	is(t, app.Ready(ctxWithin(t, time.Second)), nil)
-	is(t, app.Shutdown(ctxWithin(t, 5*time.Second)), nil)
+	err = app.Shutdown(ctxWithin(t, budget))
+	if budget < time.Second {
+		is(t, errors.Is(err, context.DeadlineExceeded), true)
+	} else {
+		is(t, err, nil)
+	}
 	deadline := time.Now().Add(2 * time.Second)
 	for runtime.NumGoroutine() > before {
 		if time.Now().After(deadline) {
@@ -396,4 +408,34 @@ func TestARefusalCodeOnAnAcknowledgedStreamIsARefusal(t *testing.T) { // SG-15, 
 	rej, ok := app.Rejection()
 	is(t, ok, true)
 	is(t, rej.Code, "PERMISSION_DENIED")
+}
+
+func TestALateAckDuringShutdownIsIgnored(t *testing.T) {
+	hub := fakehub.Start(t)
+	app := startApp(t, Hubs(hub.Addr()))
+	s := hub.Next(t)
+	s.RecvRegister(t) // awaiting the ack when the shutdown begins
+	done := make(chan error, 1)
+	go func() { done <- app.Shutdown(ctxWithin(t, 5*time.Second)) }()
+	waitFor(t, func() bool { return app.pool.conns[0].stopRequested() })
+	s.Ack(t, fakehub.Ack("hub-1"))
+	s.HalfClosed(t, time.Second)
+	is(t, len(app.HubIDs()), 0) // never counted as registered
+	s.Nothing(t, 100*ms, "register")
+	is(t, <-done, nil)
+	is(t, app.Ready(ctxWithin(t, 100*ms)) != nil, true) // the shutdown, not a registration
+}
+
+func TestEachDistinctRefusalIsLoggedAtErrorOnce(t *testing.T) {
+	hub := fakehub.Start(t)
+	logs := &logRecorder{}
+	startApp(t, Hubs(hub.Addr()), Logger(slog.New(logs)))
+	s := hub.Next(t)
+	for _, msg := range []string{"reason A", "reason B", "reason A", "reason B"} {
+		s.RecvRegister(t)
+		s.Close(codes.AlreadyExists, msg)
+		s = hub.Next(t)
+	}
+	is(t, logs.count(slog.LevelError, "the hub refused the registration"), 2)
+	is(t, logs.count(slog.LevelDebug, "the hub refused the registration"), 2)
 }

@@ -2,6 +2,7 @@ package snodramessaging
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -52,6 +53,51 @@ func TestNewRefusesBadSettings(t *testing.T) {
 	refused("SNODRA_SERVER_ADDRESS", Service("orders-service"), Hubs(""))
 	refused("SNODRA_SERVER_ADDRESS", Service("orders-service"), Hubs("no-port"))
 	refused("Instance", Service("orders-service"), Hubs(hub), Instance(""))
+}
+
+// The reference libraries accept any reconnect backoff with 0 < min <= max: neither refuses a
+// maximum above the specification's 5 s nor floors a refusal's wait at 1 s (SG-16).
+func TestABackoffOutsideTheSpecificationIsAcceptedAsByTheReferenceLibraries(t *testing.T) {
+	app, err := New(Service("orders-service"), Hubs("127.0.0.1:7000"), ReconnectBackoff(1*s, 60*s))
+	is(t, err, nil)
+	is(t, app.cfg.timings.backoffMax, 60*s)
+	t.Setenv("SNODRA_SERVICE_NAME", "orders-service")
+	t.Setenv("SNODRA_RECONNECT_BACKOFF_MIN_MS", "50")
+	t.Setenv("SNODRA_RECONNECT_BACKOFF_MAX_MS", "100")
+	app, err = New(FromEnv(), Hubs("127.0.0.1:7000"))
+	is(t, err, nil)
+	is(t, app.cfg.timings.backoffMax, 100*ms)
+}
+
+func TestASecondShutdownReturnsTheFirstResult(t *testing.T) {
+	hub := fakehub.Start(t)
+	app := startApp(t, Hubs(hub.Addr()))
+	s := hub.Next(t)
+	s.RecvRegister(t)
+	s.Ack(t, fakehub.Ack("hub-1"))
+	is(t, app.Ready(ctxWithin(t, time.Second)), nil)
+	first := app.Shutdown(ctxWithin(t, 20*ms)) // shorter than the 100 ms deregister wait
+	is(t, errors.Is(first, context.DeadlineExceeded), true)
+	second := app.Shutdown(ctxWithin(t, 5*time.Second))
+	is(t, errors.Is(second, context.DeadlineExceeded), true)
+}
+
+func TestRunReportsAFailedShutdown(t *testing.T) {
+	hub := fakehub.Start(t)
+	app := newApp(t, Hubs(hub.Addr()))
+	done := make(chan error, 1)
+	go func() { done <- app.Run(context.Background()) }()
+	s := hub.Next(t)
+	s.RecvRegister(t)
+	s.Ack(t, fakehub.Ack("hub-1"))
+	is(t, app.Ready(ctxWithin(t, time.Second)), nil)
+	is(t, errors.Is(app.Shutdown(ctxWithin(t, 20*ms)), context.DeadlineExceeded), true)
+	select {
+	case err := <-done:
+		is(t, errors.Is(err, context.DeadlineExceeded), true) // not a clean stop
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return")
+	}
 }
 
 func TestNewDefaults(t *testing.T) {

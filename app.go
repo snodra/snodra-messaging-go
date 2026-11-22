@@ -39,6 +39,7 @@ type App struct {
 	mu        sync.Mutex
 	started   bool
 	stopping  bool
+	stopErr   error // the first Shutdown's result, returned by every later one
 	pool      *pool
 	rejection *Rejection
 }
@@ -142,7 +143,8 @@ func (a *App) Run(ctx context.Context) error {
 // it routes elsewhere at once), waiting at most 1 s for its acks; then the handlers in flight
 // finish; then each stream is half-closed and the hub gets at most 2 s to finish its side.
 // Every wait is also bounded by ctx: when ctx ends first, the streams are dropped and ctx's
-// error is returned. A second call waits for the first.
+// error is returned, at most 50 ms after ctx's deadline (the time given to the dropped streams'
+// goroutines to end). A second call waits for the first and returns its result.
 // See https://snodra.damoreira.com/library-authors/protocol/ (Shutting down).
 func (a *App) Shutdown(ctx context.Context) error {
 	a.mu.Lock()
@@ -150,7 +152,9 @@ func (a *App) Shutdown(ctx context.Context) error {
 		a.mu.Unlock()
 		select {
 		case <-a.closed:
-			return nil
+			a.mu.Lock()
+			defer a.mu.Unlock()
+			return a.stopErr
 		case <-ctx.Done():
 			return ctx.Err()
 		}
@@ -168,6 +172,9 @@ func (a *App) Shutdown(ctx context.Context) error {
 	// Every wait of a connection also watches killed, so they end at once; the grace only
 	// keeps a defect there from holding Shutdown past its deadline.
 	_ = waitAll(context.Background(), killGrace, p.dones())
+	a.mu.Lock()
+	a.stopErr = err
+	a.mu.Unlock()
 	return err
 }
 

@@ -59,3 +59,17 @@ reference library departs from it. In each case this library follows the referen
 - **This library:** treats it as a refusal whether or not the stream was acknowledged (`connection.go`); the
   certificate exception comes with client certificates.
 - **Question:** is a refusal code on an acknowledged stream a refusal of the registration?
+
+### SG-16: a configured reconnect backoff outside the specified range
+
+- **Specification:** [protocol.md, Connect and register](https://snodra.damoreira.com/library-authors/protocol/)
+  says that after a refused `Register` a library "waits at least 1 s, and at most its backoff cap of at most 5 s"
+  before the next attempt; [Reconnect and backoff](https://snodra.damoreira.com/library-authors/protocol/) caps the
+  backoff at 5 s.
+- **Reference library:** refuses only a minimum or maximum of 0 and a minimum above the maximum. A maximum above
+  5 s is accepted, and a refused `Register` waits 80 to 100 % of the configured maximum, without a 1 s floor (so a
+  maximum of 100 ms retries a refusal every 80 to 100 ms). The Kotlin library does the same.
+- **This library:** does what the reference libraries do (`options.go`, `connection.go`); the shipped default
+  (500 ms to 5 s) is inside the specified range, and `ReconnectBackoff` documents the range.
+- **Question:** should a library refuse (or clamp) a configured maximum above 5 s, and floor a refusal's wait at
+  1 s whatever the configuration?

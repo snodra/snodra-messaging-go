@@ -57,7 +57,10 @@ func newApp(t testing.TB, opts ...Option) *App {
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*s)
 		defer cancel()
-		if err := app.Shutdown(ctx); err != nil {
+		app.mu.Lock()
+		first := !app.stopping // a test's own failed Shutdown is its business
+		app.mu.Unlock()
+		if err := app.Shutdown(ctx); err != nil && first {
 			t.Errorf("Shutdown: %v", err)
 		}
 	})

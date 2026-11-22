@@ -37,6 +37,9 @@ func (s connState) String() string {
 	return [...]string{"connecting", "awaiting-ack", "live", "backoff", "rejected", "draining", "stopped"}[s]
 }
 
+// refusalsKept bounds the distinct refusals a connection remembers having logged at error.
+const refusalsKept = 64
+
 // errStreamGone is the error of a write to a stream that has ended.
 var errStreamGone = errors.New("snodra: the hub stream is gone")
 
@@ -138,8 +141,11 @@ func (c *hubConn) run() {
 	defer c.setState(stateStopped)
 	defer c.deregistered()
 	wait := c.t.backoffMin // the next ordinary wait, before its jitter
-	var logged *Rejection  // the refusal logged at error last; a repeat goes to debug
-	failures := 0          // ordinary closures since the last ack; the first is logged at warn
+	// The refusals logged at error since the last ack, by code and message: each distinct one
+	// is logged at error once, its repeats at debug. Bounded: past refusalsKept distinct
+	// refusals, the set starts over.
+	logged := map[[2]string]bool{}
+	failures := 0 // ordinary closures since the last ack; the first is logged at warn
 	for !c.stopRequested() {
 		c.setState(stateConnecting)
 		reached, err := c.runStream()
@@ -148,7 +154,8 @@ func (c *hubConn) run() {
 		}
 		if reached {
 			// A hub that acknowledged the Register is healthy: come back quickly.
-			wait, logged, failures = c.t.backoffMin, nil, 0
+			wait, failures = c.t.backoffMin, 0
+			clear(logged)
 		}
 		st := status.Convert(err)
 		if err == nil {
@@ -161,12 +168,17 @@ func (c *hubConn) run() {
 			c.setState(stateRejected)
 			rej := Rejection{Hub: c.address, Code: codeName(st.Code()), Message: st.Message(), At: time.Now()}
 			c.app.recordRejection(rej)
+			// TODO(spec-gap): SG-16 (80-100 % of the configured cap, without the 1 s floor).
 			pause = backoff.Jitter(c.t.backoffMax, c.t.backoffMax, rand.Float64())
-			level := slog.LevelError
-			if logged != nil && logged.Code == rej.Code && logged.Message == rej.Message {
+			level, key := slog.LevelError, [2]string{rej.Code, rej.Message}
+			if logged[key] {
 				level = slog.LevelDebug
+			} else {
+				if len(logged) >= refusalsKept {
+					clear(logged)
+				}
+				logged[key] = true
 			}
-			logged = &rej
 			c.log.Log(context.Background(), level, "the hub refused the registration",
 				"code", rej.Code, "reason", rej.Message, "retry_in", pause)
 		} else {
@@ -315,6 +327,12 @@ func (c *hubConn) serve(ref *streamRef, inbox <-chan *hubpb.ServerMessage, ended
 			switch k := m.GetMessage().(type) {
 			case *hubpb.ServerMessage_RegisterAck:
 				acks++
+				if !reached && c.stopRequested() {
+					// The shutdown began before the ack: the stream only waits for its
+					// half-close and never counts as registered (AwaitingAck ends on shutdown).
+					c.log.Debug("ignored a RegisterAck that arrived during the shutdown")
+					break
+				}
 				if !reached {
 					reached, handshake = true, nil
 					if n := k.RegisterAck.GetHeartbeatIntervalMs(); n > 0 {

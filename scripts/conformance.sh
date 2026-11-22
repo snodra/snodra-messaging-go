@@ -79,12 +79,18 @@ done
 # Wait for each hub's port (60 s at most).
 for i in $(seq 1 "$hubs"); do
   port=$((7000 + (i - 1) * 100))
+  up=no
   for _ in $(seq 1 120); do
     if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+      up=yes
       break
     fi
     sleep 0.5
   done
+  if [[ "$up" != yes ]]; then
+    echo "the hub $server_image did not open 127.0.0.1:$port within 60 s" >&2
+    exit 1
+  fi
 done
 
 "$runner" run \
