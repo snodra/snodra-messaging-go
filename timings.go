@@ -37,6 +37,9 @@ type timings struct {
 	// rollReconnectLimit bounds the wait for a rolled hub to register again with the renewed
 	// certificate before the next hub is rolled.
 	rollReconnectLimit time.Duration
+	// tokenFetchWait bounds the wait for an access token: tokenFetchTimeout and a grace, for a
+	// token source that ignores its context.
+	tokenFetchWait time.Duration
 }
 
 // permitBatch pending permit grants are written at once; it also caps the low-water mark
@@ -116,6 +119,7 @@ func defaultTimings() timings {
 		rollDelayMax:       30 * time.Second,
 		rollIdleLimit:      10 * time.Second,
 		rollReconnectLimit: 30 * time.Second,
+		tokenFetchWait:     tokenFetchTimeout + time.Second,
 	}
 }
 

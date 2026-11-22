@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -30,26 +31,41 @@ import (
 // or a client certificate (tls.go). One kind per instance.
 // See https://snodra.damoreira.com/library-authors/protocol/ (Credentials).
 
-// secret holds a credential. It lives behind a pointer, so that printing a config or an App
-// with %v shows an address, never the value; its String hides it too.
-type secret struct{ value string }
+// secret holds a credential behind a closure: fmt prints a func as an address, so no verb
+// shows the value, not even through the struct fields fmt prints raw (unexported ones, or with
+// a verb that does not fit them); its String hides it too.
+type secret struct{ get func() string }
 
-// newSecret is v as a secret; nil for a blank v.
+// newSecret is v, trimmed, as a secret; nil for a blank v.
 func newSecret(v string) *secret {
 	if v = strings.TrimSpace(v); v == "" {
 		return nil
 	}
-	return &secret{value: v}
+	return hide(v)
 }
 
+// hide is v as a secret, as it is.
+func hide(v string) *secret { return &secret{get: func() string { return v }} }
+
 func (s *secret) String() string { return "***" }
+
+// Format prints "***" whatever the verb.
+func (s *secret) Format(f fmt.State, _ rune) { printRedacted(f, s.String()) }
+
+// LogValue is "***", for log/slog.
+func (s *secret) LogValue() slog.Value { return slog.StringValue(s.String()) }
+
+// printRedacted writes text, a value's redacted form, whatever the verb: the types that hold a
+// credential implement fmt.Formatter with it, so no verb (%v, %+v, %#v, %d, %x ...) reaches
+// their fields.
+func printRedacted(f fmt.State, text string) { _, _ = io.WriteString(f, text) }
 
 // reveal is the value, to put on the wire; "" for none.
 func (s *secret) reveal() string {
 	if s == nil {
 		return ""
 	}
-	return s.value
+	return s.get()
 }
 
 // Token is the static token the instance presents to every hub (Register.credentials.token),
@@ -100,8 +116,8 @@ func (t AccessToken) String() string {
 	return "AccessToken{Value: ***, Expiry: " + t.Expiry.Format(time.RFC3339) + "}"
 }
 
-// GoString is String, for %#v.
-func (t AccessToken) GoString() string { return t.String() }
+// Format prints String whatever the verb.
+func (t AccessToken) Format(f fmt.State, _ rune) { printRedacted(f, t.String()) }
 
 // LogValue is String, for log/slog.
 func (t AccessToken) LogValue() slog.Value { return slog.StringValue(t.String()) }
@@ -159,8 +175,11 @@ func (c ClientCredentials) String() string {
 		c.TokenURL, c.ClientID, c.ClientSecretFile, c.Scope, c.CAFile)
 }
 
-// GoString is String, for %#v.
-func (c ClientCredentials) GoString() string { return c.String() }
+// Format prints String whatever the verb.
+func (c ClientCredentials) Format(f fmt.State, _ rune) { printRedacted(f, c.String()) }
+
+// LogValue is String, for log/slog.
+func (c ClientCredentials) LogValue() slog.Value { return slog.StringValue(c.String()) }
 
 // NewClientCredentials is a [TokenSource] fetching tokens with the OAuth2 client-credentials
 // grant: a POST of grant_type=client_credentials (and scope) to TokenURL, the client
@@ -173,7 +192,9 @@ func NewClientCredentials(c ClientCredentials) TokenSource {
 	c.TokenURL, c.ClientID = strings.TrimSpace(c.TokenURL), strings.TrimSpace(c.ClientID)
 	c.ClientSecret, c.ClientSecretFile = strings.TrimSpace(c.ClientSecret), strings.TrimSpace(c.ClientSecretFile)
 	c.Scope, c.CAFile = strings.TrimSpace(c.Scope), strings.TrimSpace(c.CAFile)
-	return &clientCredentials{cfg: c}
+	s := newSecret(c.ClientSecret)
+	c.ClientSecret = "" // held as a secret only
+	return &clientCredentials{cfg: c, secret: s}
 }
 
 // The most of a token response that is read, and the most of an error text that is kept.
@@ -184,12 +205,22 @@ const (
 
 // clientCredentials is the [TokenSource] of [NewClientCredentials].
 type clientCredentials struct {
-	cfg ClientCredentials
+	cfg    ClientCredentials // without ClientSecret
+	secret *secret           // ClientSecret
 
 	once sync.Once
 	hc   *http.Client
 	err  error
 }
+
+// String shows the settings, never the secret.
+func (cc *clientCredentials) String() string { return cc.cfg.String() }
+
+// Format prints String whatever the verb.
+func (cc *clientCredentials) Format(f fmt.State, _ rune) { printRedacted(f, cc.String()) }
+
+// LogValue is String, for log/slog.
+func (cc *clientCredentials) LogValue() slog.Value { return slog.StringValue(cc.String()) }
 
 // prepared checks the settings for service and builds the HTTP client: a copy with ClientID
 // defaulted to service.
@@ -210,10 +241,10 @@ func (cc *clientCredentials) prepared(service string) (*clientCredentials, error
 		if s == "" {
 			return nil, fmt.Errorf("snodra: ClientCredentials.ClientSecretFile (SNODRA_SERVER_OAUTH2_CLIENT_SECRET_FILE) '%s' is empty", c.ClientSecretFile)
 		}
-	case c.ClientSecret == "":
+	case cc.secret == nil:
 		return nil, errors.New("snodra: ClientCredentials needs a client secret: set ClientSecret (SNODRA_SERVER_OAUTH2_CLIENT_SECRET) or ClientSecretFile (SNODRA_SERVER_OAUTH2_CLIENT_SECRET_FILE)")
 	}
-	out := &clientCredentials{cfg: c}
+	out := &clientCredentials{cfg: c, secret: cc.secret}
 	if _, err := out.client(); err != nil {
 		return nil, fmt.Errorf("snodra: ClientCredentials.CAFile (SNODRA_SERVER_OAUTH2_CA) '%s' %w", c.CAFile, err)
 	}
@@ -268,7 +299,7 @@ func (cc *clientCredentials) Token(ctx context.Context) (AccessToken, error) {
 	if err != nil {
 		return AccessToken{}, fmt.Errorf("OAuth2 CA file '%s' %w", cc.cfg.CAFile, err)
 	}
-	secretValue := cc.cfg.ClientSecret
+	secretValue := cc.secret.reveal()
 	if f := cc.cfg.ClientSecretFile; f != "" {
 		if secretValue, err = readTokenFile(f); err != nil {
 			return AccessToken{}, fmt.Errorf("OAuth2 client secret file '%s' cannot be read: %w", f, err)
@@ -433,12 +464,26 @@ func refreshAt(lifetime time.Duration) time.Duration { return lifetime - refresh
 
 // issuedToken is an access token the provider fetched.
 type issuedToken struct {
-	value    string
+	secret   *secret   // the token
 	issued   time.Time // with the monotonic clock
 	lifetime time.Duration
 	expiry   time.Time // wall clock only
 	gen      uint64    // 1, 2, ... in fetch order
 }
+
+// value is the token, to put on the wire.
+func (t *issuedToken) value() string { return t.secret.reveal() }
+
+// String shows the token's generation and expiry, never its value.
+func (t *issuedToken) String() string {
+	return fmt.Sprintf("issuedToken{gen: %d, expiry: %s}", t.gen, t.expiry.Format(time.RFC3339))
+}
+
+// Format prints String whatever the verb.
+func (t *issuedToken) Format(f fmt.State, _ rune) { printRedacted(f, t.String()) }
+
+// LogValue is String, for log/slog.
+func (t *issuedToken) LogValue() slog.Value { return slog.StringValue(t.String()) }
 
 // remaining is how long the token still lives: the lesser of what the monotonic clock says
 // (immune to the wall clock being set) and what the wall clock says (immune to a suspended
@@ -480,11 +525,26 @@ type tokenProvider struct {
 	warned    bool // the unknown expiry was warned about
 	stopped   bool
 	stop      chan struct{}
+	stopCtx   context.Context // ends at close: the fetches and the renewal's wait
+	cancel    context.CancelFunc
+	wait      time.Duration // the longest anyone waits for a fetch
+	renewDone chan struct{} // closed when the renewal goroutine has returned
 }
 
-func newTokenProvider(src TokenSource, log *slog.Logger) *tokenProvider {
-	return &tokenProvider{src: src, log: log, changed: make(chan struct{}), stop: make(chan struct{})}
+func newTokenProvider(src TokenSource, log *slog.Logger, wait time.Duration) *tokenProvider {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &tokenProvider{src: src, log: log, changed: make(chan struct{}), stop: make(chan struct{}),
+		stopCtx: ctx, cancel: cancel, wait: wait, renewDone: make(chan struct{})}
 }
+
+// String names the provider, never a token.
+func (p *tokenProvider) String() string { return "tokenProvider{}" }
+
+// Format prints String whatever the verb.
+func (p *tokenProvider) Format(f fmt.State, _ rune) { printRedacted(f, p.String()) }
+
+// LogValue is String, for log/slog.
+func (p *tokenProvider) LogValue() slog.Value { return slog.StringValue(p.String()) }
 
 var errTokensStopped = errors.New("the access token provider is stopped")
 
@@ -501,7 +561,8 @@ func (p *tokenProvider) token(ctx context.Context) (*issuedToken, error) {
 }
 
 // refresh fetches a new token, joining a fetch under way. The fetch is detached from ctx:
-// ctx ending returns ctx's error without failing the others.
+// ctx ending returns ctx's error without failing the others. The wait is bounded by p.wait, for
+// a source that ignores its context (the fetch stays shared until it returns).
 func (p *tokenProvider) refresh(ctx context.Context) (*issuedToken, error) {
 	p.mu.Lock()
 	if p.stopped {
@@ -515,11 +576,15 @@ func (p *tokenProvider) refresh(ctx context.Context) (*issuedToken, error) {
 		go p.fetch(f)
 	}
 	p.mu.Unlock()
+	timer := time.NewTimer(p.wait)
+	defer timer.Stop()
 	select {
 	case <-f.done:
 		return f.tok, f.err
 	case <-ctx.Done():
 		return nil, ctx.Err()
+	case <-timer.C:
+		return nil, fmt.Errorf("the token source did not answer within %v", p.wait)
 	}
 }
 
@@ -530,22 +595,16 @@ func (p *tokenProvider) fetch(f *tokenFlight) {
 	var err error
 	defer func() {
 		if r := recover(); r != nil {
-			tok, err = nil, fmt.Errorf("the token source failed: %v", r)
+			p.log.Error("the token source panicked", "panic", fmt.Sprint(r), "stack", string(debug.Stack()))
+			tok, err = nil, fmt.Errorf("the token source panicked: %v", r)
 		}
 		p.mu.Lock()
 		p.flight, f.tok, f.err = nil, tok, err
 		p.mu.Unlock()
 		close(f.done)
 	}()
-	ctx, cancel := context.WithTimeout(context.Background(), tokenFetchTimeout)
+	ctx, cancel := context.WithTimeout(p.stopCtx, tokenFetchTimeout)
 	defer cancel()
-	go func() {
-		select {
-		case <-p.stop:
-			cancel()
-		case <-ctx.Done():
-		}
-	}()
 	at, err := p.src.Token(ctx)
 	if err != nil {
 		return
@@ -569,14 +628,14 @@ func (p *tokenProvider) publish(at AccessToken, now time.Time) (*issuedToken, er
 	} else if lifetime = at.Expiry.Sub(now); lifetime <= 0 {
 		return nil, errors.New("the access token from the token source has already expired")
 	}
-	if prev := p.published; prev != nil && prev.value == at.Value {
+	if prev := p.published; prev != nil && prev.value() == at.Value {
 		// The source gave the token it gave before (it caches): not a renewal to send again.
-		tok := &issuedToken{value: at.Value, issued: now, lifetime: lifetime, expiry: now.Add(lifetime).Round(0), gen: prev.gen}
+		tok := &issuedToken{secret: hide(at.Value), issued: now, lifetime: lifetime, expiry: now.Add(lifetime).Round(0), gen: prev.gen}
 		p.current, p.published = tok, tok
 		return tok, nil
 	}
 	p.gen++
-	tok := &issuedToken{value: at.Value, issued: now, lifetime: lifetime, expiry: now.Add(lifetime).Round(0), gen: p.gen}
+	tok := &issuedToken{secret: hide(at.Value), issued: now, lifetime: lifetime, expiry: now.Add(lifetime).Round(0), gen: p.gen}
 	p.current, p.published = tok, tok
 	close(p.changed)
 	p.changed = make(chan struct{})
@@ -600,7 +659,7 @@ func (p *tokenProvider) follow() (*issuedToken, <-chan struct{}) {
 func (p *tokenProvider) invalidate(value string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.current != nil && p.current.value == value {
+	if p.current != nil && p.current.value() == value {
 		p.current = nil
 	}
 }
@@ -612,6 +671,7 @@ func (p *tokenProvider) close() {
 	if !p.stopped {
 		p.stopped = true
 		close(p.stop)
+		p.cancel()
 	}
 }
 
@@ -619,6 +679,7 @@ func (p *tokenProvider) close() {
 // failure it retries after tokenRetryMin, doubling up to tokenRetryMax, keeping the token it
 // has. It wakes at least every tokenWakeInterval to look at the clocks again.
 func (p *tokenProvider) renew() {
+	defer close(p.renewDone)
 	failures := 0
 	logged := "" // the failure logged at warn last; a repeat goes to debug
 	for {
@@ -646,9 +707,9 @@ func (p *tokenProvider) renew() {
 			failures, logged = 0, ""
 			continue
 		}
-		tok, err := p.refresh(context.Background())
+		tok, err := p.refresh(p.stopCtx)
 		switch {
-		case errors.Is(err, errTokensStopped):
+		case errors.Is(err, errTokensStopped) || p.stopCtx.Err() != nil:
 			return
 		case err != nil:
 			failures++
@@ -685,23 +746,23 @@ func (e *noTokenError) Error() string { return e.msg }
 func (c *hubConn) resolveToken() error {
 	cfg := c.app.cfg
 	if cfg.tokenFile == "" {
-		c.token = cfg.token.reveal()
+		c.token = cfg.token
 		return nil
 	}
 	tok, err := readTokenFile(cfg.tokenFile)
 	switch {
-	case err != nil && c.token == "":
+	case err != nil && c.token == nil:
 		return status.Errorf(codes.FailedPrecondition, "the hub token file '%s' cannot be read: %v", cfg.tokenFile, err)
 	case err != nil:
 		c.log.Warn("the hub token file cannot be read; keeping the last token", "path", cfg.tokenFile, "error", err.Error())
 	case tok == "":
 		// A non-atomic rotation caught between the truncate and the write.
-		if c.token != "" && !c.emptyWarned {
+		if c.token != nil && !c.emptyWarned {
 			c.emptyWarned = true
 			c.log.Warn("the hub token file is empty (a rotation in progress?); keeping the last token", "path", cfg.tokenFile)
 		}
 	default:
-		c.token, c.emptyWarned = tok, false
+		c.token, c.emptyWarned = hide(tok), false
 	}
 	return nil
 }
@@ -716,10 +777,10 @@ func (c *hubConn) followTokenFile(ref *streamRef) {
 		return
 	}
 	tok, err := readTokenFile(path)
-	if err != nil || tok == "" || tok == c.token {
+	if err != nil || tok == "" || tok == c.token.reveal() {
 		return
 	}
-	c.token, c.emptyWarned = tok, false
+	c.token, c.emptyWarned = hide(tok), false
 	if ref.send(credentialsFrame(&hubpb.Credentials{Kind: &hubpb.Credentials_Token{Token: tok}})) == nil {
 		c.log.Debug("the hub token file changed; refreshed on the hub stream")
 	}
@@ -737,8 +798,8 @@ func (c *hubConn) followToken(ref *streamRef, registered bool, tok *issuedToken)
 		return
 	}
 	c.sentGen = tok.gen
-	if ref.send(credentialsFrame(&hubpb.Credentials{Kind: &hubpb.Credentials_Jwt{Jwt: tok.value}})) == nil {
-		c.presentedJWT = tok.value
+	if ref.send(credentialsFrame(&hubpb.Credentials{Kind: &hubpb.Credentials_Jwt{Jwt: tok.value()}})) == nil {
+		c.presentedJWT = tok.secret
 		c.log.Debug("the access token is refreshed on the hub stream", "expires_at", tok.expiry)
 	}
 }
@@ -747,9 +808,9 @@ func (c *hubConn) followToken(ref *streamRef, registered bool, tok *issuedToken)
 // as unauthenticated: the next stream registers with a new one. Not for PERMISSION_DENIED, which
 // a new token would not change.
 func (c *hubConn) retirePresentedToken() {
-	if p := c.app.tokens; p != nil && c.presentedJWT != "" {
-		p.invalidate(c.presentedJWT)
-		c.presentedJWT = ""
+	if p := c.app.tokens; p != nil && c.presentedJWT != nil {
+		p.invalidate(c.presentedJWT.reveal())
+		c.presentedJWT = nil
 	}
 }
 
@@ -757,9 +818,9 @@ func (c *hubConn) retirePresentedToken() {
 func (c *hubConn) credentials() *hubpb.Credentials {
 	switch {
 	case c.jwt != nil:
-		return &hubpb.Credentials{Kind: &hubpb.Credentials_Jwt{Jwt: c.jwt.value}}
-	case c.token != "":
-		return &hubpb.Credentials{Kind: &hubpb.Credentials_Token{Token: c.token}}
+		return &hubpb.Credentials{Kind: &hubpb.Credentials_Jwt{Jwt: c.jwt.value()}}
+	case c.token != nil:
+		return &hubpb.Credentials{Kind: &hubpb.Credentials_Token{Token: c.token.reveal()}}
 	}
 	return nil
 }

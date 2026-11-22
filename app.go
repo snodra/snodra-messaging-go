@@ -66,7 +66,9 @@ type App struct {
 // PERMISSION_DENIED instead of acknowledging it. The instance keeps running and retries at
 // its backoff cap. With [JWT], a failure to get an access token, when no stream could be
 // opened, is kept too (Code UNAUTHENTICATED, a Message that names the access token); it is
-// retried at the ordinary backoff.
+// retried at the ordinary backoff. Like any kept refusal it is not cleared when a hub accepts
+// the Register later: a token endpoint that failed once at startup leaves it here while the
+// instance runs registered, and it replaces an earlier refusal by a hub.
 type Rejection struct {
 	// Hub is the hub's address (host:port); a refused Register carries no hub id.
 	Hub string
@@ -98,7 +100,7 @@ func New(opts ...Option) (*App, error) {
 	log := cfg.logger.With("service", cfg.service, "instance", cfg.instance)
 	var tokens *tokenProvider
 	if cfg.tokenSource != nil {
-		tokens = newTokenProvider(cfg.tokenSource, log)
+		tokens = newTokenProvider(cfg.tokenSource, log, cfg.timings.tokenFetchWait)
 	}
 	return &App{
 		cfg:            cfg,

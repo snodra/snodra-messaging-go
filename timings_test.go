@@ -35,4 +35,6 @@ func TestDefaultTimings(t *testing.T) {
 	is(t, tokenRetryMax, 30*s)
 	is(t, tokenWakeInterval, 5*s)
 	is(t, rollSettle, 50*ms)
+	is(t, rollPoll, 10*ms)
+	is(t, d.tokenFetchWait, 11*s)
 }

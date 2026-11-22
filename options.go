@@ -47,6 +47,11 @@ type config struct {
 	writeHook func(ctx context.Context, m *hubpb.ClientMessage)
 }
 
+// Format prints the instance's identity and hubs whatever the verb, never a credential.
+func (c config) Format(f fmt.State, _ rune) {
+	_, _ = fmt.Fprintf(f, "config{service: %s, instance: %s, hubs: %v}", c.service, c.instance, c.hubs)
+}
+
 func defaultConfig() config {
 	return config{
 		maxConcurrent: 256,

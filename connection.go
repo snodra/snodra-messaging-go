@@ -61,11 +61,11 @@ type hubConn struct {
 	rollReq chan *streamRef // a client certificate rollover asked for this stream (buffered)
 
 	// The credentials, touched by the connection's goroutine only.
-	token           string          // the static token the streams register with (from a file: the last read)
+	token           *secret         // the static token the streams register with (from a file: the last read)
 	emptyWarned     bool            // the empty token file was warned about since the last good read
 	jwt             *issuedToken    // the access token the Registers carry
 	sentGen         uint64          // the newest token generation the current stream registered with or got
-	presentedJWT    string          // the access token the current stream presented last
+	presentedJWT    *secret         // the access token the current stream presented last
 	identity        *clientIdentity // the last good client certificate pair
 	identityProblem string          // the problem with the certificate files warned about last
 	rolled          bool            // the stream ended for a rollover: reconnect at once
@@ -77,6 +77,15 @@ type hubConn struct {
 	presentedCert *clientIdentity    // the client certificate of the current stream
 	rolling       bool               // being rolled over to a renewed client certificate
 }
+
+// String names the connection by its hub, never its credentials.
+func (c *hubConn) String() string { return "hubConn{" + c.address + "}" }
+
+// Format prints String whatever the verb.
+func (c *hubConn) Format(f fmt.State, _ rune) { _, _ = io.WriteString(f, c.String()) }
+
+// LogValue is String, for log/slog.
+func (c *hubConn) LogValue() slog.Value { return slog.StringValue(c.String()) }
 
 func newHubConn(a *App, address string) *hubConn {
 	return &hubConn{
@@ -285,7 +294,7 @@ func (c *hubConn) runStream() (reached bool, err error) {
 			}
 			return false, &noTokenError{msg: fmt.Sprintf("no access token for %s (%s): %v", c.app.cfg.service, c.app.cfg.instance, err)}
 		}
-		c.jwt, c.sentGen, c.presentedJWT = tok, tok.gen, tok.value
+		c.jwt, c.sentGen, c.presentedJWT = tok, tok.gen, tok.secret
 	}
 	var id *clientIdentity
 	if c.app.cfg.clientCert != "" {

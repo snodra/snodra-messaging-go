@@ -3,8 +3,10 @@ package snodramessaging
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -407,4 +409,147 @@ func TestATokenResponseIsChecked(t *testing.T) {
 	tok, err := NewClientCredentials(ClientCredentials{TokenURL: srv.URL, ClientID: "a", ClientSecret: "b"}).Token(context.Background())
 	is(t, err, nil)
 	within(t, time.Until(tok.Expiry), 29*s, 30*s)
+}
+
+// printings are every way fmt and log/slog may show v.
+func printings(v any) map[string]string {
+	out := map[string]string{}
+	for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%d", "%x", "%q"} {
+		out[verb] = fmt.Sprintf(verb, v)
+	}
+	var text, js bytes.Buffer
+	slog.New(slog.NewTextHandler(&text, nil)).Info("m", "v", v)
+	slog.New(slog.NewJSONHandler(&js, nil)).Info("m", "v", v)
+	out["slog text"], out["slog json"] = text.String(), js.String()
+	return out
+}
+
+func TestNothingPrintsASecret(t *testing.T) {
+	const secretValue = "TOPSECRET-value"
+	src := NewClientCredentials(ClientCredentials{TokenURL: "http://idp/token", ClientID: "a", ClientSecret: secretValue})
+	p := newTokenProvider(staticSecretSource{secretValue}, slog.New(slog.DiscardHandler), time.Second)
+	t.Cleanup(p.close)
+	tok, err := p.token(context.Background())
+	is(t, err, nil)
+	app := newApp(t, Hubs("hub:7000"), Token(secretValue))
+	conn := newHubConn(app, "hub:7000")
+	conn.token, conn.presentedJWT, conn.jwt = newSecret(secretValue), newSecret(secretValue), tok
+	id := &clientIdentity{cert: func() tls.Certificate { return tls.Certificate{} }, service: "orders-service"}
+	for what, v := range map[string]any{
+		"the client-credentials source": src,
+		"the settings":                  ClientCredentials{ClientSecret: secretValue},
+		"an access token":               AccessToken{Value: secretValue},
+		"a secret":                      newSecret(secretValue),
+		"an issued token":               tok,
+		"the token provider":            p,
+		"a connection":                  conn,
+		"the config":                    app.cfg,
+		"the app":                       app,
+		"a certificate pair":            id,
+	} {
+		for how, text := range printings(v) {
+			if strings.Contains(text, secretValue) || strings.Contains(text, fmt.Sprintf("%x", secretValue)) {
+				t.Fatalf("%s printed with %s shows the secret: %s", what, how, text)
+			}
+		}
+	}
+}
+
+// staticSecretSource gives v as the token, for an hour.
+type staticSecretSource struct{ v string }
+
+func (s staticSecretSource) Token(context.Context) (AccessToken, error) {
+	return AccessToken{Value: s.v, Expiry: time.Now().Add(time.Hour)}, nil
+}
+
+// blockingSource answers its first `answers` calls with a token living `life`, then blocks,
+// ignoring its context, until the test ends.
+type blockingSource struct {
+	answers int64
+	life    time.Duration
+	calls   atomic.Int64
+	release chan struct{}
+}
+
+func newBlockingSource(t *testing.T, answers int64, life time.Duration) *blockingSource {
+	b := &blockingSource{answers: answers, life: life, release: make(chan struct{})}
+	t.Cleanup(func() { close(b.release) })
+	return b
+}
+
+func (b *blockingSource) Token(context.Context) (AccessToken, error) {
+	if n := b.calls.Add(1); n <= b.answers {
+		return AccessToken{Value: fmt.Sprintf("jwt-%d", n), Expiry: time.Now().Add(b.life)}, nil
+	}
+	<-b.release
+	return AccessToken{}, errors.New("released")
+}
+
+func TestATokenSourceThatNeverAnswersIsATokenFailure(t *testing.T) { // SG-7
+	src := newBlockingSource(t, 0, 0)
+	tm := scaled()
+	tm.tokenFetchWait = 200 * ms
+	hub := fakehub.Start(t)
+	app := startApp(t, Hubs(hub.Addr()), JWT(src), withTimings(tm))
+	hub.NoStreamWithin(t, 400*ms)
+	rej, ok := app.Rejection()
+	if !ok || !strings.Contains(rej.Message, "access token") || !strings.Contains(rej.Message, "did not answer") {
+		t.Fatalf("rejection %+v, %v", rej, ok)
+	}
+	start := time.Now()
+	is(t, app.Shutdown(ctxWithin(t, 2*time.Second)), nil)
+	within(t, time.Since(start), 0, 500*ms)
+}
+
+func TestTheRenewalEndsAtShutdownWhenTheSourceHangs(t *testing.T) {
+	src := newBlockingSource(t, 1, 2*time.Second) // renewed after 1 s, then the source hangs
+	hub := fakehub.Start(t)
+	app := startApp(t, Hubs(hub.Addr()), JWT(src))
+	s := hub.Next(t)
+	is(t, s.RecvRegister(t).GetCredentials().GetJwt(), "jwt-1")
+	s.Ack(t, fakehub.Ack("hub-1"))
+	deadline := time.Now().Add(3 * time.Second)
+	for src.calls.Load() < 2 { // the renewal is waiting on the hung source
+		if time.Now().After(deadline) {
+			t.Fatal("no renewal")
+		}
+		time.Sleep(10 * ms)
+	}
+	is(t, app.Shutdown(ctxWithin(t, 3*time.Second)), nil)
+	select {
+	case <-app.tokens.renewDone:
+	case <-time.After(time.Second):
+		t.Fatal("the renewal goroutine outlived the shutdown")
+	}
+}
+
+// panicSource panics on every call.
+type panicSource struct{}
+
+func (panicSource) Token(context.Context) (AccessToken, error) { panic("source defect") }
+
+func TestAPanickingTokenSourceIsLoggedWithItsStack(t *testing.T) {
+	rec := &logRecorder{}
+	hub := fakehub.Start(t)
+	app := startApp(t, Hubs(hub.Addr()), JWT(panicSource{}), Logger(slog.New(rec)))
+	hub.NoStreamWithin(t, 200*ms)
+	if rec.count(slog.LevelError, "the token source panicked") == 0 {
+		t.Fatal("the panic was not logged at error")
+	}
+	rec.mu.Lock()
+	hasStack := false
+	for _, r := range rec.records {
+		if r.Message == "the token source panicked" {
+			r.Attrs(func(a slog.Attr) bool {
+				hasStack = hasStack || (a.Key == "stack" && strings.Contains(a.Value.String(), "goroutine"))
+				return true
+			})
+		}
+	}
+	rec.mu.Unlock()
+	is(t, hasStack, true)
+	rej, _ := app.Rejection()
+	if !strings.Contains(rej.Message, "source defect") {
+		t.Fatalf("rejection %+v", rej)
+	}
 }

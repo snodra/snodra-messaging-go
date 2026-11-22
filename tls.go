@@ -11,6 +11,8 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"math/rand/v2"
 	"os"
 	"strings"
@@ -102,7 +104,7 @@ func (c *hubConn) transport(id *clientIdentity) (credentials.TransportCredential
 		cfg.RootCAs = pool
 	}
 	if id != nil {
-		cert := id.cert
+		cert := id.cert()
 		// Presented whatever CAs the hub names: the hub decides.
 		cfg.GetClientCertificate = func(*tls.CertificateRequestInfo) (*tls.Certificate, error) { return &cert, nil }
 	}
@@ -115,13 +117,25 @@ const serviceSANPrefix = "snodra://service/"
 // clientIdentity is a client certificate pair that was read and checked: both files parse, the
 // key is the leaf's, the leaf names one service.
 type clientIdentity struct {
-	cert        tls.Certificate
+	cert        func() tls.Certificate // behind a closure: no printing reaches the key
 	service     string
 	fingerprint string   // the first 8 hex characters of the SHA-256 of the leaf: what is logged
 	digest      [32]byte // over both files: tells a renewed pair from the one in use
 	notBefore   time.Time
 	notAfter    time.Time
 }
+
+// String shows the service, the fingerprint and the validity, never the key.
+func (id *clientIdentity) String() string {
+	return fmt.Sprintf("clientIdentity{service: %s, fingerprint: %s, notAfter: %s}", id.service, id.fingerprint,
+		id.notAfter.UTC().Format(time.RFC3339))
+}
+
+// Format prints String whatever the verb.
+func (id *clientIdentity) Format(f fmt.State, _ rune) { _, _ = io.WriteString(f, id.String()) }
+
+// LogValue is String, for log/slog.
+func (id *clientIdentity) LogValue() slog.Value { return slog.StringValue(id.String()) }
 
 // certProblem is why a client certificate pair cannot be used.
 type certProblem int
@@ -213,7 +227,7 @@ func loadClientIdentity(certFile, keyFile, service string) (*clientIdentity, err
 	h.Write(certPEM)
 	h.Write(keyPEM)
 	id := &clientIdentity{
-		cert:        pair,
+		cert:        func() tls.Certificate { return pair },
 		service:     named[0],
 		fingerprint: hex.EncodeToString(sum[:4]),
 		notBefore:   leaf.NotBefore,
