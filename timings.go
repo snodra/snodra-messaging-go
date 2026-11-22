@@ -32,6 +32,28 @@ type timings struct {
 // min(permitBatch, initial_permits/2) at or below which a grant goes back at once.
 const permitBatch uint32 = 16
 
+// The sender's clocks (https://snodra.damoreira.com/library-authors/protocol/, Timeouts and
+// Never sent or outcome unknown).
+const (
+	// guardMargin is added to the hub's bound for a request: the local guard gives up only after
+	// it, so the hub's own TIMEOUT normally arrives first.
+	guardMargin = 1 * time.Second
+	// fallbackMaxTimeout is the hub's maximum for an ack that names none (a hub always does).
+	fallbackMaxTimeout = 60 * time.Second
+	// defaultBudget is the time the attempts of a retried call share when neither the caller nor
+	// the hub's ack gives one (no hub acknowledged yet).
+	defaultBudget = 5 * time.Second
+	// retryMinRemaining is the least of a call's budget a retry must have left after its wait
+	// (or the policy's initial backoff, when larger).
+	retryMinRemaining = 250 * time.Millisecond
+	// minTimeout is the smallest Request.timeout_ms a chosen timeout is sent as (0 would mean
+	// "the hub decides").
+	minTimeout = time.Millisecond
+	// outboundLimit is how many requests may wait in a stream's outbound buffer; a send waits for
+	// room beyond it (the library's own frames never wait).
+	outboundLimit = 256
+)
+
 // defaultTimings are the shipped values.
 func defaultTimings() timings {
 	return timings{

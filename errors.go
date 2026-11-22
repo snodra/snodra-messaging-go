@@ -90,7 +90,10 @@ func InvalidRequest(msg string) error {
 }
 
 // WithDetails attaches details, marshalled with encoding/json, to err; the
-// handler answers them as the error's details. A nil err stays nil.
+// handler answers them as the error's details (sent only when the answer is
+// HANDLER_ERROR: an error of [InvalidRequest] and the like keeps its code and
+// loses the details). A nil err stays nil. Details that encoding/json cannot
+// marshal are dropped: err is returned as it is.
 func WithDetails(err error, details any) error {
 	if err == nil {
 		return nil
@@ -102,17 +105,40 @@ func WithDetails(err error, details any) error {
 	return &handlerError{msg: err.Error(), details: raw, cause: err}
 }
 
-func errorFromWire(e *hubpb.Error) *Error {
+// errorFromWire is the error a caller of a request of type typ gets for the hub's or the
+// handler's e: its code (an unknown one, and ERROR_CODE_UNSPECIFIED, read as HANDLER_ERROR), the
+// details for HANDLER_ERROR only, and the message, except for NO_HANDLER, TIMEOUT,
+// HANDLER_DISCONNECTED and RESOURCE_EXHAUSTED, whose message is the library's own, naming typ, as
+// in the reference libraries.
+// TODO(spec-gap): SG-17 (the message of the codes no handler produces).
+func errorFromWire(typ string, e *hubpb.Error) *Error {
 	code := Code(e.GetCode())
 	if code < CodeNoHandler || code > CodeCancelled {
 		code = CodeHandlerError
 	}
-	out := &Error{Code: code, Message: e.GetMessage()}
+	msg := e.GetMessage()
+	switch code {
+	case CodeNoHandler:
+		msg = noHandlerText(typ)
+	case CodeTimeout:
+		msg = timeoutText(typ)
+	case CodeHandlerDisconnected:
+		msg = "Handler for '" + typ + "' disconnected"
+	case CodeResourceExhausted:
+		msg = "Handler for '" + typ + "' is busy"
+	}
+	out := &Error{Code: code, Message: msg}
 	if code == CodeHandlerError && len(e.GetDetails()) > 0 {
 		out.Details = json.RawMessage(append([]byte(nil), e.GetDetails()...))
 	}
 	return out
 }
+
+// noHandlerText is the message of NO_HANDLER for typ, the reference library's.
+func noHandlerText(typ string) string { return "No handler registered for '" + typ + "'" }
+
+// timeoutText is the message of TIMEOUT for typ, the reference library's.
+func timeoutText(typ string) string { return "Timed out waiting for reply to '" + typ + "'" }
 
 var lineBreaks = strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ")
 

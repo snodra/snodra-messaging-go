@@ -39,10 +39,10 @@ func started(t *testing.T, e env) (*snodra.App, *fakehub.Hub, *fakehub.Stream) {
 	})
 	s := hub.Next(t)
 	r := s.RecvRegister(t)
-	if got := strings.Join(r.GetCommandTypes(), ","); got != "conformance.Done,conformance.Echo,conformance.Fail,conformance.Sleep,conformance.Strict" {
+	if got := strings.Join(r.GetCommandTypes(), ","); got != "conformance.Done,conformance.Echo,conformance.Fail,conformance.Relay,conformance.Send,conformance.Sleep,conformance.Strict" {
 		t.Fatalf("command types %s", got)
 	}
-	if got := strings.Join(r.GetQueryTypes(), ","); got != "conformance.EchoQuery,conformance.SleepQuery,conformance.View" {
+	if got := strings.Join(r.GetQueryTypes(), ","); got != "conformance.EchoQuery,conformance.Outcome,conformance.SleepQuery,conformance.View" {
 		t.Fatalf("query types %s", got)
 	}
 	return app, hub, s
@@ -91,7 +91,7 @@ func decode(t *testing.T, r *hubpb.Reply) map[string]any {
 }
 
 func TestTheServiceAnswersAsTheContractSays(t *testing.T) {
-	e := env{service: "conformance-go", instance: "i-1", capacity: 4, retry: true}
+	e := env{service: "conformance-go", instance: "i-1", capacity: 4, retry: &snodra.RetryNeverRan}
 	app, _, s := started(t, e)
 	const cmd, qry = hubpb.RequestKind_COMMAND, hubpb.RequestKind_QUERY
 
@@ -151,5 +151,116 @@ func TestViewExposesTheLastRejection(t *testing.T) {
 	v := decode(t, call(t, s, hubpb.RequestKind_QUERY, "conformance.View", `{}`, nil))
 	if v["lastRejection"] != "PERMISSION_DENIED: conformance refusal 4: permission denied" || v["retry"] != false {
 		t.Fatalf("View %v", v)
+	}
+}
+
+// nextFrame returns the next Request or Reply on s (skipping permits, heartbeats and statuses);
+// it fails the test after 5 s.
+func nextFrame(t *testing.T, s *fakehub.Stream) (*hubpb.Request, *hubpb.Reply) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		m := s.Recv(t)
+		if r := m.GetRequest(); r != nil {
+			return r, nil
+		}
+		if r := m.GetReply(); r != nil {
+			return nil, r
+		}
+	}
+	t.Fatal("no Request or Reply within 5 s")
+	return nil, nil
+}
+
+func TestSendGoesThroughTheLibrary(t *testing.T) {
+	app, _, s := started(t, env{service: "conformance-go", instance: "i-1", capacity: 4})
+	s.Ack(t, fakehub.Ack("hub-1"))
+	ready(t, app)
+	const cmd = hubpb.RequestKind_COMMAND
+
+	// A unary command with a routing key, answered: the outcome carries the decoded payload.
+	s.Send(t, fakehub.Forward(&hubpb.Request{Id: "r-send", Kind: cmd, Type: "conformance.Send",
+		Payload: []byte(`{"op":"unary","target":"probe","routingKey":"rk-7","timeoutMs":1200,"payload":{"mark":"u1"}}`)}))
+	probe, _ := nextFrame(t, s)
+	if probe.GetType() != "conformance.runner.Probe" || probe.GetKind() != cmd || probe.GetRoutingKey() != "rk-7" ||
+		probe.GetTimeoutMs() != 1200 || string(probe.GetPayload()) != `{"mark":"u1"}` {
+		t.Fatalf("the library sent %v", probe)
+	}
+	s.Send(t, &hubpb.ServerMessage{Message: &hubpb.ServerMessage_Reply{Reply: &hubpb.Reply{
+		RequestId: probe.GetId(), Result: &hubpb.Reply_Payload{Payload: []byte(`{"probe":"answer"}`)}}}})
+	_, reply := nextFrame(t, s)
+	out := decode(t, reply)
+	if out["result"] != "ok" || fmt.Sprint(out["payload"]) != "map[probe:answer]" || out["elapsedMs"] == nil {
+		t.Fatalf("outcome %v", out)
+	}
+
+	// Asynchronous, failing with the hub's NO_HANDLER: the outcome comes from conformance.Outcome.
+	s.Send(t, fakehub.Forward(&hubpb.Request{Id: "r-async", Kind: cmd, Type: "conformance.Send",
+		Payload: []byte(`{"op":"unary","target":"probe-query","async":true}`)}))
+	var opID string
+	for answered := false; opID == "" || !answered; {
+		probe, reply := nextFrame(t, s)
+		switch {
+		case probe != nil:
+			if probe.GetKind() != hubpb.RequestKind_QUERY || probe.GetType() != "conformance.runner.ProbeQuery" {
+				t.Fatalf("the library sent %v", probe)
+			}
+			s.Send(t, fakehub.HubError(probe.GetId(), hubpb.ErrorCode_NO_HANDLER, "nobody"))
+			answered = true
+		default:
+			opID, _ = decode(t, reply)["opId"].(string)
+		}
+	}
+	s.Send(t, fakehub.Forward(&hubpb.Request{Id: "r-outcome", Kind: hubpb.RequestKind_QUERY, Type: "conformance.Outcome",
+		Payload: []byte(`{"opId":"` + opID + `","waitMs":3000}`)}))
+	_, reply = nextFrame(t, s)
+	out = decode(t, reply)
+	e, _ := out["error"].(map[string]any)
+	if out["result"] != "error" || e["kind"] != "code" || e["code"] != "NO_HANDLER" {
+		t.Fatalf("outcome %v", out)
+	}
+	s.Send(t, fakehub.Forward(&hubpb.Request{Id: "r-unknown", Kind: hubpb.RequestKind_QUERY, Type: "conformance.Outcome",
+		Payload: []byte(`{"opId":"nope"}`)}))
+	_, reply = nextFrame(t, s)
+	if out := decode(t, reply); out["unknownOp"] != "nope" {
+		t.Fatalf("outcome %v", out)
+	}
+
+	// An op this library cannot do yet.
+	s.Send(t, fakehub.Forward(&hubpb.Request{Id: "r-stream", Kind: cmd, Type: "conformance.Send",
+		Payload: []byte(`{"op":"stream","target":"probe-stream"}`)}))
+	_, reply = nextFrame(t, s)
+	if out := decode(t, reply); out["result"] != "unsupported" || out["reason"] == "" {
+		t.Fatalf("outcome %v", out)
+	}
+}
+
+func TestRelayFailsWithTheNestedCallsError(t *testing.T) {
+	app, _, s := started(t, env{service: "conformance-go", instance: "i-1", capacity: 4})
+	s.Ack(t, fakehub.Ack("hub-1"))
+	ready(t, app)
+	s.Send(t, fakehub.Forward(&hubpb.Request{Id: "r-relay", Kind: hubpb.RequestKind_COMMAND, Type: "conformance.Relay",
+		Payload: []byte(`{"target":"missing","payload":{"x":1}}`)}))
+	nested, _ := nextFrame(t, s)
+	if nested.GetType() != "conformance.runner.Missing" || string(nested.GetPayload()) != `{"x":1}` {
+		t.Fatalf("the library sent %v", nested)
+	}
+	s.Send(t, fakehub.HubError(nested.GetId(), hubpb.ErrorCode_NO_HANDLER, "nobody"))
+	_, reply := nextFrame(t, s)
+	if e := reply.GetError(); e.GetCode() != hubpb.ErrorCode_HANDLER_ERROR || !strings.Contains(e.GetMessage(), "conformance.runner.Missing") {
+		t.Fatalf("Relay answered %v", reply)
+	}
+
+	s.Send(t, fakehub.Forward(&hubpb.Request{Id: "r-relay-2", Kind: hubpb.RequestKind_COMMAND, Type: "conformance.Relay",
+		Payload: []byte(`{"target":"probe","payload":{"reply":{"ok":true}}}`)}))
+	nested, _ = nextFrame(t, s)
+	if nested.GetType() != "conformance.runner.Probe" {
+		t.Fatalf("the library sent %v", nested)
+	}
+	s.Send(t, &hubpb.ServerMessage{Message: &hubpb.ServerMessage_Reply{Reply: &hubpb.Reply{
+		RequestId: nested.GetId(), Result: &hubpb.Reply_Payload{Payload: []byte(`{"ok":true}`)}}}})
+	_, reply = nextFrame(t, s)
+	if out := decode(t, reply); fmt.Sprint(out["reply"]) != "map[ok:true]" {
+		t.Fatalf("Relay answered %v", out)
 	}
 }

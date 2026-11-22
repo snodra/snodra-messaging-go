@@ -63,6 +63,81 @@ type View struct{ json.RawMessage }
 // MessageType is the contract's type name.
 func (View) MessageType() string { return "conformance.View" }
 
+// Relay sends Payload on to the runner's Probe (Target "probe") or Missing ("missing").
+type Relay struct {
+	Target  string          `json:"target"`
+	Payload json.RawMessage `json:"payload,omitempty"`
+}
+
+// MessageType is the contract's type name.
+func (Relay) MessageType() string { return "conformance.Relay" }
+
+// Send makes the library send a request (the contract's "conformance.Send").
+type Send struct {
+	Op            string            `json:"op"`
+	Target        string            `json:"target"`
+	Payload       json.RawMessage   `json:"payload,omitempty"`
+	RoutingKey    *string           `json:"routingKey,omitempty"`
+	TimeoutMs     *int64            `json:"timeoutMs,omitempty"`
+	Headers       map[string]string `json:"headers,omitempty"`
+	Retry         *SendRetry        `json:"retry,omitempty"`
+	Async         bool              `json:"async,omitempty"`
+	InitialCredit *int64            `json:"initialCredit,omitempty"`
+	MaxResults    *int64            `json:"maxResults,omitempty"`
+	Read          *int64            `json:"read,omitempty"`
+	ReadDelayMs   *int64            `json:"readDelayMs,omitempty"`
+}
+
+// SendRetry is a retry policy for one conformance.Send.
+type SendRetry struct {
+	MaxAttempts      int    `json:"maxAttempts"`
+	InitialBackoffMs *int64 `json:"initialBackoffMs,omitempty"`
+}
+
+// MessageType is the contract's type name.
+func (Send) MessageType() string { return "conformance.Send" }
+
+// Outcome asks for the outcome of an asynchronous conformance.Send.
+type Outcome struct {
+	OpID   string `json:"opId"`
+	WaitMs int64  `json:"waitMs,omitempty"`
+}
+
+// MessageType is the contract's type name.
+func (Outcome) MessageType() string { return "conformance.Outcome" }
+
+// SharedQuery is the contract's shared query type.
+type SharedQuery struct{ json.RawMessage }
+
+// MessageType is the contract's type name.
+func (SharedQuery) MessageType() string { return "conformance.SharedQuery" }
+
+// The runner's types, sent by conformance.Send and Relay; their payload passes through as it
+// is (the runner scripts its answers with it).
+
+// Probe is the runner's command.
+type Probe struct{ json.RawMessage }
+
+// MessageType is the contract's type name.
+func (Probe) MessageType() string { return "conformance.runner.Probe" }
+
+// ProbeQuery is the runner's query.
+type ProbeQuery struct{ json.RawMessage }
+
+// MessageType is the contract's type name.
+func (ProbeQuery) MessageType() string { return "conformance.runner.ProbeQuery" }
+
+// Missing is a command nobody serves.
+type Missing struct{ json.RawMessage }
+
+// MessageType is the contract's type name.
+func (Missing) MessageType() string { return "conformance.runner.Missing" }
+
+// RelayAnswer is the answer of Relay.
+type RelayAnswer struct {
+	Reply json.RawMessage `json:"reply"`
+}
+
 // EchoAnswer is the answer of Echo and EchoQuery.
 type EchoAnswer struct {
 	Payload    json.RawMessage   `json:"payload"`

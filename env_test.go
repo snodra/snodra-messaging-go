@@ -1,8 +1,10 @@
 package snodramessaging
 
 import (
+	"math"
 	"strings"
 	"testing"
+	"time"
 )
 
 // clearEnv unsets (sets empty, which reads as unset) every variable FromEnv reads.
@@ -11,6 +13,9 @@ func clearEnv(t *testing.T) {
 		"SNODRA_SERVICE_NAME", "SNODRA_INSTANCE_ID", "SNODRA_SERVER_ADDRESS",
 		"SNODRA_MAX_CONCURRENT_HANDLERS", "SNODRA_RECONNECT_BACKOFF_MIN_MS", "SNODRA_RECONNECT_BACKOFF_MAX_MS",
 		"SNODRA_SERVER_LOAD_FACTOR", "SNODRA_SERVER_TAGS",
+		"SNODRA_SERVER_REQUEST_TIMEOUT_MS", "SNODRA_SERVER_PRIORITIES", "SNODRA_SERVER_RETRY_ENABLED",
+		"SNODRA_SERVER_RETRY_MAX_ATTEMPTS", "SNODRA_SERVER_RETRY_INITIAL_BACKOFF_MS",
+		"SNODRA_SERVER_RETRY_MULTIPLIER", "SNODRA_SERVER_RETRY_MAX_BACKOFF_MS",
 	} {
 		t.Setenv(name, "")
 	}
@@ -59,11 +64,18 @@ func TestFromEnv(t *testing.T) {
 
 func TestFromEnvRefusesBadValues(t *testing.T) {
 	for name, value := range map[string]string{
-		"SNODRA_MAX_CONCURRENT_HANDLERS":  "many",
-		"SNODRA_RECONNECT_BACKOFF_MIN_MS": "-1",
-		"SNODRA_RECONNECT_BACKOFF_MAX_MS": "1.5",
-		"SNODRA_SERVER_LOAD_FACTOR":       "x",
-		"SNODRA_SERVER_TAGS":              "zone",
+		"SNODRA_MAX_CONCURRENT_HANDLERS":         "many",
+		"SNODRA_RECONNECT_BACKOFF_MIN_MS":        "-1",
+		"SNODRA_RECONNECT_BACKOFF_MAX_MS":        "1.5",
+		"SNODRA_SERVER_LOAD_FACTOR":              "x",
+		"SNODRA_SERVER_TAGS":                     "zone",
+		"SNODRA_SERVER_REQUEST_TIMEOUT_MS":       "soon",
+		"SNODRA_SERVER_PRIORITIES":               "orders.PlaceOrder=high",
+		"SNODRA_SERVER_RETRY_ENABLED":            "maybe",
+		"SNODRA_SERVER_RETRY_MAX_ATTEMPTS":       "0",
+		"SNODRA_SERVER_RETRY_INITIAL_BACKOFF_MS": "-5",
+		"SNODRA_SERVER_RETRY_MULTIPLIER":         "0.5",
+		"SNODRA_SERVER_RETRY_MAX_BACKOFF_MS":     "x",
 	} {
 		t.Run(name, func(t *testing.T) {
 			clearEnv(t)
@@ -82,4 +94,53 @@ func TestFromEnvRefusesBadValues(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "SNODRA_RECONNECT_BACKOFF_MIN_MS") {
 		t.Fatalf("got %v, want an error naming SNODRA_RECONNECT_BACKOFF_MIN_MS", err)
 	}
+}
+
+func TestFromEnvSendSettings(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("SNODRA_SERVICE_NAME", "orders-service")
+	app, err := New(FromEnv())
+	is(t, err, nil)
+	is(t, app.cfg.defaultTimeout, time.Duration(0))
+	is(t, app.cfg.retry == nil, true) // no retry unless enabled
+	is(t, len(app.cfg.priorities), 0)
+
+	t.Setenv("SNODRA_SERVER_REQUEST_TIMEOUT_MS", "0") // 0: not chosen
+	t.Setenv("SNODRA_SERVER_RETRY_MAX_ATTEMPTS", "5") // read, but retry is off
+	app, err = New(FromEnv())
+	is(t, err, nil)
+	is(t, app.cfg.defaultTimeout, time.Duration(0))
+	is(t, app.cfg.retry == nil, true)
+
+	t.Setenv("SNODRA_SERVER_REQUEST_TIMEOUT_MS", "1500")
+	t.Setenv("SNODRA_SERVER_PRIORITIES", "orders.PlaceOrder=5, orders.GetOrder=-1,")
+	t.Setenv("SNODRA_SERVER_RETRY_ENABLED", "true")
+	app, err = New(FromEnv())
+	is(t, err, nil)
+	is(t, app.cfg.defaultTimeout, 1500*ms)
+	is(t, app.cfg.priorities["orders.PlaceOrder"], int32(5))
+	is(t, app.cfg.priorities["orders.GetOrder"], int32(-1))
+	is(t, *app.cfg.retry, RetryPolicy{MaxAttempts: 5, InitialBackoff: 100 * ms, Multiplier: 2, MaxBackoff: 2 * s})
+
+	t.Setenv("SNODRA_SERVER_RETRY_INITIAL_BACKOFF_MS", "50")
+	t.Setenv("SNODRA_SERVER_RETRY_MULTIPLIER", "1.5")
+	t.Setenv("SNODRA_SERVER_RETRY_MAX_BACKOFF_MS", "800")
+	app, err = New(FromEnv())
+	is(t, err, nil)
+	is(t, *app.cfg.retry, RetryPolicy{MaxAttempts: 5, InitialBackoff: 50 * ms, Multiplier: 1.5, MaxBackoff: 800 * ms})
+}
+
+func TestSendOptionsOfTheApp(t *testing.T) {
+	_, err := New(Service("orders-service"), Hubs("hub:7000"), DefaultTimeout(-ms))
+	is(t, err != nil, true)
+	_, err = New(Service("orders-service"), Hubs("hub:7000"), DefaultRetry(RetryPolicy{MaxAttempts: 0}))
+	is(t, err != nil, true)
+	_, err = New(Service("orders-service"), Hubs("hub:7000"), DefaultRetry(RetryPolicy{MaxAttempts: 3, Multiplier: math.Inf(1)}))
+	is(t, err != nil, true)
+	app, err := New(Service("orders-service"), Hubs("hub:7000"), DefaultRetry(RetryNeverRan), DefaultTimeout(2*s),
+		Priorities(map[string]int32{"orders.PlaceOrder": 3}))
+	is(t, err, nil)
+	is(t, *app.cfg.retry, RetryNeverRan)
+	is(t, app.cfg.defaultTimeout, 2*s)
+	is(t, app.cfg.priorities["orders.PlaceOrder"], int32(3))
 }

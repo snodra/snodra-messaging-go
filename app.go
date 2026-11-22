@@ -45,6 +45,10 @@ type App struct {
 	// names, sorted, fixed by Start.
 	handlers                 map[string]*handler
 	commandTypes, queryTypes []string
+	calls                    *pendingCalls // the sent requests awaiting their answer
+
+	drainMu    sync.Mutex
+	drainUntil time.Time // when the shutdown's handler drain ends; zero before it
 
 	mu        sync.Mutex
 	started   bool
@@ -99,6 +103,7 @@ func New(opts ...Option) (*App, error) {
 		slots:          make(chan struct{}, cfg.maxConcurrent),
 		inflight:       newInflight(),
 		handlers:       map[string]*handler{},
+		calls:          newPendingCalls(),
 	}, nil
 }
 
@@ -218,7 +223,9 @@ func (a *App) leave(ctx context.Context, p *pool) error {
 		return err
 	}
 	// The handlers in flight finish; their replies still go out. Requests the hubs forward
-	// meanwhile are served too.
+	// meanwhile are served too, also those arriving until each stream's half-close (which waits
+	// for them until the same deadline).
+	a.setDrainDeadline(time.Now().Add(a.cfg.timings.handlerDrain))
 	if err := waitAll(ctx, a.cfg.timings.handlerDrain, []<-chan struct{}{a.inflight.drained()}); err != nil {
 		return err
 	}
@@ -230,6 +237,20 @@ func (a *App) leave(ctx context.Context, p *pool) error {
 		c.close()
 	}
 	return waitAll(ctx, 0, p.dones()) // each connection bounds its own close wait
+}
+
+// setDrainDeadline sets when the handler drain of the shutdown ends.
+func (a *App) setDrainDeadline(t time.Time) {
+	a.drainMu.Lock()
+	a.drainUntil = t
+	a.drainMu.Unlock()
+}
+
+// drainDeadline is when the handler drain of the shutdown ends; zero before the drain.
+func (a *App) drainDeadline() time.Time {
+	a.drainMu.Lock()
+	defer a.drainMu.Unlock()
+	return a.drainUntil
 }
 
 // waitAll waits until every channel is closed, at most bound (0: no bound) and at most until

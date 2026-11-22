@@ -3,6 +3,8 @@ package snodramessaging
 import (
 	"fmt"
 	"sync/atomic"
+
+	"github.com/snodra/snodra-messaging-go/internal/hubpb"
 )
 
 // pool is the connections of an App: one per configured hub, each sending the identical
@@ -42,6 +44,18 @@ func (p *pool) pick(key string) (*hubConn, error) {
 		return nil, fmt.Errorf("%w: no hub has acknowledged the registration", ErrNeverSent)
 	}
 	return live[(p.next.Add(1)-1)%uint64(len(live))], nil
+}
+
+// ackFor is the RegisterAck of the hub a request with key would go to now (the first
+// acknowledged one; routing over several hubs comes later), nil when none is acknowledged.
+func (p *pool) ackFor(key string) *hubpb.RegisterAck {
+	_ = key
+	for _, c := range p.conns {
+		if ack := c.ack(); ack != nil {
+			return ack
+		}
+	}
+	return nil
 }
 
 // deregistered are the channels closed once each connection's empty Register is acked or

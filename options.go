@@ -1,6 +1,7 @@
 package snodramessaging
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/snodra/snodra-messaging-go/internal/hubpb"
 	"github.com/snodra/snodra-messaging-go/internal/uuid"
 )
 
@@ -24,6 +26,14 @@ type config struct {
 	logger        *slog.Logger
 	codec         PayloadCodec
 	timings       timings
+
+	defaultTimeout time.Duration    // the sends' timeout when a call chooses none; 0: none
+	retry          *RetryPolicy     // the sends' retry policy; nil: no retry
+	priorities     map[string]int32 // Request.priority by type when a call chooses none
+
+	// writeHook, when set (tests), runs before a stream's writer takes each frame from the
+	// outbound buffer; ctx ends with the stream.
+	writeHook func(ctx context.Context, m *hubpb.ClientMessage)
 }
 
 func defaultConfig() config {
@@ -130,6 +140,48 @@ func Codec(c PayloadCodec) Option {
 			return errors.New("snodra: Codec needs a codec")
 		}
 		cfg.codec = c
+		return nil
+	}
+}
+
+// DefaultTimeout is the timeout of every [Send] and [Query] that sets none with [Timeout]
+// (sent as Request.timeout_ms). The default is none (0): the hub applies its per-type override or
+// its default request timeout, which is what the protocol asks for.
+func DefaultTimeout(d time.Duration) Option {
+	return func(c *config) error {
+		if d < 0 {
+			return fmt.Errorf("snodra: DefaultTimeout must not be negative, got %v", d)
+		}
+		c.defaultTimeout = d
+		return nil
+	}
+}
+
+// DefaultRetry is the retry policy of every [Send] and [Query] that sets none with [Retry] or
+// [NoRetry]. The default is no retry; [RetryNeverRan] is the usual policy.
+func DefaultRetry(p RetryPolicy) Option {
+	return func(c *config) error {
+		if err := p.validate(); err != nil {
+			return err
+		}
+		c.retry = &p
+		return nil
+	}
+}
+
+// Priorities are the Request.priority of the sends of each type that set none with [Priority]
+// (higher is served first while the target's queue at the hub is not empty); other types send 0.
+func Priorities(p map[string]int32) Option {
+	return func(c *config) error {
+		c.priorities = maps.Clone(p)
+		return nil
+	}
+}
+
+// withWriteHook sets the writer's hook (tests).
+func withWriteHook(h func(ctx context.Context, m *hubpb.ClientMessage)) Option {
+	return func(c *config) error {
+		c.writeHook = h
 		return nil
 	}
 }

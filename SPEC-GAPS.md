@@ -25,6 +25,20 @@ reference library departs from it. In each case this library follows the referen
 - **Question:** does "from the backoff floor" mean a reset after every `UNAVAILABLE` close, even of a stream that was
   never acknowledged, or only that `UNAVAILABLE` is not a refusal (no wait at the cap)?
 
+### SG-2: the retry budget when the caller chose no timeout
+
+- **Specification:** [protocol.md, Never sent or outcome unknown](https://snodra.damoreira.com/library-authors/protocol/)
+  says that when a library retries, "all attempts share the caller's time budget, and each attempt sends what is left
+  of it as `Request.timeout_ms`, never 0"; it does not say what the budget is when the caller chose no timeout, nor
+  how little of it may be left for a retry to start.
+- **Reference library:** the budget is the caller's timeout; else the hub's per-type override for the type, else
+  `RegisterAck.default_timeout_ms` (from the ack of the hub the request would go to); else 5 s (no hub acknowledged
+  yet). A retry starts only when at least `max(initial backoff, 250 ms)` of the budget is left after its wait;
+  otherwise the call ends with the last error.
+- **This library:** does the same (`retry.go`).
+- **Question:** should the specification name the budget without a caller's timeout, and the least time left for a
+  retry?
+
 ### SG-9: the bounds of a shutdown
 
 - **Specification:** [protocol.md, Shutting down](https://snodra.damoreira.com/library-authors/protocol/) fixes one
@@ -73,3 +87,18 @@ reference library departs from it. In each case this library follows the referen
   (500 ms to 5 s) is inside the specified range, and `ReconnectBackoff` documents the range.
 - **Question:** should a library refuse (or clamp) a configured maximum above 5 s, and floor a refusal's wait at
   1 s whatever the configuration?
+
+### SG-17: the message of the error codes no handler produces
+
+- **Specification:** [protocol.md, Replies and errors](https://snodra.damoreira.com/library-authors/protocol/) says a
+  library must "keep `Error.message` for the codes a handler produces" (`HANDLER_ERROR`, `UNAUTHENTICATED`,
+  `PERMISSION_DENIED`, `INVALID_REQUEST`); it says nothing of the message of the other codes.
+- **Reference library:** keeps the hub's message for `CANCELLED` (and for an unknown code, read as `HANDLER_ERROR`),
+  and replaces it with its own text naming the type for `NO_HANDLER` ("No handler registered for '<type>'"),
+  `TIMEOUT` ("Timed out waiting for reply to '<type>'"), `HANDLER_DISCONNECTED` ("Handler for '<type>'
+  disconnected") and `RESOURCE_EXHAUSTED` ("Handler for '<type>' is busy"). The Kotlin library does the same for
+  these four codes (for a unary request).
+- **This library:** does what the reference library does: `Error.Message` holds those texts for those four codes, the
+  hub's message otherwise (`errors.go`).
+- **Question:** should a library keep the hub's message for every code (it is safe to log), or is it free to replace
+  it for the codes no handler produces?

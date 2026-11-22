@@ -3,6 +3,7 @@ package snodramessaging
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -312,4 +313,73 @@ func TestTheCodecOptionDecodesAndEncodes(t *testing.T) {
 	is(t, codec.encoded.Load(), int32(1))
 	_, err := New(Service("orders-service"), Hubs("127.0.0.1:7000"), Codec(nil))
 	is(t, err != nil && strings.Contains(err.Error(), "Codec"), true)
+}
+
+func TestAPermitComesBackAfterEveryFailure(t *testing.T) {
+	hub := fakehub.Start(t)
+	_, s := serving(t, hub, func(app *App) {
+		is(t, HandleCommand(app, func(_ context.Context, p PlaceOrder) (Empty, error) {
+			if p.SKU == "panic" {
+				panic("boom")
+			}
+			return Empty{}, nil
+		}), nil)
+	}, MaxConcurrent(1))
+	for _, c := range []struct {
+		typ, payload string
+		want         hubpb.ErrorCode
+	}{
+		{"orders.Unknown", `{}`, hubpb.ErrorCode_NO_HANDLER},
+		{"orders.PlaceOrder", `{"sku":1}`, hubpb.ErrorCode_INVALID_REQUEST},
+		{"orders.PlaceOrder", `{"sku":"panic"}`, hubpb.ErrorCode_HANDLER_ERROR},
+	} {
+		s.Send(t, command("r-"+c.payload, c.typ, c.payload))
+		is(t, nextReply(t, s).GetError().GetCode(), c.want)
+		is(t, s.RecvPermits(t).GetCount(), uint32(1)) // the one permit, back at once
+	}
+}
+
+func TestShutdownHalfClosesWhenTheHandlerDrainExpires(t *testing.T) {
+	hub := fakehub.Start(t)
+	rec := &logRecorder{}
+	started := make(chan struct{}, 1)
+	app, s := serving(t, hub, func(app *App) {
+		is(t, HandleCommand(app, func(ctx context.Context, _ PlaceOrder) (Empty, error) {
+			started <- struct{}{}
+			<-ctx.Done() // until the hard stop
+			return Empty{}, ctx.Err()
+		}), nil)
+	}, Logger(slog.New(rec)))
+	s.Send(t, command("r-1", "orders.PlaceOrder", `{}`))
+	receive(t, started)
+	begin := time.Now()
+	done := make(chan error, 1)
+	go func() { done <- app.Shutdown(ctxWithin(t, 5*time.Second)) }()
+	is(t, len(s.RecvRegister(t).GetCommandTypes()), 0) // not acked: the 100 ms wait runs out
+	s.HalfClosed(t, 2*time.Second)
+	within(t, time.Since(begin), 1100*ms, 1500*ms) // 100 ms, then the 1 s handler drain
+	is(t, <-done, nil)
+	is(t, rec.count(slog.LevelWarn, "handlers still running after the drain; closing the hub streams anyway"), 1)
+}
+
+func TestAHandlerInFlightAtTheHalfCloseIsAnsweredFirst(t *testing.T) {
+	hub := fakehub.Start(t)
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	app, s := serving(t, hub, func(app *App) {
+		is(t, HandleCommand(app, func(context.Context, PlaceOrder) (Empty, error) {
+			started <- struct{}{}
+			<-release
+			return Empty{}, nil
+		}), nil)
+	})
+	// A request that arrived after the shutdown's drain found no handler running: the
+	// half-close, due now, waits for it (within the drain's bound).
+	s.Send(t, command("r-1", "orders.PlaceOrder", `{}`))
+	receive(t, started)
+	app.setDrainDeadline(time.Now().Add(5 * time.Second))
+	app.pool.conns[0].close()
+	time.AfterFunc(100*ms, func() { close(release) })
+	is(t, nextReply(t, s).GetRequestId(), "r-1") // answered on the stream, not dropped
+	s.HalfClosed(t, time.Second)                 // then half-closed
 }

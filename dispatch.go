@@ -49,7 +49,7 @@ func (a *App) answer(req *hubpb.Request) *hubpb.Reply {
 	}
 	h := a.handlers[req.GetType()] // read-only once started
 	if h == nil || h.kind != want {
-		return fail(hubpb.ErrorCode_NO_HANDLER, fmt.Sprintf("No handler registered for '%s'", req.GetType()))
+		return fail(hubpb.ErrorCode_NO_HANDLER, noHandlerText(req.GetType()))
 	}
 	select {
 	case a.slots <- struct{}{}:

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"maps"
 	"time"
@@ -13,12 +14,13 @@ import (
 type service struct {
 	app *snodra.App
 	env env
+	ops *operations // the asynchronous conformance.Send calls
 }
 
 // registerHandlers registers every type of the conformance contract the service handles so
 // far, as an application would.
 func registerHandlers(app *snodra.App, e env) error {
-	s := &service{app: app, env: e}
+	s := &service{app: app, env: e, ops: newOperations()}
 	return errors.Join(
 		snodra.HandleCommand(app, func(ctx context.Context, m Echo) (EchoAnswer, error) { return s.echo(ctx, m.RawMessage), nil }),
 		snodra.HandleQuery(app, func(ctx context.Context, m EchoQuery) (EchoAnswer, error) { return s.echo(ctx, m.RawMessage), nil }),
@@ -27,6 +29,9 @@ func registerHandlers(app *snodra.App, e env) error {
 		snodra.HandleQuery(app, func(ctx context.Context, m SleepQuery) (SleepAnswer, error) { return s.sleep(ctx, m.Ms) }),
 		snodra.HandleCommand(app, s.fail),
 		snodra.HandleCommand(app, func(_ context.Context, m Strict) (StrictAnswer, error) { return StrictAnswer(m), nil }),
+		snodra.HandleCommand(app, s.relay),
+		snodra.HandleCommand(app, func(ctx context.Context, m Send) (json.RawMessage, error) { return s.send(ctx, m) }),
+		snodra.HandleQuery(app, func(ctx context.Context, m Outcome) (json.RawMessage, error) { return s.outcome(ctx, m) }),
 		snodra.HandleQuery(app, s.view),
 	)
 }
@@ -61,12 +66,31 @@ func (s *service) fail(_ context.Context, m Fail) (snodra.Empty, error) {
 	return snodra.Empty{}, err
 }
 
+// relay sends the payload on, as an application does inside a handler: to
+// conformance.runner.Probe or conformance.runner.Missing with default options, failing with the
+// library's error as it is.
+func (s *service) relay(ctx context.Context, m Relay) (RelayAnswer, error) {
+	var (
+		reply json.RawMessage
+		err   error
+	)
+	if m.Target == "missing" {
+		reply, err = snodra.Send[json.RawMessage](ctx, s.app, Missing{m.Payload})
+	} else {
+		reply, err = snodra.Send[json.RawMessage](ctx, s.app, Probe{m.Payload})
+	}
+	if err != nil {
+		return RelayAnswer{}, err
+	}
+	return RelayAnswer{Reply: reply}, nil
+}
+
 func (s *service) view(context.Context, View) (ViewAnswer, error) {
 	a := ViewAnswer{
 		Service:    s.env.service,
 		InstanceID: s.env.instance,
 		HubIDs:     s.app.HubIDs(),
-		Retry:      s.env.retry,
+		Retry:      s.env.retry != nil,
 	}
 	if a.HubIDs == nil {
 		a.HubIDs = []string{}

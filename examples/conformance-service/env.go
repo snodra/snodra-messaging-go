@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	snodra "github.com/snodra/snodra-messaging-go"
 )
@@ -15,14 +16,15 @@ type env struct {
 	instance string   // CONFORMANCE_INSTANCE_ID
 	hubs     []string // CONFORMANCE_HUBS, comma-separated host:port, in order
 	capacity int      // CONFORMANCE_CAPACITY, default 64
-	retry    bool     // CONFORMANCE_RETRY_MAX_ATTEMPTS is set: a retry policy applies to the sends
+	// retry is the policy of every send, from CONFORMANCE_RETRY_MAX_ATTEMPTS and
+	// CONFORMANCE_RETRY_INITIAL_BACKOFF_MS (default 100); nil when the first is not set.
+	retry *snodra.RetryPolicy
 }
 
 // readEnv reads the environment through getenv; a blank variable is an absent one.
 func readEnv(getenv func(string) string) (env, error) {
 	get := func(name string) string { return strings.TrimSpace(getenv(name)) }
-	e := env{service: get("CONFORMANCE_SERVICE_NAME"), instance: get("CONFORMANCE_INSTANCE_ID"), capacity: 64,
-		retry: get("CONFORMANCE_RETRY_MAX_ATTEMPTS") != ""}
+	e := env{service: get("CONFORMANCE_SERVICE_NAME"), instance: get("CONFORMANCE_INSTANCE_ID"), capacity: 64}
 	for _, h := range strings.Split(get("CONFORMANCE_HUBS"), ",") {
 		if h = strings.TrimSpace(h); h != "" {
 			e.hubs = append(e.hubs, h)
@@ -43,15 +45,35 @@ func readEnv(getenv func(string) string) (env, error) {
 		}
 		e.capacity = n
 	}
+	if v := get("CONFORMANCE_RETRY_MAX_ATTEMPTS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			return env{}, fmt.Errorf("CONFORMANCE_RETRY_MAX_ATTEMPTS must be a positive integer, got %q", v)
+		}
+		p := snodra.RetryNeverRan
+		p.MaxAttempts = n
+		if v := get("CONFORMANCE_RETRY_INITIAL_BACKOFF_MS"); v != "" {
+			ms, err := strconv.Atoi(v)
+			if err != nil || ms < 0 {
+				return env{}, fmt.Errorf("CONFORMANCE_RETRY_INITIAL_BACKOFF_MS must be a non-negative integer, got %q", v)
+			}
+			p.InitialBackoff = time.Duration(ms) * time.Millisecond
+		}
+		e.retry = &p
+	}
 	return e, nil
 }
 
 // options are the library's settings for e.
 func (e env) options() []snodra.Option {
-	return []snodra.Option{
+	opts := []snodra.Option{
 		snodra.Service(e.service),
 		snodra.Instance(e.instance),
 		snodra.Hubs(e.hubs...),
 		snodra.MaxConcurrent(e.capacity),
 	}
+	if e.retry != nil {
+		opts = append(opts, snodra.DefaultRetry(*e.retry))
+	}
+	return opts
 }

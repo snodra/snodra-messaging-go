@@ -8,15 +8,43 @@ import (
 	"github.com/snodra/snodra-messaging-go/internal/hubpb"
 )
 
-func TestEveryCodeReadsAsItself(t *testing.T) {
+func TestEveryCodeReadsAsItself(t *testing.T) { // SG-17 for the messages
+	ownText := map[int32]string{ // the hub's message is replaced, as in the reference library
+		1: "No handler registered for 'orders.PlaceOrder'",
+		2: "Timed out waiting for reply to 'orders.PlaceOrder'",
+		3: "Handler for 'orders.PlaceOrder' disconnected",
+		8: "Handler for 'orders.PlaceOrder' is busy",
+	}
 	for c := int32(1); c <= 9; c++ {
-		e := errorFromWire(&hubpb.Error{Code: hubpb.ErrorCode(c), Message: "m", Details: []byte(`{"a":1}`)})
+		e := errorFromWire("orders.PlaceOrder", &hubpb.Error{Code: hubpb.ErrorCode(c), Message: "m", Details: []byte(`{"a":1}`)})
 		is(t, e.Code, Code(c))
-		is(t, e.Message, "m")
+		want, ok := ownText[c]
+		if !ok {
+			want = "m"
+		}
+		is(t, e.Message, want)
 		is(t, string(e.Details), map[bool]string{true: `{"a":1}`, false: ""}[c == 4]) // details only for HANDLER_ERROR
 	}
-	is(t, errorFromWire(&hubpb.Error{Code: 0}).Code, CodeHandlerError)  // ERROR_CODE_UNSPECIFIED
-	is(t, errorFromWire(&hubpb.Error{Code: 42}).Code, CodeHandlerError) // unknown code
+	is(t, errorFromWire("x.Y", &hubpb.Error{Code: 0}).Code, CodeHandlerError)  // ERROR_CODE_UNSPECIFIED
+	is(t, errorFromWire("x.Y", &hubpb.Error{Code: 42}).Code, CodeHandlerError) // unknown code
+	is(t, errorFromWire("x.Y", &hubpb.Error{Code: 42, Message: "odd"}).Message, "odd")
+}
+
+func TestTheErrorAPIThroughWrappers(t *testing.T) {
+	var e *Error
+	wrapped := fmt.Errorf("stock: %w", errorFromWire("x.Y", &hubpb.Error{Code: hubpb.ErrorCode_HANDLER_ERROR, Message: "m"}))
+	is(t, errors.As(wrapped, &e), true)
+	is(t, e.Code, CodeHandlerError)
+	is(t, errors.Is(fmt.Errorf("a: %w", fmt.Errorf("b: %w", ErrNeverSent)), ErrNeverSent), true)
+	is(t, errors.Is(fmt.Errorf("a: %w", ErrOutcomeUnknown), ErrOutcomeUnknown), true)
+	is(t, WithDetails(nil, map[string]int{"a": 1}), nil)
+	// Details on a coded error keep its code (and are not sent: details are for HANDLER_ERROR).
+	w := errorToWire("r-1", WithDetails(InvalidRequest("bad sku"), map[string]string{"field": "sku"}))
+	is(t, w.GetCode(), hubpb.ErrorCode_INVALID_REQUEST)
+	is(t, w.GetMessage(), "bad sku")
+	// Details that cannot be marshalled are dropped; the error stays.
+	base := errors.New("invalid")
+	is(t, WithDetails(base, make(chan int)), base)
 }
 
 func TestHandlerErrorsMapToTheirCodes(t *testing.T) {
@@ -32,7 +60,7 @@ func TestHandlerErrorsMapToTheirCodes(t *testing.T) {
 }
 
 func TestAFailedNestedCallIsTheHandlersOwnError(t *testing.T) {
-	nested := errorFromWire(&hubpb.Error{Code: hubpb.ErrorCode_NO_HANDLER, Message: "no instance"})
+	nested := errorFromWire("orders.Reserve", &hubpb.Error{Code: hubpb.ErrorCode_NO_HANDLER, Message: "no instance"})
 	w := errorToWire("r-1", fmt.Errorf("stock: %w", nested))
 	is(t, w.GetCode(), hubpb.ErrorCode_HANDLER_ERROR) // never NO_HANDLER passed through
 }

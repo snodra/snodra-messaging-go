@@ -84,6 +84,16 @@ func (c *hubConn) ack() *hubpb.RegisterAck {
 	return c.acked
 }
 
+// live is the current stream and its RegisterAck; both nil until the stream is acknowledged.
+func (c *hubConn) live() (*streamRef, *hubpb.RegisterAck) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.acked == nil {
+		return nil, nil
+	}
+	return c.current, c.acked
+}
+
 // stream is the current stream; nil between streams.
 func (c *hubConn) stream() *streamRef {
 	c.mu.Lock()
@@ -229,7 +239,7 @@ func (c *hubConn) runStream() (reached bool, err error) {
 		return false, err
 	}
 
-	ref := newStreamRef()
+	ref := newStreamRef(c.app.cfg.writeHook)
 	register := c.app.registerMsg()
 	permits := newStreamPermits(ref, register.GetInitialPermits(), c.t.permitFlushAfter)
 	_ = ref.send(&hubpb.ClientMessage{Message: &hubpb.ClientMessage_Register{Register: register}})
@@ -319,8 +329,22 @@ func (c *hubConn) serve(ref *streamRef, permits *streamPermits, inbox <-chan *hu
 	closeTimer.Stop()
 	defer closeTimer.Stop()
 	var closeWait <-chan time.Time // armed by the half-close
+	drainTimer := time.NewTimer(time.Hour)
+	drainTimer.Stop()
+	defer drainTimer.Stop()
+	// Armed while the half-close waits for the handlers in flight.
+	var drained <-chan struct{}
+	var drainExpired <-chan time.Time
 	stopping, closing := c.stopping, c.closing
 	halfClosed := false
+	halfClose := func() {
+		drained, drainExpired, halfClosed = nil, nil, true
+		tick, silentC, handshake = nil, nil, nil
+		c.setState(stateDraining)
+		ref.closeSend()
+		closeTimer.Reset(c.t.closeWait)
+		closeWait = closeTimer.C
+	}
 	registers, acks, deregisterAt := 1, 0, 0 // Registers written, acks received, the empty one's number
 
 	for {
@@ -364,6 +388,14 @@ func (c *hubConn) serve(ref *streamRef, permits *streamPermits, inbox <-chan *hu
 					break
 				}
 				c.app.dispatch(k.Request, ref, permits)
+			case *hubpb.ServerMessage_Reply:
+				a := answer{payload: k.Reply.GetPayload()}
+				if e, ok := k.Reply.GetResult().(*hubpb.Reply_Error); ok {
+					a = answer{failure: e.Error}
+				}
+				c.app.calls.deliver(k.Reply.GetRequestId(), a)
+			case *hubpb.ServerMessage_Error:
+				c.app.calls.deliver(k.Error.GetRequestId(), answer{failure: k.Error})
 			}
 		case err := <-ended:
 			if errors.Is(err, io.EOF) {
@@ -395,12 +427,28 @@ func (c *hubConn) serve(ref *streamRef, permits *streamPermits, inbox <-chan *hu
 			deregisterAt = registers
 			_ = ref.send(&hubpb.ClientMessage{Message: &hubpb.ClientMessage_Register{Register: c.app.emptyRegisterMsg()}})
 		case <-closing:
-			closing, halfClosed = nil, true
-			tick, silentC, handshake = nil, nil, nil
+			// A request this stream forwarded after the shutdown's drain found no handler
+			// running is still answered: the half-close waits for the handlers in flight, until
+			// the drain's deadline. This loop is the only one dispatching this stream's
+			// requests, so none can start between the count and the half-close.
+			closing = nil
 			c.setState(stateDraining)
-			ref.closeSend()
-			closeTimer.Reset(c.t.closeWait)
-			closeWait = closeTimer.C
+			deadline := c.app.drainDeadline()
+			if c.app.inflight.count() == 0 || !time.Now().Before(deadline) {
+				halfClose()
+				break
+			}
+			drained = c.app.inflight.drained()
+			drainTimer.Reset(time.Until(deadline))
+			drainExpired = drainTimer.C
+		case <-drained:
+			if c.app.inflight.count() > 0 { // a request came meanwhile
+				drained = c.app.inflight.drained()
+				break
+			}
+			halfClose()
+		case <-drainExpired:
+			halfClose()
 		case <-closeWait:
 			c.log.Warn("the hub did not finish the stream in time; closing it")
 			return reached, nil
@@ -430,17 +478,33 @@ func heartbeat() *hubpb.ClientMessage {
 	}}
 }
 
-// streamRef is one stream of a hubConn: the frames queued for it, written in order by its
-// writer. Frames for a stream go to that stream only; once it is gone, send fails.
+// streamRef is one stream of a hubConn: the frames queued for it (its outbound buffer), written
+// in order by its writer. Frames for a stream go to that stream only; once it is gone, send fails.
+// A request stays in the buffer until the writer takes it: only then is it written (handed to the
+// transport); the requests still in the buffer when the stream ends were never sent.
 type streamRef struct {
 	mu        sync.Mutex
-	queue     []*hubpb.ClientMessage
+	queue     []outFrame
+	requests  int  // requests in queue
 	closed    bool // no more frames: half-closed or gone
 	halfClose bool // the half-close is due once the queue is written
+	ended     bool // the stream is gone
 	wake      chan struct{}
+	room      chan struct{} // closed when a request may have room; nil while no send waits
+	gone      chan struct{} // closed when the stream is gone
+	hook      func(ctx context.Context, m *hubpb.ClientMessage)
 }
 
-func newStreamRef() *streamRef { return &streamRef{wake: make(chan struct{}, 1)} }
+// outFrame is a queued frame, with the call of a request (nil for the library's own frames).
+type outFrame struct {
+	m    *hubpb.ClientMessage
+	call *call
+}
+
+// newStreamRef is a stream's buffer; hook (tests) runs before the writer takes each frame.
+func newStreamRef(hook func(ctx context.Context, m *hubpb.ClientMessage)) *streamRef {
+	return &streamRef{wake: make(chan struct{}, 1), gone: make(chan struct{}), hook: hook}
+}
 
 func (r *streamRef) signal() {
 	select {
@@ -449,17 +513,74 @@ func (r *streamRef) signal() {
 	}
 }
 
-// send queues m for this stream only; an error once the stream is gone or half-closed.
+// freeRoom wakes the sends waiting for room. Called with r.mu held.
+func (r *streamRef) freeRoom() {
+	if r.room != nil {
+		close(r.room)
+		r.room = nil
+	}
+}
+
+// send queues m, a frame of the library's own (heartbeat, reply, permits, ...), for this stream
+// only, at once; an error once the stream is gone or half-closed.
 func (r *streamRef) send(m *hubpb.ClientMessage) error {
 	r.mu.Lock()
 	if r.closed {
 		r.mu.Unlock()
 		return errStreamGone
 	}
-	r.queue = append(r.queue, m)
+	r.queue = append(r.queue, outFrame{m: m})
 	r.mu.Unlock()
 	r.signal()
 	return nil
+}
+
+// sendRequest queues the request m of c for this stream, waiting while outboundLimit requests
+// wait in the buffer, until ctx ends; errStreamGone once the stream is gone or half-closed.
+func (r *streamRef) sendRequest(ctx context.Context, m *hubpb.ClientMessage, c *call) error {
+	for {
+		r.mu.Lock()
+		if r.closed {
+			r.mu.Unlock()
+			return errStreamGone
+		}
+		if r.requests < outboundLimit {
+			r.queue = append(r.queue, outFrame{m: m, call: c})
+			r.requests++
+			r.mu.Unlock()
+			r.signal()
+			return nil
+		}
+		if r.room == nil {
+			r.room = make(chan struct{})
+		}
+		room := r.room
+		r.mu.Unlock()
+		select {
+		case <-room:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+// withdraw takes c's request out of the buffer when the writer has not taken it; true when it
+// was never written (withdrawn now, or dropped with the stream).
+func (r *streamRef) withdraw(c *call) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if c.written {
+		return false
+	}
+	for i, f := range r.queue {
+		if f.call == c {
+			r.queue = append(r.queue[:i], r.queue[i+1:]...)
+			r.requests--
+			r.freeRoom()
+			break
+		}
+	}
+	return true
 }
 
 // closeSend half-closes the stream once what is queued is written; later sends fail.
@@ -467,31 +588,55 @@ func (r *streamRef) closeSend() {
 	r.mu.Lock()
 	if !r.closed {
 		r.closed, r.halfClose = true, true
+		r.freeRoom()
 	}
 	r.mu.Unlock()
 	r.signal()
 }
 
-// end marks the stream gone and returns the frames never handed to the transport.
-func (r *streamRef) end() []*hubpb.ClientMessage {
+// end marks the stream gone: the frames still queued are dropped (never sent), later sends fail
+// and gone is closed.
+func (r *streamRef) end() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	unsent := r.queue
-	r.closed, r.halfClose, r.queue = true, false, nil
-	return unsent
+	r.closed, r.halfClose = true, false
+	r.queue, r.requests = nil, 0
+	r.freeRoom()
+	if !r.ended {
+		r.ended = true
+		close(r.gone)
+	}
 }
 
-// next waits for the next frame to write (half true when the half-close is due); ok is false
-// when done closed first.
-func (r *streamRef) next(done <-chan struct{}) (m *hubpb.ClientMessage, half, ok bool) {
+// next waits for the next frame to write (half true when the half-close is due) and takes it
+// from the buffer (a request is written from then on); ok is false when done closed first. The
+// hook, when set, runs before each frame is taken, with ctx.
+func (r *streamRef) next(ctx context.Context, done <-chan struct{}) (m *hubpb.ClientMessage, half, ok bool) {
+	var hooked *hubpb.ClientMessage
 	for {
 		r.mu.Lock()
 		if len(r.queue) > 0 {
-			m = r.queue[0]
-			r.queue[0] = nil
+			f := r.queue[0]
+			if r.hook != nil && f.m != hooked {
+				r.mu.Unlock()
+				r.hook(ctx, f.m)
+				hooked = f.m
+				select {
+				case <-done:
+					return nil, false, false
+				default:
+				}
+				continue
+			}
+			r.queue[0] = outFrame{}
 			r.queue = r.queue[1:]
+			if f.call != nil {
+				f.call.written = true
+				r.requests--
+				r.freeRoom()
+			}
 			r.mu.Unlock()
-			return m, false, true
+			return f.m, false, true
 		}
 		if r.halfClose {
 			r.halfClose = false
@@ -512,7 +657,7 @@ func (r *streamRef) next(done <-chan struct{}) (m *hubpb.ClientMessage, half, ok
 // after the half-close, and the error of a frame the transport refused.
 func (r *streamRef) write(ctx context.Context, stream hubpb.Hub_ConnectClient) error {
 	for {
-		m, half, ok := r.next(ctx.Done())
+		m, half, ok := r.next(ctx, ctx.Done())
 		switch {
 		case !ok:
 			return nil

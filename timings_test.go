@@ -17,4 +17,9 @@ func TestDefaultTimings(t *testing.T) {
 	is(t, d.closeWait, 2*s)
 	is(t, d.permitFlushAfter, 50*ms)
 	is(t, permitBatch, uint32(16))
+	is(t, guardMargin, 1*s)
+	is(t, fallbackMaxTimeout, 60*s)
+	is(t, defaultBudget, 5*s)
+	is(t, retryMinRemaining, 250*ms)
+	is(t, outboundLimit, 256)
 }

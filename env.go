@@ -25,6 +25,13 @@ const defaultHubAddress = "static://snodra-server:7000"
 //     milliseconds (default 500 and 5000)
 //   - SNODRA_SERVER_LOAD_FACTOR: [LoadFactor] (default 100)
 //   - SNODRA_SERVER_TAGS: [Tags] as "key=value,key=value"
+//   - SNODRA_SERVER_REQUEST_TIMEOUT_MS: [DefaultTimeout] in milliseconds (0, the default: none)
+//   - SNODRA_SERVER_PRIORITIES: [Priorities] as "type=n,type=n"
+//   - SNODRA_SERVER_RETRY_ENABLED: true sets [DefaultRetry] to the policy of
+//     SNODRA_SERVER_RETRY_MAX_ATTEMPTS (default 3, at least 1),
+//     SNODRA_SERVER_RETRY_INITIAL_BACKOFF_MS (100), SNODRA_SERVER_RETRY_MULTIPLIER (2, a finite
+//     number of at least 1) and SNODRA_SERVER_RETRY_MAX_BACKOFF_MS (2000); default false. The
+//     policy variables are checked even when retry is off.
 func FromEnv() Option {
 	return func(c *config) error { return c.applyEnv(os.Getenv) }
 }
@@ -94,6 +101,81 @@ func (c *config) applyEnv(getenv func(string) string) error {
 			return err
 		}
 		c.tags = tags
+	}
+	return c.applySendEnv(get)
+}
+
+// applySendEnv reads the sends' settings.
+func (c *config) applySendEnv(get func(string) (string, bool)) error {
+	millis := func(name, v string) (time.Duration, error) {
+		n, err := envNumber(name, v, math.MaxInt64/int64(time.Millisecond))
+		return time.Duration(n) * time.Millisecond, err
+	}
+	if v, ok := get("SNODRA_SERVER_REQUEST_TIMEOUT_MS"); ok {
+		d, err := millis("SNODRA_SERVER_REQUEST_TIMEOUT_MS", v)
+		if err != nil {
+			return err
+		}
+		c.defaultTimeout = d
+	}
+	if v, ok := get("SNODRA_SERVER_PRIORITIES"); ok {
+		pairs, err := envPairs("SNODRA_SERVER_PRIORITIES", v)
+		if err != nil {
+			return err
+		}
+		c.priorities = map[string]int32{}
+		for k, val := range pairs {
+			n, err := strconv.ParseInt(val, 10, 32)
+			if err != nil {
+				return fmt.Errorf("snodra: SNODRA_SERVER_PRIORITIES: the priority of %q must be an integer, got %q", k, val)
+			}
+			c.priorities[k] = int32(n)
+		}
+	}
+	enabled := false
+	if v, ok := get("SNODRA_SERVER_RETRY_ENABLED"); ok {
+		switch strings.ToLower(v) {
+		case "true", "1", "yes":
+			enabled = true
+		case "false", "0", "no":
+		default:
+			return fmt.Errorf("snodra: SNODRA_SERVER_RETRY_ENABLED must be true or false, got %q", v)
+		}
+	}
+	p := RetryNeverRan
+	if v, ok := get("SNODRA_SERVER_RETRY_MAX_ATTEMPTS"); ok {
+		n, err := envNumber("SNODRA_SERVER_RETRY_MAX_ATTEMPTS", v, math.MaxInt32)
+		if err != nil {
+			return err
+		}
+		if n < 1 {
+			return fmt.Errorf("snodra: SNODRA_SERVER_RETRY_MAX_ATTEMPTS must be at least 1 (1 = no retry), got %q", v)
+		}
+		p.MaxAttempts = int(n)
+	}
+	if v, ok := get("SNODRA_SERVER_RETRY_INITIAL_BACKOFF_MS"); ok {
+		d, err := millis("SNODRA_SERVER_RETRY_INITIAL_BACKOFF_MS", v)
+		if err != nil {
+			return err
+		}
+		p.InitialBackoff = d
+	}
+	if v, ok := get("SNODRA_SERVER_RETRY_MULTIPLIER"); ok {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil || math.IsNaN(f) || math.IsInf(f, 0) || f < 1 {
+			return fmt.Errorf("snodra: SNODRA_SERVER_RETRY_MULTIPLIER must be a finite number of at least 1, got %q", v)
+		}
+		p.Multiplier = f
+	}
+	if v, ok := get("SNODRA_SERVER_RETRY_MAX_BACKOFF_MS"); ok {
+		d, err := millis("SNODRA_SERVER_RETRY_MAX_BACKOFF_MS", v)
+		if err != nil {
+			return err
+		}
+		p.MaxBackoff = d
+	}
+	if enabled {
+		c.retry = &p
 	}
 	return nil
 }
