@@ -300,8 +300,12 @@ func (p *pool) accept(c *hubConn, ack *hubpb.RegisterAck) bool {
 	}
 	if owner, ok := p.owners[id]; ok && owner.role == roleActive {
 		c.role, c.parkedID = roleDuplicate, id
+		// The id c gave up may have an address parked behind it (c itself stays parked: its id
+		// is owned).
+		revived := p.reviveLocked()
 		p.mu.Unlock()
 		c.log.Warn("two hub addresses reach the same hub; closing and parking the second", "hub_id", id, "kept", owner.address)
+		p.startRevived(revived)
 		return false
 	}
 	p.owners[id] = c

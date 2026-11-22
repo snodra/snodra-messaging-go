@@ -729,3 +729,22 @@ func TestASendWaitsForALoneHubRolledOver(t *testing.T) {
 	is(t, errors.Is(o.err, ErrNeverSent), true)
 	within(t, o.elapsed, 0, 100*ms)
 }
+
+func TestAHubIDFreedByADuplicateRevivesTheAddressParkedBehindIt(t *testing.T) { // SG-22
+	a, b, c := fakehub.Start(t), fakehub.Start(t), fakehub.Start(t)
+	app := startApp(t, Hubs(a.Addr(), b.Addr(), c.Addr()))
+	sa, _ := registered(t, a, "hub-x")
+	registered(t, b, "hub-y")
+	hubIDsAre(t, app, "hub-x", "hub-y")
+	sc, _ := registered(t, c, "hub-x") // parked behind hub-x
+	sc.Ended(t, 2*s_)
+	// The owner of hub-x now reaches hub-y, which b owns: it is parked in turn, and hub-x has no
+	// address left but the one parked behind it, which is connected again.
+	sa.Close(codes.Unavailable, "restart")
+	sa2, _ := registered(t, a, "hub-y")
+	sa2.Ended(t, 2*s_)
+	sc2, _ := registered(t, c, "hub-x")
+	hubIDsAre(t, app, "hub-x", "hub-y")
+	isAlive(t, sc2)
+	a.NoStreamWithin(t, 300*ms) // a stays parked: hub-y is owned
+}
