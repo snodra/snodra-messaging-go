@@ -248,6 +248,7 @@ type inbox struct {
 	q      []*hubpb.ClientMessage
 	ended  bool
 	err    error
+	at     time.Time // when the stream ended
 	sig    chan struct{}
 	endedC chan struct{} // closed by end
 }
@@ -272,7 +273,7 @@ func (b *inbox) push(m *hubpb.ClientMessage) {
 func (b *inbox) end(err error) {
 	b.mu.Lock()
 	if !b.ended {
-		b.ended, b.err = true, err
+		b.ended, b.err, b.at = true, err, time.Now()
 		close(b.endedC)
 	}
 	b.mu.Unlock()
@@ -341,6 +342,7 @@ type Stream struct {
 	acked   bool
 	echo    echoMode
 	hbs     []time.Time
+	echoed  []time.Time // the arrival of every heartbeat that was echoed
 	statuss []*hubpb.InstanceStatus
 }
 
@@ -386,6 +388,7 @@ func (s *Stream) observe(m *hubpb.ClientMessage) {
 		defer s.sendMu.Unlock()
 		s.hbs = append(s.hbs, time.Now())
 		if s.echo == echoAlways || (s.echo == echoAfterAck && s.acked) {
+			s.echoed = append(s.echoed, s.hbs[len(s.hbs)-1])
 			_ = s.srv.Send(&hubpb.ServerMessage{Message: &hubpb.ServerMessage_Heartbeat{
 				Heartbeat: &hubpb.Heartbeat{SentAtMs: k.Heartbeat.GetSentAtMs()},
 			}})
@@ -558,6 +561,31 @@ func (s *Stream) Heartbeats() []time.Time {
 	s.sendMu.Lock()
 	defer s.sendMu.Unlock()
 	return append([]time.Time(nil), s.hbs...)
+}
+
+// Echoed returns the arrival time (as in [Stream.Heartbeats]) of every Heartbeat that was
+// echoed so far.
+func (s *Stream) Echoed() []time.Time {
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
+	return append([]time.Time(nil), s.echoed...)
+}
+
+// Ended waits at most d for the stream to end (the client left, half-closed or the stream was
+// closed) and returns when it ended; it fails the test after d.
+func (s *Stream) Ended(t testing.TB, d time.Duration) time.Time {
+	t.Helper()
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-s.in.endedC:
+		s.in.mu.Lock()
+		defer s.in.mu.Unlock()
+		return s.in.at
+	case <-timer.C:
+		t.Fatalf("fakehub: the stream did not end within %v", d)
+		return time.Time{}
+	}
 }
 
 // Statuses returns every InstanceStatus received so far.

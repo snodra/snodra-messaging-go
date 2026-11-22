@@ -254,6 +254,43 @@ func TestEchoCanBeSwitchedOffAfterTheAck(t *testing.T) {
 	is(t, recv(t, c).GetHeartbeat().GetSentAtMs(), int64(2)) // 1 was never echoed
 }
 
+func TestEchoedRecordsTheHeartbeatsThatWereEchoed(t *testing.T) {
+	hub := Start(t)
+	c := dial(t, hub.Addr())
+	send(t, c, register("orders-service", "i-1"))
+	s := hub.Next(t)
+	s.RecvRegister(t)
+	send(t, c, heartbeat(1)) // before the ack: not echoed
+	s.Recv(t)
+	s.Ack(t, Ack("hub-1"))
+	recv(t, c)
+	send(t, c, heartbeat(2)) // echoed
+	is(t, recv(t, c).GetHeartbeat().GetSentAtMs(), int64(2))
+	s.EchoHeartbeats(false)
+	send(t, c, heartbeat(3)) // not echoed
+	s.Recv(t)
+	s.Recv(t)
+	beats, echoed := s.Heartbeats(), s.Echoed()
+	is(t, len(beats), 3)
+	is(t, len(echoed), 1)
+	is(t, echoed[0], beats[1])
+}
+
+func TestEndedSaysWhenTheStreamEnded(t *testing.T) {
+	hub := Start(t)
+	c := dial(t, hub.Addr())
+	send(t, c, register("orders-service", "i-1"))
+	s := hub.Next(t)
+	s.RecvRegister(t)
+	before := time.Now()
+	if err := c.CloseSend(); err != nil {
+		t.Fatal(err)
+	}
+	at := s.Ended(t, time.Second)
+	is(t, !at.Before(before) && time.Since(at) < time.Second, true)
+	is(t, s.Ended(t, time.Second), at) // the same moment, at once, when asked again
+}
+
 func TestFirstFrameThatIsNotARegisterIsRefused(t *testing.T) {
 	hub := Start(t)
 	c := dial(t, hub.Addr())

@@ -94,25 +94,62 @@ func TestHeartbeatsAtTheAckInterval(t *testing.T) {
 	within(t, sum/time.Duration(len(beats)-1), interval*8/10, interval*12/10)
 }
 
-func TestASilentHubIsDroppedAfterThreeIntervals(t *testing.T) {
-	const interval = 100 * ms
+func TestTheSilentHubDecision(t *testing.T) {
+	const i = time.Second
+	for _, c := range []struct {
+		since      time.Duration // since the last echo, on the tick
+		unanswered int           // heartbeats sent since it
+		want       bool
+	}{
+		{4*i - ms, 3, true},      // the fourth tick after the last echoed heartbeat
+		{3*i + ms, 3, true},      // more than three intervals, three heartbeats unanswered
+		{3 * i, 3, false},        // exactly three intervals: not more
+		{3*i + ms, 2, false},     // a late third tick: only two heartbeats unanswered yet
+		{10 * i, 2, false},       // (the ticker skipped ticks: the next tick decides)
+		{2*i + 500*ms, 3, false}, // three unanswered, but not three intervals
+		{3*i + 500*ms, 0, false}, // an echo just came
+	} {
+		if got := hubSilent(c.since, c.unanswered, i, 3); got != c.want {
+			t.Fatalf("since %v, %d unanswered: got %v, want %v", c.since, c.unanswered, got, c.want)
+		}
+	}
+}
+
+func TestASilentHubIsDroppedOnTheTickAfterThreeIntervals(t *testing.T) {
+	const interval = 200 * ms
+	const slack = 60 * ms // scheduling and transport, also under -race
 	hub := fakehub.Start(t)
 	startApp(t, Hubs(hub.Addr()))
 	s := hub.Next(t)
 	s.RecvRegister(t)
 	s.Ack(t, ackEvery("hub-1", interval))
 	hub.NoStreamWithin(t, 5*interval) // echoed: the stream stays up past three intervals
-	before := time.Now()
 	s.EchoHeartbeats(false)
-	// Every heartbeat that arrived before `before` was echoed.
-	var last time.Time
-	for _, b := range s.Heartbeats() {
-		if !b.After(before) {
-			last = b
+	at := s.Ended(t, 10*interval)
+	echoed, beats := s.Echoed(), s.Heartbeats()
+	if len(echoed) == 0 {
+		t.Fatal("no heartbeat was echoed")
+	}
+	last := echoed[len(echoed)-1]
+	silence := at.Sub(last)
+	// Never before three full intervals without an echo (the library measures from its own,
+	// later, receipt of that echo, so the fake's view is strictly above three intervals).
+	if silence <= 3*interval {
+		t.Fatalf("dropped %v after the last echo, want more than %v", silence, 3*interval)
+	}
+	// And by the next heartbeat tick after that: at most four intervals.
+	within(t, silence, 3*interval, 4*interval+slack)
+	// The check runs on the heartbeat tick, before that tick's heartbeat: the drop comes one
+	// interval after the last heartbeat sent, which is not a second heartbeat at the same moment.
+	within(t, at.Sub(beats[len(beats)-1]), interval-slack, interval+slack)
+	unanswered := 0
+	for _, b := range beats {
+		if b.After(last) {
+			unanswered++
 		}
 	}
-	hub.Next(t)
-	within(t, time.Since(last), 3*interval, 3*interval+250*ms)
+	is(t, unanswered, 3)        // dropped on the tick after the third unanswered heartbeat
+	hub.Next(t).RecvRegister(t) // and the library reconnects
 }
 
 func TestTheBackoffResetsAfterAnAck(t *testing.T) {

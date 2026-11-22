@@ -131,3 +131,22 @@ reference library departs from it. In each case this library follows the referen
 - **This library:** does the same (`dispatch.go`, `identity.go`).
 - **Question:** is a failing token `UNAUTHENTICATED` for every handler, or only for a handler that requires an
   authenticated caller (the others running as if the request carried no token)?
+
+### SG-19: when a silent hub is dropped
+
+- **Specification:** [protocol.md, Heartbeats](https://snodra.damoreira.com/library-authors/protocol/) says a library
+  "must drop a stream that brought no echo for three heartbeat intervals"; it does not say when the library looks, nor
+  how far past three intervals the drop may come.
+- **Reference library:** looks on each heartbeat tick, before sending that tick's heartbeat, and drops the stream when
+  more than three intervals have passed since the last echo it received (also before the `RegisterAck`, with the
+  3 s interval, where the 10 s handshake timeout comes first in practice). Since an echo normally arrives just after
+  its tick, the drop normally comes on the fourth tick after the last echoed heartbeat; a tick that fires a little
+  late, or an echo that is unusually fast, makes the third tick see "more than three intervals" and drop one tick
+  earlier, exactly three intervals after the last echo. The Kotlin library also looks on the tick, from the
+  `RegisterAck` on, and drops when the oldest unanswered heartbeat is more than three intervals old.
+- **This library:** looks on each heartbeat tick from the `RegisterAck` on, with the reference library's comparison
+  (more than three intervals since the last echo, or since the ack), and also waits until three heartbeats sent since
+  that echo are unanswered: the drop always comes on the tick after the third unanswered heartbeat, between three and
+  four intervals after the last echo (`connection.go`, `hubSilent`).
+- **Question:** should the specification name the drop moment (for example "on the first heartbeat tick after three
+  unanswered heartbeats"), so that every library drops a silent hub within the same window?

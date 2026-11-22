@@ -317,14 +317,16 @@ func (c *hubConn) open(ctx context.Context, cancel context.CancelFunc, cc *grpc.
 func (c *hubConn) serve(ref *streamRef, permits *streamPermits, inbox <-chan *hubpb.ServerMessage, ended, written <-chan error,
 	handshake <-chan time.Time) (reached bool, err error) {
 	interval := c.t.heartbeatBeforeAck
-	silentAfter := func() time.Duration { return interval * time.Duration(c.t.silentIntervals) }
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	tick := ticker.C
-	silent := time.NewTimer(time.Hour)
-	silent.Stop()
-	defer silent.Stop()
-	var silentC <-chan time.Time // armed once the stream is acknowledged
+	// The silent-hub check, armed once the stream is acknowledged: on each heartbeat tick,
+	// before its heartbeat (see hubSilent). The last sign of life is the ack, then each echo;
+	// unanswered counts the heartbeats sent since it.
+	// See https://snodra.damoreira.com/library-authors/protocol/ (Heartbeats).
+	watchSilence := false
+	var lastEcho time.Time
+	unanswered := 0
 	closeTimer := time.NewTimer(time.Hour)
 	closeTimer.Stop()
 	defer closeTimer.Stop()
@@ -339,7 +341,7 @@ func (c *hubConn) serve(ref *streamRef, permits *streamPermits, inbox <-chan *hu
 	halfClosed := false
 	halfClose := func() {
 		drained, drainExpired, halfClosed = nil, nil, true
-		tick, silentC, handshake = nil, nil, nil
+		tick, handshake, watchSilence = nil, nil, false
 		c.setState(stateDraining)
 		ref.closeSend()
 		closeTimer.Reset(c.t.closeWait)
@@ -368,8 +370,7 @@ func (c *hubConn) serve(ref *streamRef, permits *streamPermits, inbox <-chan *hu
 						}
 					}
 					if !halfClosed {
-						silent.Reset(silentAfter())
-						silentC = silent.C
+						watchSilence, lastEcho, unanswered = true, time.Now(), 0
 					}
 					c.wentLive(ref, k.RegisterAck, interval)
 				}
@@ -378,8 +379,8 @@ func (c *hubConn) serve(ref *streamRef, permits *streamPermits, inbox <-chan *hu
 				}
 			case *hubpb.ServerMessage_Heartbeat:
 				// Before the ack an echo confirms nothing; after it, it proves the hub alive.
-				if silentC != nil {
-					silent.Reset(silentAfter())
+				if watchSilence {
+					lastEcho, unanswered = time.Now(), 0
 				}
 			case *hubpb.ServerMessage_Request:
 				if halfClosed {
@@ -411,11 +412,15 @@ func (c *hubConn) serve(ref *streamRef, permits *streamPermits, inbox <-chan *hu
 				return reached, err
 			}
 		case <-tick:
+			if watchSilence {
+				if hubSilent(time.Since(lastEcho), unanswered, interval, c.t.silentIntervals) {
+					return reached, status.Errorf(codes.Unavailable, "no heartbeat echo for %v", time.Since(lastEcho).Round(time.Millisecond))
+				}
+				unanswered++
+			}
 			_ = ref.send(heartbeat())
 		case <-handshake:
 			return false, status.Errorf(codes.DeadlineExceeded, "no RegisterAck within %v", c.t.handshakeTimeout)
-		case <-silentC:
-			return reached, status.Errorf(codes.Unavailable, "no heartbeat echo for %v", silentAfter())
 		case <-stopping:
 			stopping = nil
 			if !reached {
@@ -691,4 +696,15 @@ func codeName(code codes.Code) string {
 		return n
 	}
 	return code.String()
+}
+
+// hubSilent decides, on a heartbeat tick, whether an acknowledged stream is silent: more than
+// intervals heartbeat intervals since the last echo (the reference library's comparison), and
+// intervals heartbeats sent since that echo all unanswered. The second condition keeps a tick
+// that fires a little late, nominally exactly three intervals after the last echoed heartbeat,
+// from dropping the stream one tick early: the drop comes on the tick after the third
+// unanswered heartbeat, between three and four intervals after the last echo.
+// TODO(spec-gap): SG-19 (the drop moment within "no echo for three heartbeat intervals").
+func hubSilent(since time.Duration, unanswered int, interval time.Duration, intervals int) bool {
+	return unanswered >= intervals && since > interval*time.Duration(intervals)
 }
