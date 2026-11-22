@@ -1,4 +1,4 @@
-package snodramessaging
+package snodra
 
 import "time"
 
