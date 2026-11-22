@@ -281,6 +281,6 @@ reference library departs from it. In each case this library follows the referen
   first part nothing is retried. The Kotlin library does the same. A subscription is retried the same way until its
   initial result, but each attempt sends what is left of the budget, as a unary request does: there
   `Request.timeout_ms` bounds the initial result only.
-- **This library:** does the same (`stream_client.go`).
+- **This library:** does the same (`stream_client.go`; subscriptions in `subscribe.go`).
 - **Question:** should a retried stream send the remaining budget, as a unary request does, or its idle timeout
   unchanged; and should the specification say that a stream is retried only before its first part?

@@ -270,6 +270,7 @@ func (a *App) lookup(req *hubpb.Request, streaming bool) (*handler, hubpb.ErrorC
 		return nil, hubpb.ErrorCode_NO_HANDLER, noHandlerText(typ)
 	case streaming && h.kind == kindSubscription:
 		// As in the reference library: no streaming handler of the type.
+		// TODO(spec-gap): SG-12 (a streaming request to a subscription handler is NO_HANDLER).
 		return nil, hubpb.ErrorCode_NO_HANDLER, noHandlerText(typ)
 	case !streaming && h.kind == kindSubscription:
 		// A subscription's initial result is the unary request <id>#0, answered by the

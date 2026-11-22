@@ -147,7 +147,11 @@ type streaming struct {
 	first    bool            // no part arrived yet
 	received uint64          // parts received: the next must carry seq received+1
 	read     uint32          // items read since the last refill
-	done     bool            // ended: nothing more to read, nothing to cancel
+
+	// mu guards done: a subscription's Close cancels it from any goroutine, also while a range
+	// reads it. Everything else is the reader's own.
+	mu   sync.Mutex
+	done bool // ended: nothing more to read, nothing to cancel
 }
 
 // openStream writes a new streaming query or subscription of tmpl (fresh id, timeout chosen) to
@@ -180,8 +184,13 @@ func firstPartGuard(idle time.Duration) time.Duration {
 // next is the stream's next part; nil at its clean end. An error ends the stream; errClosed
 // is a subscription its owner closed (it is not cancelled here).
 func (s *streaming) next(ctx context.Context) (*hubpb.ReplyPart, error) {
-	if s.done {
-		return nil, nil
+	if s.isDone() {
+		select {
+		case <-s.closed: // ended by its owner's Close
+			return nil, errClosed
+		default:
+			return nil, nil
+		}
 	}
 	// A caller that gave up gets its context's error at once, before what is buffered, and the
 	// hub its Cancel without delay.
@@ -230,10 +239,27 @@ func (s *streaming) next(ctx context.Context) (*hubpb.ReplyPart, error) {
 	}
 }
 
+// isDone reports whether the stream ended here: nothing more to read or cancel.
+func (s *streaming) isDone() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.done
+}
+
+// end marks the stream ended; true when it was not before (the caller ends it).
+func (s *streaming) end() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	was := s.done
+	s.done = true
+	return !was
+}
+
 // guardNow is how long the local guard waits for the next part, and false when nothing guards
 // it: twice the hub's bound plus 1 s for a stream's first part, the bound plus 1 s between its
 // parts and for a subscription's initial part, nothing after that (a quiet subscription is not a
 // broken one).
+// TODO(spec-gap): SG-3 (the local guards of a stream and of a subscription).
 func (s *streaming) guardNow() (time.Duration, bool) {
 	switch {
 	case s.what == "subscription":
@@ -295,6 +321,9 @@ func (s *streaming) lost(n uint64) error {
 
 // consumed counts an item the caller read: every refill items, the hub gets a Flow for that many.
 func (s *streaming) consumed() {
+	if s.isDone() {
+		return // closed meanwhile: no credit for a subscription the hub was told to cancel
+	}
 	s.read++
 	if s.read < s.refill {
 		return
@@ -308,24 +337,31 @@ func (s *streaming) consumed() {
 
 // finish ends the stream here: nothing more is read or cancelled.
 func (s *streaming) finish() {
-	s.done = true
+	s.end()
 	s.app.calls.remove(s.c.id)
 }
 
 // cancel ends the stream here and cancels it at the hub with reason (the handler is told),
-// unless it ended already; a request still in the outbound buffer is withdrawn instead. It
-// reports whether the request had been written.
+// unless it ended already: the hub gets at most one Cancel, whichever goroutine calls first. A
+// request still in the outbound buffer is withdrawn instead. It reports whether the request had
+// been written.
 func (s *streaming) cancel(reason string) bool {
-	if s.done {
-		return true
+	_, written := s.cancelOnce(reason)
+	return written
+}
+
+// cancelOnce is cancel, also reporting whether this call ended the stream.
+func (s *streaming) cancelOnce(reason string) (ended, written bool) {
+	if !s.end() {
+		return false, true
 	}
-	s.finish()
+	s.app.calls.remove(s.c.id)
 	if s.ref.withdraw(s.c) {
-		return false
+		return true, false
 	}
 	msg := &hubpb.ClientMessage{Message: &hubpb.ClientMessage_Cancel{Cancel: &hubpb.Cancel{RequestId: s.c.id, Reason: reason}}}
 	if err := s.ref.send(msg); err != nil {
 		s.app.log.Debug("cancel not written: its hub stream is gone", "request", s.c.id, "type", s.typ)
 	}
-	return true
+	return true, true
 }

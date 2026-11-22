@@ -424,6 +424,7 @@ func (a *App) lookupSubscription(req *hubpb.Request) (*handler, hubpb.ErrorCode,
 	default:
 		return nil, hubpb.ErrorCode_INVALID_REQUEST, fmt.Sprintf("unsupported request kind %d", req.GetKind())
 	}
+	// TODO(spec-gap): SG-12 (the mode answers of a subscription request).
 	switch {
 	case h == nil || h.kind == kindCommand:
 		return nil, hubpb.ErrorCode_NO_HANDLER, noHandlerText(typ)

@@ -298,3 +298,92 @@ func TestSubscribeRefusesWhatItCannotSend(t *testing.T) {
 	var nilSub *Subscription[OrderView, OrderUpdate]
 	nilSub.Close() // harmless
 }
+
+func TestAContextCancelledDuringARangeEndsItOnce(t *testing.T) {
+	app, _, s := sending(t, fakehub.Ack("hub-1"))
+	for range 10 {
+		ctx, cancel := context.WithCancel(context.Background())
+		pending := subscribing(app, ctx)
+		r := s.RecvRequest(t)
+		s.Send(t, partOf(r.GetId(), 1, "B", "b1", `{"topic":"t","value":0}`, nil))
+		o := await(t, pending)
+		is(t, o.err, nil)
+		sub := o.value
+		items := make(chan OrderUpdate, 4)
+		read := async(func() (int, error) {
+			n := 0
+			for u, err := range sub.Updates() {
+				if err != nil {
+					return n, err
+				}
+				n++
+				items <- u
+			}
+			return n, nil
+		})
+		s.Send(t, update(r.GetId(), 2))
+		is(t, receive(t, items).Value, 2)
+		cancel() // the watch on ctx closes the subscription while the range waits
+		got := await(t, read)
+		is(t, got.value, 1)
+		is(t, errors.Is(got.err, context.Canceled), true) // yielded by the range, once
+		is(t, errors.Is(got.err, ErrOutcomeUnknown), true)
+		is(t, s.RecvCancel(t).GetRequestId(), r.GetId())
+		again, err := collect(sub.Updates()) // then nothing more
+		is(t, len(again), 0)
+		is(t, err, nil)
+		sub.Close()
+		is(t, waiting(app), 0)
+	}
+	s.Nothing(t, 200*ms, "cancel") // one Cancel per subscription
+}
+
+func TestCloseDuringTheLoopBodyCancelsAtOnce(t *testing.T) {
+	app, _, s := sending(t, fakehub.Ack("hub-1"))
+	sub, r := opened(t, app, s)
+	inBody, release := make(chan struct{}), make(chan struct{})
+	read := async(func() (int, error) {
+		n := 0
+		for _, err := range sub.Updates() {
+			if err != nil {
+				return n, err
+			}
+			n++
+			close(inBody)
+			<-release // the consumer is busy
+		}
+		return n, nil
+	})
+	s.Send(t, update(r.GetId(), 2))
+	receive(t, inBody)
+	sub.Close()          // from another goroutine
+	c := s.RecvCancel(t) // while the loop body still runs
+	is(t, c.GetRequestId(), r.GetId())
+	is(t, c.GetReason(), "dropped by the sender")
+	close(release)
+	got := await(t, read)
+	is(t, got.err, nil)
+	is(t, got.value, 1)
+	s.Nothing(t, 200*ms, "cancel", "flow") // exactly one Cancel
+	is(t, waiting(app), 0)
+}
+
+func TestCloseInsideTheLoopBody(t *testing.T) {
+	app, _, s := sending(t, fakehub.Ack("hub-1"))
+	sub, r := opened(t, app, s)
+	s.Send(t, update(r.GetId(), 2))
+	s.Send(t, update(r.GetId(), 3))
+	n := 0
+	for _, err := range sub.Updates() {
+		is(t, err, nil)
+		n++
+		sub.Close()
+		is(t, s.RecvCancel(t).GetRequestId(), r.GetId()) // at once, before the body returns
+	}
+	is(t, n, 1) // the buffered update 3 is not yielded after the Close
+	again, err := collect(sub.Updates())
+	is(t, len(again), 0)
+	is(t, err, nil)
+	s.Nothing(t, 200*ms, "cancel")
+	is(t, waiting(app), 0)
+}

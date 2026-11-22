@@ -21,11 +21,13 @@ type Subscription[I, U any] struct {
 	s   *streaming
 
 	mu       sync.Mutex
-	ranging  bool          // a range over Updates is under way: it owns s
+	ranging  bool          // a range over Updates is under way: it reads s (Close only cancels s)
 	isClosed bool          // Close was called
 	closed   chan struct{} // closed by Close
-	closeErr error         // what a later range yields: the context's error when it closed the subscription
-	stop     func() bool   // stops the watch on ctx
+	// ctxErr is ctx's error when ctx ended the subscription: yielded once, by the range under way
+	// or else the next one.
+	ctxErr error
+	stop   func() bool // stops the watch on ctx
 }
 
 // Subscribe subscribes to the subscription query q ([HandleSubscription] on the other side):
@@ -58,14 +60,16 @@ type Subscription[I, U any] struct {
 // The updates are hot: the hub relays them from the open on, up to the credit window
 // ([InitialCredit], the initial result taking one credit), and buffers up to its own limit beyond
 // it, ending the subscription with RESOURCE_EXHAUSTED when the caller falls further behind;
-// reading them gives credit back. ctx bounds the whole subscription: when it ends, the
-// subscription is cancelled at the hub, ranging or not, and [Subscription.Updates] yields ctx's
-// error (with [ErrOutcomeUnknown]).
+// reading them gives credit back. ctx bounds the whole subscription: when it ends (cancelled, or
+// its deadline passed), the subscription is cancelled at the hub at once, ranging or not, and
+// [Subscription.Updates] yields ctx's error (with [ErrOutcomeUnknown]) once.
 //
-// The options are those of [Query]: [Timeout] (or [DefaultTimeout], or ctx's deadline) bounds the
-// initial result only (the local guard waits the hub's bound plus 1 s for it; the updates have no
-// timeout and no guard); [InitialCredit]; [MaxResults] ends the subscription after that many
-// updates. [RoutingKey] is ignored.
+// The options are those of [Query]: [Timeout] (or [DefaultTimeout]) is sent as
+// Request.timeout_ms and bounds the initial result only (the local guard waits the hub's bound
+// plus 1 s for it; the updates have no timeout and no guard). A deadline of ctx does both: until
+// the initial result it counts as the timeout when it comes sooner, and when it passes it ends
+// the subscription, as above. [InitialCredit] is the credit window; [MaxResults] ends the
+// subscription after that many updates. [RoutingKey] is ignored.
 // See https://snodra.damoreira.com/library-authors/protocol/ (Subscription).
 func Subscribe[I, U any](ctx context.Context, app *App, q Message, opts ...SendOption) (*Subscription[I, U], error) {
 	out, err := prepare(ctx, app, hubpb.RequestKind_QUERY, hubpb.RequestMode_SUBSCRIPTION, q, opts)
@@ -75,6 +79,7 @@ func Subscribe[I, U any](ctx context.Context, app *App, q Message, opts ...SendO
 	var s *streaming
 	// Retried until the initial part, each attempt sending what is left of the budget (as a
 	// unary query, unlike a stream).
+	// TODO(spec-gap): SG-21 (retried until the initial part; unlike a stream, with what is left).
 	first, err := retrying(ctx, hubpb.RequestKind_QUERY, out.policy, out.budget, out.chosen, func(timeout time.Duration) (*hubpb.ReplyPart, error) {
 		opened, err := app.openStream(ctx, out.tmpl, timeout)
 		if err != nil {
@@ -114,9 +119,11 @@ func Subscribe[I, U any](ctx context.Context, app *App, q Message, opts ...SendO
 // code: an owner's failure, RESOURCE_EXHAUSTED when the hub's buffer for the caller overflowed,
 // HANDLER_DISCONNECTED when the last owner left, CANCELLED at the hub's maximum duration, ...),
 // [ErrOutcomeUnknown] when the hub stream was lost, [ErrLostParts] when the hub dropped updates,
-// ctx's error (with [ErrOutcomeUnknown]), or an update that does not decode. Breaking out of the
-// loop cancels the subscription at the hub, as [Subscription.Close] does; a Close during the
-// range ends it without an error.
+// ctx's error (with [ErrOutcomeUnknown], yielded once: by the range under way when ctx ends, else
+// by the next range), or an update that does not decode. Breaking out of the loop cancels the
+// subscription at the hub, as [Subscription.Close] does; a Close during the range (also from the
+// loop body) ends it without an error once the loop body returns, the buffered updates not
+// yielded.
 func (sub *Subscription[I, U]) Updates() iter.Seq2[U, error] {
 	return func(yield func(U, error) bool) {
 		var zero U
@@ -130,13 +137,14 @@ func (sub *Subscription[I, U]) Updates() iter.Seq2[U, error] {
 			yield(zero, errors.New("snodra: the updates of a subscription are already being ranged over"))
 			return
 		case sub.isClosed:
-			err := sub.closeErr
+			err := sub.ctxErr
+			sub.ctxErr = nil
 			sub.mu.Unlock()
 			if err != nil {
 				yield(zero, err)
 			}
 			return
-		case sub.s.done:
+		case sub.s.isDone():
 			sub.mu.Unlock()
 			return
 		}
@@ -145,7 +153,8 @@ func (sub *Subscription[I, U]) Updates() iter.Seq2[U, error] {
 		defer func() {
 			sub.mu.Lock()
 			sub.ranging = false
-			sub.s.cancel("dropped by the sender") // a break, a panic in the loop body or a Close
+			sub.ctxErr = nil                      // yielded by this range, or it ended otherwise first
+			sub.s.cancel("dropped by the sender") // a break or a panic in the loop body
 			if sub.stop != nil {
 				sub.stop() // over: ctx has nothing more to end
 			}
@@ -155,6 +164,13 @@ func (sub *Subscription[I, U]) Updates() iter.Seq2[U, error] {
 			part, err := sub.s.next(sub.ctx)
 			switch {
 			case errors.Is(err, errClosed):
+				sub.mu.Lock()
+				err = sub.ctxErr // ended by ctx: its error, else a clean end
+				sub.ctxErr = nil
+				sub.mu.Unlock()
+				if err != nil {
+					yield(zero, err)
+				}
 				return
 			case err != nil:
 				yield(zero, err)
@@ -177,9 +193,9 @@ func (sub *Subscription[I, U]) Updates() iter.Seq2[U, error] {
 	}
 }
 
-// Close cancels the subscription at the hub, which tells every owner instance, unless it ended
-// already. It is safe to call more than once, and while another goroutine ranges over
-// [Subscription.Updates], whose range then ends.
+// Close cancels the subscription at the hub at once, which tells every owner instance, unless it
+// ended already. It is safe to call more than once, from any goroutine, also from the loop body
+// of a range over [Subscription.Updates]: that range ends once its loop body returns.
 func (sub *Subscription[I, U]) Close() {
 	if sub == nil || sub.s == nil {
 		return
@@ -190,14 +206,14 @@ func (sub *Subscription[I, U]) Close() {
 		return
 	}
 	sub.isClosed = true
-	if err := sub.ctx.Err(); err != nil && !sub.s.done {
-		sub.closeErr = fmt.Errorf("%w: %w", ErrOutcomeUnknown, err)
-	}
+	ctxErr := sub.ctx.Err()
 	close(sub.closed)
 	if sub.stop != nil {
 		sub.stop()
 	}
-	if !sub.ranging {
-		sub.s.cancel("dropped by the sender")
+	// The one Cancel, whoever ends the subscription first (this Close, or a range that saw ctx's
+	// end itself and yields its error).
+	if ended, _ := sub.s.cancelOnce("dropped by the sender"); ended && ctxErr != nil {
+		sub.ctxErr = fmt.Errorf("%w: %w", ErrOutcomeUnknown, ctxErr)
 	}
 }
