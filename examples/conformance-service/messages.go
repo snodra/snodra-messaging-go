@@ -160,6 +160,12 @@ type SleepAnswer struct {
 	SleptMs    int64  `json:"sleptMs"`
 }
 
+// SharedQueryAnswer is the answer of SharedQuery: who answered.
+type SharedQueryAnswer struct {
+	Service    string `json:"service"`
+	InstanceID string `json:"instanceId"`
+}
+
 // StrictAnswer is the answer of Strict.
 type StrictAnswer struct {
 	Count int64 `json:"count"`

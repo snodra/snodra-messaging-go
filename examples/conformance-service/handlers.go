@@ -27,6 +27,10 @@ func registerHandlers(app *snodra.App, e env) error {
 		snodra.HandleCommand(app, func(context.Context, Done) (snodra.Empty, error) { return snodra.Empty{}, nil }),
 		snodra.HandleCommand(app, func(ctx context.Context, m Sleep) (SleepAnswer, error) { return s.sleep(ctx, m.Ms) }),
 		snodra.HandleQuery(app, func(ctx context.Context, m SleepQuery) (SleepAnswer, error) { return s.sleep(ctx, m.Ms) }),
+		// Shared: other services may own it too.
+		snodra.HandleQuery(app, func(context.Context, SharedQuery) (SharedQueryAnswer, error) {
+			return SharedQueryAnswer{Service: e.service, InstanceID: e.instance}, nil
+		}, snodra.Shared()),
 		snodra.HandleCommand(app, s.fail),
 		snodra.HandleCommand(app, func(_ context.Context, m Strict) (StrictAnswer, error) { return StrictAnswer(m), nil }),
 		// An authenticated caller, and not the subject the contract names as refused.

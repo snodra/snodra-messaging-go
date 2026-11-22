@@ -46,6 +46,9 @@ func started(t *testing.T, e env) (*snodra.App, *fakehub.Hub, *fakehub.Stream) {
 	if got := strings.Join(r.GetQueryTypes(), ","); got != "conformance.EchoQuery,conformance.Outcome,conformance.SleepQuery,conformance.View" {
 		t.Fatalf("query types %s", got)
 	}
+	if got := strings.Join(r.GetSharedQueryTypes(), ","); got != "conformance.SharedQuery" {
+		t.Fatalf("shared query types %s", got)
+	}
 	return app, hub, s
 }
 
@@ -259,6 +262,81 @@ func TestSendGoesThroughTheLibrary(t *testing.T) {
 	_, reply = nextFrame(t, s)
 	if out := decode(t, reply); out["result"] != "unsupported" || out["reason"] == "" {
 		t.Fatalf("outcome %v", out)
+	}
+}
+
+func TestSharedQueryAnswersWhoAnswered(t *testing.T) {
+	app, _, s := started(t, env{service: "conformance-go", instance: "i-1", capacity: 4})
+	s.Ack(t, fakehub.Ack("hub-1"))
+	ready(t, app)
+	if m := decode(t, call(t, s, hubpb.RequestKind_QUERY, "conformance.SharedQuery", `{}`, nil)); m["service"] != "conformance-go" || m["instanceId"] != "i-1" {
+		t.Fatalf("SharedQuery %v", m)
+	}
+}
+
+func TestScatterGoesThroughTheLibrarysGather(t *testing.T) {
+	app, _, s := started(t, env{service: "conformance-go", instance: "i-1", capacity: 4})
+	s.Ack(t, fakehub.Ack("hub-1"))
+	ready(t, app)
+	s.Send(t, fakehub.Forward(&hubpb.Request{Id: "r-scatter", Kind: hubpb.RequestKind_COMMAND, Type: "conformance.Send",
+		Payload: []byte(`{"op":"scatter","target":"probe-query","payload":{"k":1},"maxResults":2,"timeoutMs":3000}`)}))
+	gather, _ := nextFrame(t, s)
+	if gather.GetType() != "conformance.runner.ProbeQuery" || gather.GetMode() != hubpb.RequestMode_SCATTER_GATHER ||
+		gather.GetKind() != hubpb.RequestKind_QUERY || gather.GetMaxResults() != 2 || gather.GetTimeoutMs() != 3000 ||
+		string(gather.GetPayload()) != `{"k":1}` {
+		t.Fatalf("the library sent %v", gather)
+	}
+	id := gather.GetId()
+	s.Send(t, &hubpb.ServerMessage{Message: &hubpb.ServerMessage_Part{Part: &hubpb.ReplyPart{RequestId: id, Seq: 0,
+		ResponderService: "conformance-runner", ResponderInstance: "p1", Payload: []byte(`{"target":"p1"}`)}}})
+	s.Send(t, &hubpb.ServerMessage{Message: &hubpb.ServerMessage_Part{Part: &hubpb.ReplyPart{RequestId: id, Seq: 1,
+		ResponderService: "conformance-runner", ResponderInstance: "p2",
+		Error: &hubpb.Error{RequestId: id, Code: hubpb.ErrorCode_HANDLER_ERROR, Message: "p2 fails"}}}})
+	s.Send(t, &hubpb.ServerMessage{Message: &hubpb.ServerMessage_End{End: &hubpb.ReplyEnd{RequestId: id, Parts: 2, Failed: 1, TimedOut: 1}}})
+	_, reply := nextFrame(t, s)
+	var out struct {
+		Result string `json:"result"`
+		Parts  []struct {
+			Service  string          `json:"service"`
+			Instance string          `json:"instance"`
+			OK       bool            `json:"ok"`
+			Payload  json.RawMessage `json:"payload"`
+			Error    map[string]any  `json:"error"`
+		} `json:"parts"`
+		Failed   int `json:"failed"`
+		TimedOut int `json:"timedOut"`
+	}
+	if err := json.Unmarshal(reply.GetPayload(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Result != "ok" || len(out.Parts) != 2 || out.Failed != 1 || out.TimedOut != 1 {
+		t.Fatalf("outcome %s", reply.GetPayload())
+	}
+	p1, p2 := out.Parts[0], out.Parts[1]
+	if p1.Service != "conformance-runner" || p1.Instance != "p1" || !p1.OK || string(p1.Payload) != `{"target":"p1"}` || p1.Error != nil {
+		t.Fatalf("part 1 %+v", p1)
+	}
+	if p2.Instance != "p2" || p2.OK || p2.Payload != nil || p2.Error["kind"] != "code" || p2.Error["code"] != "HANDLER_ERROR" || p2.Error["message"] != "p2 fails" {
+		t.Fatalf("part 2 %+v", p2)
+	}
+
+	// No target at all: the gather fails as a whole.
+	s.Send(t, fakehub.Forward(&hubpb.Request{Id: "r-scatter-2", Kind: hubpb.RequestKind_COMMAND, Type: "conformance.Send",
+		Payload: []byte(`{"op":"scatter","target":"echo-query"}`)}))
+	gather, _ = nextFrame(t, s)
+	s.Send(t, fakehub.HubError(gather.GetId(), hubpb.ErrorCode_NO_HANDLER, "nobody"))
+	_, reply = nextFrame(t, s)
+	m := decode(t, reply)
+	if e, _ := m["error"].(map[string]any); m["result"] != "error" || e["code"] != "NO_HANDLER" {
+		t.Fatalf("outcome %v", m)
+	}
+
+	// A target that is not a query.
+	s.Send(t, fakehub.Forward(&hubpb.Request{Id: "r-scatter-3", Kind: hubpb.RequestKind_COMMAND, Type: "conformance.Send",
+		Payload: []byte(`{"op":"scatter","target":"probe"}`)}))
+	_, reply = nextFrame(t, s)
+	if m := decode(t, reply); m["result"] != "unsupported" {
+		t.Fatalf("outcome %v", m)
 	}
 }
 

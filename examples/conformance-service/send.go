@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"math"
 	"sync"
 	"time"
 
@@ -44,6 +45,8 @@ func (s *service) run(ctx context.Context, m Send) map[string]any {
 	switch m.Op {
 	case "unary", "":
 		out = s.unary(ctx, m)
+	case "scatter":
+		out = s.scatter(ctx, m)
 	default:
 		out = unsupported("op " + m.Op + " is not supported yet")
 	}
@@ -55,8 +58,8 @@ func unsupported(reason string) map[string]any {
 	return map[string]any{"result": "unsupported", "reason": reason}
 }
 
-// unary sends m's target with the library's Send or Query and the options m names.
-func (s *service) unary(ctx context.Context, m Send) map[string]any {
+// options are the library's send options m names.
+func options(m Send) []snodra.SendOption {
 	var opts []snodra.SendOption
 	for name, value := range m.Headers {
 		opts = append(opts, snodra.Header(name, value))
@@ -75,6 +78,15 @@ func (s *service) unary(ctx context.Context, m Send) map[string]any {
 		}
 		opts = append(opts, snodra.Retry(p))
 	}
+	if m.MaxResults != nil {
+		opts = append(opts, snodra.MaxResults(uint32(min(max(*m.MaxResults, 0), math.MaxUint32))))
+	}
+	return opts
+}
+
+// unary sends m's target with the library's Send or Query and the options m names.
+func (s *service) unary(ctx context.Context, m Send) map[string]any {
+	opts := options(m)
 	var (
 		reply json.RawMessage
 		err   error
@@ -99,6 +111,40 @@ func (s *service) unary(ctx context.Context, m Send) map[string]any {
 		return map[string]any{"result": "error", "error": classify(err)}
 	}
 	return map[string]any{"result": "ok", "payload": reply}
+}
+
+// scatter gathers m's query target with the library's Gather and the options m names: one
+// part per answer, in arrival order, with the counts.
+func (s *service) scatter(ctx context.Context, m Send) map[string]any {
+	opts := options(m)
+	var (
+		g   *snodra.Gathered[json.RawMessage]
+		err error
+	)
+	switch m.Target {
+	case "probe-query":
+		g, err = snodra.Gather[json.RawMessage](ctx, s.app, ProbeQuery{m.Payload}, opts...)
+	case "echo-query":
+		g, err = snodra.Gather[json.RawMessage](ctx, s.app, EchoQuery{m.Payload}, opts...)
+	case "shared-query":
+		g, err = snodra.Gather[json.RawMessage](ctx, s.app, SharedQuery{m.Payload}, opts...)
+	default:
+		return unsupported("target " + m.Target + " is not a query target")
+	}
+	if err != nil {
+		return map[string]any{"result": "error", "error": classify(err)}
+	}
+	parts := make([]map[string]any, 0, len(g.Parts))
+	for _, p := range g.Parts {
+		part := map[string]any{"service": p.Service, "instance": p.Instance, "ok": p.Err == nil}
+		if p.Err != nil {
+			part["error"] = classify(p.Err)
+		} else {
+			part["payload"] = p.Value
+		}
+		parts = append(parts, part)
+	}
+	return map[string]any{"result": "ok", "parts": parts, "failed": g.Failed, "timedOut": g.TimedOut}
 }
 
 // classify is the contract's error of a failed call, by the library's typed errors.

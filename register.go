@@ -12,13 +12,23 @@ import (
 type handlerConfig struct {
 	// guards must all accept the caller before the payload is decoded; none: any caller.
 	guards []func(Caller) bool
+	// shared registers a query in Register.shared_query_types ([Shared]).
+	shared bool
 	// err is an option's error, returned by the registration.
 	err error
 }
 
 // A HandlerOption configures one handler in [HandleCommand] or [HandleQuery]: its guards
-// ([RequireAuthenticated], [RequireRole], [RequireCaller]).
+// ([RequireAuthenticated], [RequireRole], [RequireCaller]) and, for a query, [Shared].
 type HandlerOption func(*handlerConfig)
+
+// Shared registers a query type as shared (Register.shared_query_types): many services may own
+// it, each answering point queries on it like any query, and a [Gather] asks every instance of
+// every owner. Every owner must register it shared: the hub refuses a type one registrant
+// lists as exclusive and another as shared. Commands are never shared: [HandleCommand] with
+// Shared returns an error.
+// See https://snodra.damoreira.com/library-authors/protocol/ (Shared query types).
+func Shared() HandlerOption { return func(c *handlerConfig) { c.shared = true } }
 
 // handlerKind is the request kind a handler serves.
 type handlerKind int
@@ -54,8 +64,9 @@ func (e *decodeError) Unwrap() error { return e.err }
 //
 // Handlers are registered before [App.Start]. A registration error (after Start:
 // [ErrRegistrationClosed]; a type registered twice, as a command and a query, an empty type
-// name, an interface type parameter, a nil handler, a [RequireCaller] without a function) is returned, and also kept: Start returns
-// every one of them, joined, and does not start.
+// name, an interface type parameter, a nil handler, a [RequireCaller] without a function, a
+// command with [Shared]) is returned, and also kept: Start returns every one of them, joined,
+// and does not start.
 // See https://snodra.damoreira.com/library-authors/protocol/ (Handling a request).
 func HandleCommand[C Message, R any](app *App, h func(context.Context, C) (R, error), opts ...HandlerOption) error {
 	return register(app, kindCommand, h, opts)
@@ -83,6 +94,9 @@ func register[M Message, R any](app *App, kind handlerKind, h func(context.Conte
 	}
 	if err == nil && cfg.err != nil {
 		err = fmt.Errorf("%w (%s)", cfg.err, name)
+	}
+	if err == nil && cfg.shared && kind != kindQuery {
+		err = fmt.Errorf("snodra: commands are never shared: Shared applies to a query (%s)", name)
 	}
 	return app.addHandler(&handler{kind: kind, name: name, invoke: invokerOf(h), cfg: cfg}, err)
 }
@@ -177,15 +191,18 @@ func (a *App) registrationError() error {
 // freezeTypes lists the registered types for the Register, sorted. Called by Start with a.mu
 // held; the handlers do not change afterwards.
 func (a *App) freezeTypes() {
-	a.commandTypes, a.queryTypes = nil, nil
+	a.commandTypes, a.queryTypes, a.sharedQueryTypes = nil, nil, nil
 	for name, h := range a.handlers {
-		switch h.kind {
-		case kindCommand:
+		switch {
+		case h.kind == kindCommand:
 			a.commandTypes = append(a.commandTypes, name)
-		case kindQuery:
+		case h.cfg.shared:
+			a.sharedQueryTypes = append(a.sharedQueryTypes, name)
+		default:
 			a.queryTypes = append(a.queryTypes, name)
 		}
 	}
 	slices.Sort(a.commandTypes)
 	slices.Sort(a.queryTypes)
+	slices.Sort(a.sharedQueryTypes)
 }

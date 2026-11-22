@@ -1,6 +1,7 @@
 package snodramessaging
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"maps"
@@ -12,16 +13,20 @@ import (
 )
 
 // dispatch serves a request the hub forwarded on the stream ref, also before its RegisterAck.
-// Called from the stream's read loop: the request counts against the stream's permits at once,
-// then runs on its own goroutine, which writes exactly one Reply to ref (dropped if that stream
-// is gone) and gives the permit back to ref's hub.
+// Called from the stream's read loop: the request counts against the stream's permits at once
+// and is recorded as running (so a hub Cancel that follows it finds it), then runs on its own
+// goroutine, which writes exactly one Reply to ref (dropped if that stream is gone; none at all
+// once the hub cancelled the request) and gives the permit back to ref's hub.
 // See https://snodra.damoreira.com/library-authors/protocol/ (Handling a request).
 func (a *App) dispatch(req *hubpb.Request, ref *streamRef, permits *streamPermits) {
 	permits.arrived()
 	a.inflight.add()
+	run := a.running.add(a.handlerCtx, req.GetId())
 	go func() {
 		defer a.inflight.done()
-		if reply := a.answer(req); reply != nil {
+		reply := a.answer(run, req)
+		a.running.remove(req.GetId(), run)
+		if reply != nil && !run.isCancelled() {
 			msg := &hubpb.ClientMessage{Message: &hubpb.ClientMessage_Reply{Reply: reply}}
 			if err := ref.send(msg); err != nil {
 				a.log.Debug("reply dropped: its hub stream is gone", "request", req.GetId(), "type", req.GetType())
@@ -31,10 +36,89 @@ func (a *App) dispatch(req *hubpb.Request, ref *streamRef, permits *streamPermit
 	}()
 }
 
-// answer is the Reply to req; nil when the app was stopped hard before its handler could run.
-// In order: the caller (a token that fails is UNAUTHENTICATED, whatever the handler), the kind,
-// the handler, its guards, a handler slot, then the decode and the handler.
-func (a *App) answer(req *hubpb.Request) *hubpb.Reply {
+// cancelRequest is the hub's Cancel{id, reason} for a request this instance serves (a
+// scatter-gather target, say): the handler's context is cancelled and nothing is sent for the
+// request, whatever the handler returns; its permit goes back once the handler returned (at
+// once for a handler that watches its context, or one still waiting for a handler slot). A
+// Cancel for an id that is not running (it already ended) is ignored.
+// See https://snodra.damoreira.com/library-authors/protocol/ (Cancel).
+func (a *App) cancelRequest(id, reason string) {
+	if run := a.running.take(id); run != nil {
+		a.log.Debug("request cancelled by the hub", "request", id, "reason", reason)
+		run.cancelRun()
+		return
+	}
+	a.log.Debug("cancel for an unknown request ignored", "request", id, "reason", reason)
+}
+
+// runningRequest is a forwarded request being served: its handler's context and whether the
+// hub cancelled it.
+type runningRequest struct {
+	ctx       context.Context
+	cancel    context.CancelFunc
+	cancelled chan struct{} // closed by the hub's Cancel
+	once      sync.Once
+}
+
+// cancelRun marks the request cancelled, then ends its context.
+func (r *runningRequest) cancelRun() {
+	r.once.Do(func() { close(r.cancelled) })
+	r.cancel()
+}
+
+func (r *runningRequest) isCancelled() bool {
+	select {
+	case <-r.cancelled:
+		return true
+	default:
+		return false
+	}
+}
+
+// runningRequests are the forwarded requests being served, by id, over every hub stream.
+type runningRequests struct {
+	mu   sync.Mutex
+	byID map[string]*runningRequest
+}
+
+func newRunningRequests() *runningRequests {
+	return &runningRequests{byID: map[string]*runningRequest{}}
+}
+
+// add records request id as running, its context derived from base.
+func (rs *runningRequests) add(base context.Context, id string) *runningRequest {
+	ctx, cancel := context.WithCancel(base)
+	r := &runningRequest{ctx: ctx, cancel: cancel, cancelled: make(chan struct{})}
+	rs.mu.Lock()
+	rs.byID[id] = r
+	rs.mu.Unlock()
+	return r
+}
+
+// remove forgets r (only if id still names it) and releases its context.
+func (rs *runningRequests) remove(id string, r *runningRequest) {
+	rs.mu.Lock()
+	if rs.byID[id] == r {
+		delete(rs.byID, id)
+	}
+	rs.mu.Unlock()
+	r.cancel()
+}
+
+// take removes and returns the running request id; nil when none.
+func (rs *runningRequests) take(id string) *runningRequest {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	r := rs.byID[id]
+	delete(rs.byID, id)
+	return r
+}
+
+// answer is the Reply to req, run as run (its handler's context); nil when the app was stopped
+// hard, or the hub cancelled the request, before its handler could run. In order: the caller (a
+// token that fails is UNAUTHENTICATED, whatever the handler), the kind, the handler, its guards,
+// a handler slot, then the decode and the handler.
+func (a *App) answer(run *runningRequest, req *hubpb.Request) *hubpb.Reply {
 	id := req.GetId()
 	fail := func(code hubpb.ErrorCode, msg string) *hubpb.Reply {
 		return &hubpb.Reply{RequestId: id, Result: &hubpb.Reply_Error{Error: &hubpb.Error{
@@ -43,7 +127,7 @@ func (a *App) answer(req *hubpb.Request) *hubpb.Reply {
 	}
 	// TODO(spec-gap): SG-18 (every forwarded token is checked, also for a handler without a guard).
 	authorization := req.GetHeaders()[authorizationHeader]
-	caller, err := a.identity.resolve(a.handlerCtx, authorization)
+	caller, err := a.identity.resolve(run.ctx, authorization)
 	if err != nil {
 		a.log.Debug("request refused: its caller's token", "request", id, "type", req.GetType(), "reason", err.Error())
 		return fail(hubpb.ErrorCode_UNAUTHENTICATED, err.Error())
@@ -70,6 +154,8 @@ func (a *App) answer(req *hubpb.Request) *hubpb.Reply {
 		defer func() { <-a.slots }()
 	case <-a.killed:
 		return nil
+	case <-run.cancelled: // by the hub: nothing is answered
+		return nil
 	}
 	scope := &handling{
 		info: MessageInfo{
@@ -89,7 +175,7 @@ func (a *App) answer(req *hubpb.Request) *hubpb.Reply {
 	if tp := req.GetHeaders()[traceparentHeader]; traceparent.Valid(tp) {
 		scope.traceparent = tp
 	}
-	payload, werr := a.run(h, req, scope)
+	payload, werr := a.run(run.ctx, h, req, scope)
 	if werr != nil {
 		return &hubpb.Reply{RequestId: id, Result: &hubpb.Reply_Error{Error: werr}}
 	}
@@ -99,7 +185,7 @@ func (a *App) answer(req *hubpb.Request) *hubpb.Reply {
 // run runs h on req under recover: the answer's payload, or the error to answer. A panic, of
 // the handler or of its error, is HANDLER_ERROR "handler panicked", the reference library's
 // text: the panic value and the stack go to the log only.
-func (a *App) run(h *handler, req *hubpb.Request, scope *handling) (payload []byte, werr *hubpb.Error) {
+func (a *App) run(ctx context.Context, h *handler, req *hubpb.Request, scope *handling) (payload []byte, werr *hubpb.Error) {
 	defer func() {
 		if r := recover(); r != nil {
 			a.log.Error("handler panicked", "request", req.GetId(), "type", req.GetType(),
@@ -107,7 +193,7 @@ func (a *App) run(h *handler, req *hubpb.Request, scope *handling) (payload []by
 			payload, werr = nil, errorToWire(req.GetId(), errors.New("handler panicked"))
 		}
 	}()
-	payload, err := h.invoke(withHandling(a.handlerCtx, scope), a.cfg.codec, req.GetPayload())
+	payload, err := h.invoke(withHandling(ctx, scope), a.cfg.codec, req.GetPayload())
 	if err == nil {
 		return payload, nil
 	}

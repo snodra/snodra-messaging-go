@@ -108,8 +108,9 @@ func retryBudget(ack *hubpb.RegisterAck, typ string, chosen time.Duration) time.
 
 // retrying runs attempt under policy: once with chosen when the policy makes one attempt, else
 // within the call's budget, each attempt given what is left of it (at least 1 ms).
-func retrying(ctx context.Context, kind hubpb.RequestKind, policy RetryPolicy, budget time.Duration,
-	chosen time.Duration, attempt func(timeout time.Duration) ([]byte, error)) ([]byte, error) {
+func retrying[T any](ctx context.Context, kind hubpb.RequestKind, policy RetryPolicy, budget time.Duration,
+	chosen time.Duration, attempt func(timeout time.Duration) (T, error)) (T, error) {
+	var zero T
 	if policy.MaxAttempts <= 1 {
 		return attempt(chosen)
 	}
@@ -118,24 +119,24 @@ func retrying(ctx context.Context, kind hubpb.RequestKind, policy RetryPolicy, b
 	minLeft := max(policy.InitialBackoff, retryMinRemaining)
 	remaining := budget
 	for n := 1; ; n++ {
-		payload, err := attempt(max(remaining, minTimeout))
+		v, err := attempt(max(remaining, minTimeout))
 		if err == nil {
-			return payload, nil
+			return v, nil
 		}
 		if n >= policy.MaxAttempts || !retryable(kind, err) {
-			return nil, err
+			return zero, err
 		}
 		wait := policy.wait(n)
 		left := budget - time.Since(start) - wait
 		if left < minLeft {
-			return nil, err
+			return zero, err
 		}
 		timer := time.NewTimer(wait)
 		select {
 		case <-timer.C:
 		case <-ctx.Done():
 			timer.Stop()
-			return nil, fmt.Errorf("%w (waiting to retry after: %w)", ctx.Err(), err)
+			return zero, fmt.Errorf("%w (waiting to retry after: %w)", ctx.Err(), err)
 		}
 		remaining = left
 	}

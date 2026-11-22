@@ -510,9 +510,15 @@ func (c *hubConn) serve(sr *streamRun) (reached bool, err error) {
 				if e, ok := k.Reply.GetResult().(*hubpb.Reply_Error); ok {
 					a = answer{failure: e.Error}
 				}
-				c.app.calls.deliver(k.Reply.GetRequestId(), a)
+				c.app.calls.reply(k.Reply.GetRequestId(), a)
 			case *hubpb.ServerMessage_Error:
 				c.app.calls.deliver(k.Error.GetRequestId(), answer{failure: k.Error})
+			case *hubpb.ServerMessage_Part:
+				c.app.calls.part(k.Part)
+			case *hubpb.ServerMessage_End:
+				c.app.calls.end(k.End)
+			case *hubpb.ServerMessage_Cancel:
+				c.app.cancelRequest(k.Cancel.GetRequestId(), k.Cancel.GetReason())
 			}
 		case err := <-ended:
 			if errors.Is(err, io.EOF) {

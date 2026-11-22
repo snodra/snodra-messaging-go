@@ -41,13 +41,14 @@ type App struct {
 	cancelHandlers context.CancelFunc
 	slots          chan struct{} // MaxConcurrent handlers at once
 	inflight       *inflight     // requests being served
-	// handlers by type, written before Start only; commandTypes and queryTypes are their
-	// names, sorted, fixed by Start.
-	handlers                 map[string]*handler
-	commandTypes, queryTypes []string
-	calls                    *pendingCalls // the sent requests awaiting their answer
-	identity                 *identityResolver
-	tokens                   *tokenProvider // the access tokens towards the hubs; nil without JWT
+	// handlers by type, written before Start only; commandTypes, queryTypes and
+	// sharedQueryTypes are their names, sorted, fixed by Start.
+	handlers                                   map[string]*handler
+	commandTypes, queryTypes, sharedQueryTypes []string
+	calls                                      *pendingCalls    // the sent requests awaiting their answer
+	running                                    *runningRequests // the forwarded requests being served, for the hub's Cancel
+	identity                                   *identityResolver
+	tokens                                     *tokenProvider // the access tokens towards the hubs; nil without JWT
 
 	drainMu    sync.Mutex
 	drainUntil time.Time // when the shutdown's handler drain ends; zero before it
@@ -115,6 +116,7 @@ func New(opts ...Option) (*App, error) {
 		inflight:       newInflight(),
 		handlers:       map[string]*handler{},
 		calls:          newPendingCalls(),
+		running:        newRunningRequests(),
 		identity:       newIdentityResolver(cfg, log),
 		tokens:         tokens,
 	}, nil
@@ -340,14 +342,15 @@ func (a *App) connLive() { a.readyOnce.Do(func() { close(a.ready) }) }
 // registerMsg is the Register every stream opens with, identical for every hub.
 func (a *App) registerMsg() *hubpb.Register {
 	return &hubpb.Register{
-		ServiceName:    a.cfg.service,
-		InstanceId:     a.cfg.instance,
-		CommandTypes:   slices.Clone(a.commandTypes),
-		QueryTypes:     slices.Clone(a.queryTypes),
-		InitialPermits: uint32(a.cfg.maxConcurrent),
-		LoadFactor:     a.cfg.loadFactor,
-		Tags:           maps.Clone(a.cfg.tags),
-		ClientVersion:  clientVersion(),
+		ServiceName:      a.cfg.service,
+		InstanceId:       a.cfg.instance,
+		CommandTypes:     slices.Clone(a.commandTypes),
+		QueryTypes:       slices.Clone(a.queryTypes),
+		SharedQueryTypes: slices.Clone(a.sharedQueryTypes),
+		InitialPermits:   uint32(a.cfg.maxConcurrent),
+		LoadFactor:       a.cfg.loadFactor,
+		Tags:             maps.Clone(a.cfg.tags),
+		ClientVersion:    clientVersion(),
 	}
 }
 

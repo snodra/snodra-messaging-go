@@ -383,3 +383,64 @@ func TestAHandlerInFlightAtTheHalfCloseIsAnsweredFirst(t *testing.T) {
 	is(t, nextReply(t, s).GetRequestId(), "r-1") // answered on the stream, not dropped
 	s.HalfClosed(t, time.Second)                 // then half-closed
 }
+
+func TestACancelledTargetSendsNothing(t *testing.T) {
+	hub := fakehub.Start(t)
+	started := make(chan struct{}, 1)
+	stopped := make(chan error, 1)
+	_, s := serving(t, hub, func(app *App) {
+		is(t, HandleQuery(app, func(ctx context.Context, _ GetStock) (Stock, error) {
+			started <- struct{}{}
+			select {
+			case <-time.After(2 * time.Second):
+				return Stock{Count: 1}, nil
+			case <-ctx.Done():
+				stopped <- ctx.Err()
+				return Stock{}, ctx.Err()
+			}
+		}), nil)
+	}, MaxConcurrent(1))
+	s.Send(t, fakehub.Forward(&hubpb.Request{Id: "g#1", Kind: hubpb.RequestKind_QUERY, Type: "orders.GetStock", Payload: []byte(`{}`)}))
+	receive(t, started)
+	s.Send(t, fakehub.Cancel("g#1", "max results"))
+	is(t, receive(t, stopped), context.Canceled)  // the handler's ctx is done
+	is(t, s.RecvPermits(t).GetCount(), uint32(1)) // the permit goes back
+	s.Nothing(t, 2500*time.Millisecond, "reply")
+	s.Send(t, command("r-2", "orders.Missing", `{}`)) // the stream is alive: a later request is answered
+	is(t, nextReply(t, s).GetRequestId(), "r-2")
+}
+
+func TestACancelBeforeTheHandlerStartsSendsNothing(t *testing.T) {
+	hub := fakehub.Start(t)
+	started := make(chan string, 2)
+	release := make(chan struct{})
+	_, s := serving(t, hub, func(app *App) {
+		is(t, HandleQuery(app, func(ctx context.Context, q GetStock) (Stock, error) {
+			started <- q.SKU
+			<-release
+			return Stock{}, nil
+		}), nil)
+	}, MaxConcurrent(1))
+	s.Send(t, fakehub.Forward(&hubpb.Request{Id: "g#0", Kind: hubpb.RequestKind_QUERY, Type: "orders.GetStock", Payload: []byte(`{"sku":"a"}`)}))
+	is(t, receive(t, started), "a")
+	// g#1 waits for the one handler slot; its Cancel ends the wait.
+	s.Send(t, fakehub.Forward(&hubpb.Request{Id: "g#1", Kind: hubpb.RequestKind_QUERY, Type: "orders.GetStock", Payload: []byte(`{"sku":"b"}`)}))
+	s.Send(t, fakehub.Cancel("g#1", "deadline"))
+	is(t, s.RecvPermits(t).GetCount(), uint32(1)) // g#1's permit, back without running it
+	close(release)
+	is(t, nextReply(t, s).GetRequestId(), "g#0")
+	s.Nothing(t, 300*ms, "reply")
+	select {
+	case sku := <-started:
+		t.Fatalf("the cancelled request %q ran", sku)
+	default:
+	}
+}
+
+func TestACancelForAnUnknownIDIsIgnored(t *testing.T) {
+	hub := fakehub.Start(t)
+	_, s := serving(t, hub, func(app *App) { is(t, HandleCommand(app, place), nil) })
+	s.Send(t, fakehub.Cancel("gone#3", "deadline"))
+	s.Send(t, command("r-1", "orders.PlaceOrder", `{"orderId":"o-1"}`))
+	is(t, string(nextReply(t, s).GetPayload()), `{"orderId":"o-1","total":42}`)
+}

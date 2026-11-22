@@ -21,9 +21,10 @@ type sendConfig struct {
 	hasPriority bool
 	retry       *RetryPolicy
 	headers     map[string]string // the caller's own, by Header
+	maxResults  uint32
 }
 
-// A SendOption configures one [Send] or [Query].
+// A SendOption configures one [Send], [Query] or [Gather].
 type SendOption func(*sendConfig)
 
 // RoutingKey sends the request with key (Request.routing_key): commands of one type with the
@@ -50,6 +51,11 @@ func Retry(p RetryPolicy) SendOption { return func(c *sendConfig) { c.retry = &p
 
 // NoRetry sends this call once, whatever [DefaultRetry] says.
 func NoRetry() SendOption { return Retry(noRetry) }
+
+// MaxResults ends a [Gather] after n successful parts (Request.max_results): the hub sends the
+// end then and cancels the targets still working. 0, the default, waits for every target.
+// [Send] and [Query] ignore it.
+func MaxResults(n uint32) SendOption { return func(c *sendConfig) { c.maxResults = n } }
 
 // Send sends the command cmd through a hub to the instance that handles its type and returns the
 // handler's answer decoded as R ([Empty] for a command without a result).
@@ -86,12 +92,63 @@ func Query[R any](ctx context.Context, app *App, q Message, opts ...SendOption) 
 // request is a call: its settings, the attempts under the retry policy, the answer decoded.
 func request[R any](ctx context.Context, app *App, kind hubpb.RequestKind, m Message, opts []SendOption) (R, error) {
 	var zero R
+	out, err := prepare(ctx, app, kind, hubpb.RequestMode_UNARY, m, opts)
+	if err != nil {
+		return zero, err
+	}
+	answer, err := retrying(ctx, kind, out.policy, out.budget, out.chosen, func(timeout time.Duration) ([]byte, error) {
+		ans, err := app.attempt(ctx, out.tmpl, timeout)
+		if err != nil {
+			return nil, err
+		}
+		return answered(out.typ, ans)
+	})
+	if err != nil {
+		return zero, err
+	}
+	r, err := decodeAnswer[R](app.cfg.codec, answer)
+	if err != nil {
+		return zero, fmt.Errorf("snodra: cannot decode the answer of %s: %w", out.typ, err)
+	}
+	return r, nil
+}
+
+// decodeAnswer decodes an answer's payload as R: an empty payload reads as {}, and [Empty] is
+// not decoded at all.
+func decodeAnswer[R any](codec PayloadCodec, payload []byte) (R, error) {
+	var r R
+	if _, ok := any(r).(Empty); ok {
+		return r, nil
+	}
+	if len(payload) == 0 {
+		payload = []byte("{}")
+	}
+	if err := codec.Unmarshal(payload, &r); err != nil {
+		var zero R
+		return zero, err
+	}
+	return r, nil
+}
+
+// outgoing is a call ready to be sent: the request every attempt copies (with its own id and
+// timeout) and what the attempts share.
+type outgoing struct {
+	typ    string
+	tmpl   *hubpb.Request
+	policy RetryPolicy
+	chosen time.Duration // the caller's timeout; 0: none
+	budget time.Duration // the time all attempts share, when the policy retries
+}
+
+// prepare checks a call of m in mode with opts and builds what its attempts send. Nothing is
+// sent when it fails.
+func prepare(ctx context.Context, app *App, kind hubpb.RequestKind, mode hubpb.RequestMode, m Message, opts []SendOption) (*outgoing, error) {
 	if app == nil {
-		return zero, errors.New("snodra: send on a nil App")
+		return nil, errors.New("snodra: send on a nil App")
 	}
 	typ, err := messageName(m)
 	if err != nil {
-		return zero, err
+		return nil, err
 	}
 	var cfg sendConfig
 	for _, o := range opts {
@@ -100,10 +157,10 @@ func request[R any](ctx context.Context, app *App, kind hubpb.RequestKind, m Mes
 		}
 	}
 	if err := checkHeaders(cfg.headers, typ); err != nil {
-		return zero, err
+		return nil, err
 	}
 	if cfg.timeout < 0 {
-		return zero, fmt.Errorf("snodra: the Timeout of %s must not be negative, got %v", typ, cfg.timeout)
+		return nil, fmt.Errorf("snodra: the Timeout of %s must not be negative, got %v", typ, cfg.timeout)
 	}
 	policy := noRetry
 	switch {
@@ -113,14 +170,14 @@ func request[R any](ctx context.Context, app *App, kind hubpb.RequestKind, m Mes
 		policy = *app.cfg.retry
 	}
 	if err := policy.validate(); err != nil {
-		return zero, fmt.Errorf("%w (sending %s)", err, typ)
+		return nil, fmt.Errorf("%w (sending %s)", err, typ)
 	}
 	payload, err := app.cfg.codec.Marshal(m)
 	if err != nil {
-		return zero, fmt.Errorf("snodra: cannot encode %s: %w", typ, err)
+		return nil, fmt.Errorf("snodra: cannot encode %s: %w", typ, err)
 	}
 	if err := ctx.Err(); err != nil {
-		return zero, fmt.Errorf("%w: %w", ErrNeverSent, err)
+		return nil, fmt.Errorf("%w: %w", ErrNeverSent, err)
 	}
 	chosen := cfg.timeout
 	if chosen == 0 {
@@ -129,7 +186,7 @@ func request[R any](ctx context.Context, app *App, kind hubpb.RequestKind, m Mes
 	if deadline, ok := ctx.Deadline(); ok {
 		left := time.Until(deadline)
 		if left <= 0 {
-			return zero, fmt.Errorf("%w: %w", ErrNeverSent, context.DeadlineExceeded)
+			return nil, fmt.Errorf("%w: %w", ErrNeverSent, context.DeadlineExceeded)
 		}
 		if chosen == 0 || left < chosen {
 			chosen = left
@@ -145,30 +202,20 @@ func request[R any](ctx context.Context, app *App, kind hubpb.RequestKind, m Mes
 		RoutingKey: cfg.routingKey,
 		Payload:    payload,
 		Priority:   priority,
-		Mode:       hubpb.RequestMode_UNARY,
+		Mode:       mode,
 		Headers:    outgoingHeaders(ctx, cfg.headers, app.cfg.forwardJWT),
 	}
-	var budget time.Duration
+	if mode == hubpb.RequestMode_SCATTER_GATHER {
+		// Every target is asked: a gather goes to a hub unkeyed and carries no routing key, as in
+		// the reference library.
+		tmpl.RoutingKey = ""
+		tmpl.MaxResults = cfg.maxResults
+	}
+	out := &outgoing{typ: typ, tmpl: tmpl, policy: policy, chosen: chosen}
 	if policy.MaxAttempts > 1 {
-		budget = retryBudget(app.ackFor(cfg.routingKey), typ, chosen)
+		out.budget = retryBudget(app.ackFor(tmpl.GetRoutingKey()), typ, chosen)
 	}
-	answer, err := retrying(ctx, kind, policy, budget, chosen, func(timeout time.Duration) ([]byte, error) {
-		return app.attempt(ctx, tmpl, timeout)
-	})
-	if err != nil {
-		return zero, err
-	}
-	if _, ok := any(zero).(Empty); ok {
-		return zero, nil
-	}
-	if len(answer) == 0 {
-		answer = []byte("{}")
-	}
-	var r R
-	if err := app.cfg.codec.Unmarshal(answer, &r); err != nil {
-		return zero, fmt.Errorf("snodra: cannot decode the answer of %s: %w", typ, err)
-	}
-	return r, nil
+	return out, nil
 }
 
 // messageName is m's wire name, or why m cannot be sent.
@@ -210,16 +257,24 @@ func requestTiming(ack *hubpb.RegisterAck, typ string, chosen time.Duration) (ti
 	return timeoutMS, bound + guardMargin
 }
 
-// answer is what came for a request: a payload, or the hub's or the handler's error.
+// answer is what came for a request: a payload, or the hub's or the handler's error; for a
+// scatter-gather, its parts in arrival order and its end.
 type answer struct {
 	payload []byte
 	failure *hubpb.Error
+	parts   []*hubpb.ReplyPart
+	end     *hubpb.ReplyEnd
 }
 
 // call is one attempt in flight: one Request with its own id.
 type call struct {
 	id     string
 	answer chan answer // buffered: the one answer
+	// gather is a scatter-gather: answered by parts and an end, never by a Reply.
+	gather bool
+	// parts collects a gather's parts until its end (under pendingCalls.mu); the local guard
+	// bounds how long.
+	parts []*hubpb.ReplyPart
 	// written is set (under the stream's mu) when the stream's writer took the request.
 	written bool
 	// on is the stream the request was written to; nil until it was.
@@ -272,26 +327,67 @@ func (p *pendingCalls) deliver(id string, a answer) bool {
 	return true
 }
 
+// reply hands a Reply's a to the unary call with id; a gather is never answered by a Reply,
+// so one for it is ignored.
+func (p *pendingCalls) reply(id string, a answer) {
+	p.mu.Lock()
+	c := p.byID[id]
+	if c == nil || c.gather {
+		p.mu.Unlock()
+		return
+	}
+	delete(p.byID, id)
+	p.mu.Unlock()
+	c.answer <- a
+}
+
+// part adds a ReplyPart to the gather it belongs to; ignored for an unknown or unary request.
+func (p *pendingCalls) part(rp *hubpb.ReplyPart) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if c := p.byID[rp.GetRequestId()]; c != nil && c.gather {
+		c.parts = append(c.parts, rp)
+	}
+}
+
+// end completes the gather a ReplyEnd belongs to with the parts it collected; ignored for an
+// unknown or unary request.
+func (p *pendingCalls) end(e *hubpb.ReplyEnd) {
+	p.mu.Lock()
+	c := p.byID[e.GetRequestId()]
+	if c == nil || !c.gather {
+		p.mu.Unlock()
+		return
+	}
+	delete(p.byID, e.GetRequestId())
+	parts := c.parts
+	c.parts = nil
+	p.mu.Unlock()
+	c.answer <- answer{parts: parts, end: e}
+}
+
 // attempt sends tmpl once, with a fresh id and timeout chosen, to an acknowledged hub and waits
-// for its answer, the local guard, the end of its stream or the end of ctx.
-func (a *App) attempt(ctx context.Context, tmpl *hubpb.Request, chosen time.Duration) ([]byte, error) {
+// for its answer (a gather's: its parts and end), the local guard, the end of its stream or the
+// end of ctx. The answer may carry the hub's or the handler's error; the error is the attempt's
+// own failure.
+func (a *App) attempt(ctx context.Context, tmpl *hubpb.Request, chosen time.Duration) (answer, error) {
 	typ := tmpl.GetType()
 	a.mu.Lock()
 	p := a.pool
 	a.mu.Unlock()
 	if p == nil {
-		return nil, fmt.Errorf("%w: the app is not started (sending %s)", ErrNeverSent, typ)
+		return answer{}, fmt.Errorf("%w: the app is not started (sending %s)", ErrNeverSent, typ)
 	}
 	conn, err := p.pick(tmpl.GetRoutingKey())
 	if err != nil {
-		return nil, fmt.Errorf("%w (sending %s)", err, typ)
+		return answer{}, fmt.Errorf("%w (sending %s)", err, typ)
 	}
 	ref, ack := conn.live()
 	if ref == nil {
-		return nil, fmt.Errorf("%w: the hub %s has no acknowledged stream (sending %s)", ErrNeverSent, conn.address, typ)
+		return answer{}, fmt.Errorf("%w: the hub %s has no acknowledged stream (sending %s)", ErrNeverSent, conn.address, typ)
 	}
 	timeoutMS, guard := requestTiming(ack, typ, chosen)
-	c := &call{id: uuid.New(), answer: make(chan answer, 1)}
+	c := &call{id: uuid.New(), answer: make(chan answer, 1), gather: tmpl.GetMode() == hubpb.RequestMode_SCATTER_GATHER}
 	req := &hubpb.Request{
 		Id:         c.id,
 		Kind:       tmpl.GetKind(),
@@ -302,39 +398,40 @@ func (a *App) attempt(ctx context.Context, tmpl *hubpb.Request, chosen time.Dura
 		TimeoutMs:  timeoutMS,
 		Priority:   tmpl.GetPriority(),
 		Mode:       tmpl.GetMode(),
+		MaxResults: tmpl.GetMaxResults(),
 	}
 	a.calls.add(c)
 	defer a.calls.remove(c.id)
 	if err := ref.sendRequest(ctx, &hubpb.ClientMessage{Message: &hubpb.ClientMessage_Request{Request: req}}, c); err != nil {
 		if cerr := ctx.Err(); cerr != nil {
-			return nil, fmt.Errorf("%w: %w", ErrNeverSent, cerr)
+			return answer{}, fmt.Errorf("%w: %w", ErrNeverSent, cerr)
 		}
-		return nil, fmt.Errorf("%w: the hub stream closed before %s was written", ErrNeverSent, typ)
+		return answer{}, fmt.Errorf("%w: the hub stream closed before %s was written", ErrNeverSent, typ)
 	}
 	timer := time.NewTimer(guard)
 	defer timer.Stop()
 	select {
 	case ans := <-c.answer:
-		return answered(typ, ans)
+		return ans, nil
 	case <-ref.gone:
 		select {
 		case ans := <-c.answer: // answered just before the stream ended
-			return answered(typ, ans)
+			return ans, nil
 		default:
 		}
 		if ref.withdraw(c) {
-			return nil, fmt.Errorf("%w: the hub stream closed before %s was written", ErrNeverSent, typ)
+			return answer{}, fmt.Errorf("%w: the hub stream closed before %s was written", ErrNeverSent, typ)
 		}
-		return nil, fmt.Errorf("%w: the hub stream closed before the reply to %s", ErrOutcomeUnknown, typ)
+		return answer{}, fmt.Errorf("%w: the hub stream closed before the reply to %s", ErrOutcomeUnknown, typ)
 	case <-timer.C:
 		// The hub answers TIMEOUT itself; the guard covers a hub that never answers.
 		ref.withdraw(c)
-		return nil, &Error{Code: CodeTimeout, Message: timeoutText(typ)}
+		return answer{}, &Error{Code: CodeTimeout, Message: timeoutText(typ)}
 	case <-ctx.Done():
 		if ref.withdraw(c) {
-			return nil, fmt.Errorf("%w: %w", ErrNeverSent, ctx.Err())
+			return answer{}, fmt.Errorf("%w: %w", ErrNeverSent, ctx.Err())
 		}
-		return nil, fmt.Errorf("%w: %w", ErrOutcomeUnknown, ctx.Err())
+		return answer{}, fmt.Errorf("%w: %w", ErrOutcomeUnknown, ctx.Err())
 	}
 }
 
