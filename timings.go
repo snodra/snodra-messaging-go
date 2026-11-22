@@ -24,7 +24,13 @@ type timings struct {
 	subscriptionEnd time.Duration
 	// closeWait bounds the wait for the hub to finish its side after the half-close.
 	closeWait time.Duration
+	// permitFlushAfter is how long a batch of permit grants waits after its first one.
+	permitFlushAfter time.Duration
 }
+
+// permitBatch pending permit grants are written at once; it also caps the low-water mark
+// min(permitBatch, initial_permits/2) at or below which a grant goes back at once.
+const permitBatch uint32 = 16
 
 // defaultTimings are the shipped values.
 func defaultTimings() timings {
@@ -40,6 +46,7 @@ func defaultTimings() timings {
 		handlerDrain:       10 * time.Second,
 		subscriptionEnd:    2 * time.Second,
 		closeWait:          2 * time.Second,
+		permitFlushAfter:   50 * time.Millisecond,
 	}
 }
 

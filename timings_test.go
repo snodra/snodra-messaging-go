@@ -15,4 +15,6 @@ func TestDefaultTimings(t *testing.T) {
 	is(t, d.handlerDrain, 10*s)
 	is(t, d.subscriptionEnd, 2*s)
 	is(t, d.closeWait, 2*s)
+	is(t, d.permitFlushAfter, 50*ms)
+	is(t, permitBatch, uint32(16))
 }

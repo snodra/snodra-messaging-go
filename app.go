@@ -36,12 +36,23 @@ type App struct {
 	killed    chan struct{} // closed to stop every connection at once
 	killOnce  sync.Once
 
+	// handlerCtx is the base context of every handler; cancelled at the hard stop.
+	handlerCtx     context.Context
+	cancelHandlers context.CancelFunc
+	slots          chan struct{} // MaxConcurrent handlers at once
+	inflight       *inflight     // requests being served
+	// handlers by type, written before Start only; commandTypes and queryTypes are their
+	// names, sorted, fixed by Start.
+	handlers                 map[string]*handler
+	commandTypes, queryTypes []string
+
 	mu        sync.Mutex
 	started   bool
 	stopping  bool
 	stopErr   error // the first Shutdown's result, returned by every later one
 	pool      *pool
 	rejection *Rejection
+	regErrs   []error // every registration error, returned by Start
 }
 
 // Rejection is a hub's refusal of the instance's Register: the hub closed the stream with
@@ -75,19 +86,26 @@ func New(opts ...Option) (*App, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
+	hctx, cancel := context.WithCancel(context.Background())
 	return &App{
-		cfg:     cfg,
-		log:     cfg.logger.With("service", cfg.service, "instance", cfg.instance),
-		ready:   make(chan struct{}),
-		stopped: make(chan struct{}),
-		closed:  make(chan struct{}),
-		killed:  make(chan struct{}),
+		cfg:            cfg,
+		log:            cfg.logger.With("service", cfg.service, "instance", cfg.instance),
+		ready:          make(chan struct{}),
+		stopped:        make(chan struct{}),
+		closed:         make(chan struct{}),
+		killed:         make(chan struct{}),
+		handlerCtx:     hctx,
+		cancelHandlers: cancel,
+		slots:          make(chan struct{}, cfg.maxConcurrent),
+		inflight:       newInflight(),
+		handlers:       map[string]*handler{},
 	}, nil
 }
 
 // Start opens a connection to every hub and returns at once; each connection registers and
 // reconnects on its own until [App.Shutdown]. Handlers can no longer be registered after it.
-// [App.Ready] waits for the first acknowledged hub.
+// [App.Ready] waits for the first acknowledged hub. When a registration failed, Start returns
+// every registration error, joined, and starts nothing.
 func (a *App) Start(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -100,6 +118,10 @@ func (a *App) Start(ctx context.Context) error {
 	case a.started:
 		return errAlreadyStarted
 	}
+	if err := a.registrationError(); err != nil {
+		return err
+	}
+	a.freezeTypes()
 	a.started = true
 	a.pool = newPool(a)
 	a.pool.start()
@@ -168,7 +190,7 @@ func (a *App) Shutdown(ctx context.Context) error {
 		return nil
 	}
 	err := a.leave(ctx, p)
-	a.killOnce.Do(func() { close(a.killed) })
+	a.kill()
 	// Every wait of a connection also watches killed, so they end at once; the grace only
 	// keeps a defect there from holding Shutdown past its deadline.
 	_ = waitAll(context.Background(), killGrace, p.dones())
@@ -176,6 +198,14 @@ func (a *App) Shutdown(ctx context.Context) error {
 	a.stopErr = err
 	a.mu.Unlock()
 	return err
+}
+
+// kill stops every connection and ends the handlers' context.
+func (a *App) kill() {
+	a.killOnce.Do(func() {
+		close(a.killed)
+		a.cancelHandlers()
+	})
 }
 
 // leave runs the shutdown's steps; the error is ctx's when it ended first.
@@ -187,8 +217,15 @@ func (a *App) leave(ctx context.Context, p *pool) error {
 	if err := waitAll(ctx, a.cfg.timings.deregisterWait, p.deregistered()); err != nil {
 		return err
 	}
-	// The handlers in flight are drained here, and the served subscriptions ended, once the
-	// app serves requests.
+	// The handlers in flight finish; their replies still go out. Requests the hubs forward
+	// meanwhile are served too.
+	if err := waitAll(ctx, a.cfg.timings.handlerDrain, []<-chan struct{}{a.inflight.drained()}); err != nil {
+		return err
+	}
+	if n := a.inflight.count(); n > 0 {
+		a.log.Warn("handlers still running after the drain; closing the hub streams anyway",
+			"handlers", n, "waited", a.cfg.timings.handlerDrain)
+	}
 	for _, c := range p.conns {
 		c.close()
 	}
@@ -268,6 +305,8 @@ func (a *App) registerMsg() *hubpb.Register {
 	return &hubpb.Register{
 		ServiceName:    a.cfg.service,
 		InstanceId:     a.cfg.instance,
+		CommandTypes:   slices.Clone(a.commandTypes),
+		QueryTypes:     slices.Clone(a.queryTypes),
 		InitialPermits: uint32(a.cfg.maxConcurrent),
 		LoadFactor:     a.cfg.loadFactor,
 		Tags:           maps.Clone(a.cfg.tags),

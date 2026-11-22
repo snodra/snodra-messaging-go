@@ -42,3 +42,24 @@ func TestCodeNamesAndErrorText(t *testing.T) {
 	is(t, CodeCancelled.String(), "CANCELLED")
 	is(t, (&Error{Code: CodeTimeout, Message: "slow"}).Error(), "TIMEOUT: slow")
 }
+
+func TestDetailsGoOnTheWireOnlyForHandlerError(t *testing.T) {
+	d := map[string]string{"field": "sku"}
+	is(t, string(errorToWire("r-1", WithDetails(errors.New("invalid"), d)).GetDetails()), `{"field":"sku"}`)
+	for _, err := range []error{
+		WithDetails(InvalidRequest("bad sku"), d),
+		WithDetails(PermissionDenied("orders-user required"), d),
+		InvalidRequest("bad sku"),
+	} {
+		w := errorToWire("r-1", err)
+		is(t, w.GetCode() != hubpb.ErrorCode_HANDLER_ERROR, true)
+		is(t, len(w.GetDetails()), 0)
+	}
+}
+
+func TestErrorToWireOfNilIsAHandlerError(t *testing.T) {
+	w := errorToWire("r-1", nil)
+	is(t, w.GetCode(), hubpb.ErrorCode_HANDLER_ERROR)
+	is(t, w.GetRequestId(), "r-1")
+	is(t, w.GetMessage() != "", true)
+}

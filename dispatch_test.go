@@ -1,0 +1,310 @@
+package snodramessaging
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"google.golang.org/grpc/codes"
+
+	"github.com/snodra/snodra-messaging-go/internal/fakehub"
+	"github.com/snodra/snodra-messaging-go/internal/hubpb"
+)
+
+// serving starts an app on hub with the handlers register adds and returns its first stream,
+// acknowledged.
+func serving(t *testing.T, hub *fakehub.Hub, register func(*App), opts ...Option) (*App, *fakehub.Stream) {
+	t.Helper()
+	app := newApp(t, append([]Option{Hubs(hub.Addr())}, opts...)...)
+	register(app)
+	if err := app.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	s := hub.Next(t)
+	s.RecvRegister(t)
+	s.Recv(t) // the heartbeat after the Register, before the ack (see fakehub.Stream.Ack)
+	s.Ack(t, fakehub.Ack("hub-1"))
+	is(t, app.Ready(ctxWithin(t, time.Second)), nil)
+	return app, s
+}
+
+// receive waits at most 5 s for a value on ch.
+func receive[T any](t *testing.T, ch <-chan T) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(5 * time.Second):
+		t.Fatal("the handler did not run within 5 s")
+		var zero T
+		return zero
+	}
+}
+
+// command is a forwarded command.
+func command(id, typ, payload string) *hubpb.ServerMessage {
+	return fakehub.Forward(&hubpb.Request{Id: id, Kind: hubpb.RequestKind_COMMAND, Type: typ, Payload: []byte(payload)})
+}
+
+// nextReply returns the next Reply on s, skipping Permits, Heartbeat and InstanceStatus frames;
+// it fails the test after 5 s.
+func nextReply(t *testing.T, s *fakehub.Stream) *hubpb.Reply {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if time.Now().After(deadline) {
+			t.Fatal("no Reply within 5 s")
+		}
+		m := s.Recv(t)
+		switch {
+		case m.GetReply() != nil:
+			return m.GetReply()
+		case m.GetPermits() != nil, m.GetHeartbeat() != nil, m.GetStatus() != nil:
+		default:
+			t.Fatalf("expected a Reply, got %v", m)
+		}
+	}
+}
+
+func TestAUnaryRequestIsAnswered(t *testing.T) {
+	hub := fakehub.Start(t)
+	seen := make(chan MessageInfo, 2)
+	_, s := serving(t, hub, func(app *App) {
+		is(t, HandleCommand(app, func(ctx context.Context, p PlaceOrder) (Receipt, error) {
+			info, ok := MessageFrom(ctx)
+			is(t, ok, true)
+			seen <- info
+			return Receipt{OrderID: p.OrderID, Total: 42}, nil
+		}), nil)
+	})
+	s.Send(t, fakehub.Forward(&hubpb.Request{Id: "r-1", Kind: hubpb.RequestKind_COMMAND, Type: "orders.PlaceOrder",
+		Payload: []byte(`{"orderId":"o-1"}`), Headers: map[string]string{"x-tenant": "t-1"}}))
+	r := s.RecvReply(t)
+	is(t, r.GetRequestId(), "r-1")
+	is(t, string(r.GetPayload()), `{"orderId":"o-1","total":42}`)
+	info := receive(t, seen)
+	is(t, info.ID, "r-1")
+	is(t, info.Type, "orders.PlaceOrder")
+	is(t, info.Headers["x-tenant"], "t-1")
+	is(t, info.CorrelationID, "r-1") // the request id stands in for a missing correlation id
+	s.Send(t, fakehub.Forward(&hubpb.Request{Id: "r-2", Kind: hubpb.RequestKind_COMMAND, Type: "orders.PlaceOrder",
+		Payload: []byte(`{}`), Headers: map[string]string{"correlationId": "c-1"}}))
+	is(t, nextReply(t, s).GetRequestId(), "r-2")
+	is(t, receive(t, seen).CorrelationID, "c-1")
+	_, ok := MessageFrom(context.Background())
+	is(t, ok, false)
+}
+
+func TestACommandWithoutResultAnswersAnEmptyObject(t *testing.T) {
+	hub := fakehub.Start(t)
+	_, s := serving(t, hub, func(app *App) {
+		is(t, HandleCommand(app, func(context.Context, PlaceOrder) (Empty, error) { return Empty{}, nil }), nil)
+	})
+	s.Send(t, command("r-1", "orders.PlaceOrder", `{}`))
+	is(t, string(s.RecvReply(t).GetPayload()), "{}")
+}
+
+func TestNilResultAnswersEmptyObject(t *testing.T) {
+	hub := fakehub.Start(t)
+	_, s := serving(t, hub, func(app *App) {
+		is(t, HandleQuery(app, func(context.Context, GetOrder) (*Receipt, error) { return nil, nil }), nil)
+	})
+	s.Send(t, fakehub.Forward(&hubpb.Request{Id: "r-1", Kind: hubpb.RequestKind_QUERY, Type: "orders.GetOrder", Payload: []byte(`{}`)}))
+	r := s.RecvReply(t)
+	is(t, r.GetError() == nil, true)
+	is(t, string(r.GetPayload()), "{}")
+}
+
+func TestPointerMessageTypes(t *testing.T) {
+	hub := fakehub.Start(t)
+	got := make(chan *CancelOrder, 1)
+	_, s := serving(t, hub, func(app *App) {
+		is(t, HandleCommand(app, func(_ context.Context, c *CancelOrder) (*Receipt, error) {
+			got <- c
+			return &Receipt{OrderID: c.ID}, nil
+		}), nil)
+	})
+	s.Send(t, command("r-1", "orders.CancelOrder", `{"id":"o-9"}`))
+	is(t, string(s.RecvReply(t).GetPayload()), `{"orderId":"o-9","total":0}`)
+	c := receive(t, got)
+	is(t, c != nil, true)
+	is(t, c.ID, "o-9")
+}
+
+func TestRequestsBeforeTheAckAreServed(t *testing.T) {
+	hub := fakehub.Start(t)
+	app := newApp(t, Hubs(hub.Addr()), MaxConcurrent(1))
+	is(t, HandleCommand(app, place), nil)
+	is(t, app.Start(context.Background()), nil)
+	s := hub.Next(t)
+	s.RecvRegister(t)
+	for _, id := range []string{"r-1", "r-2"} { // the second only once the first permit came back
+		s.Send(t, command(id, "orders.PlaceOrder", `{"orderId":"o-1"}`))
+		is(t, s.RecvReply(t).GetRequestId(), id)
+		is(t, s.RecvPermits(t).GetCount(), uint32(1))
+	}
+	is(t, len(app.HubIDs()), 0) // still not acknowledged
+}
+
+func TestOutcomesAreMessagesNeverADroppedStream(t *testing.T) {
+	hub := fakehub.Start(t)
+	_, s := serving(t, hub, func(app *App) {
+		is(t, HandleCommand(app, func(_ context.Context, p PlaceOrder) (Receipt, error) {
+			switch p.SKU {
+			case "none":
+				return Receipt{}, errors.New("out of stock")
+			case "panic":
+				panic("boom\nat line 3")
+			case "denied":
+				return Receipt{}, PermissionDenied("orders-user required")
+			}
+			return Receipt{OrderID: p.OrderID}, nil
+		}), nil)
+		is(t, HandleQuery(app, get), nil)
+	})
+	cases := []struct {
+		name string
+		req  *hubpb.Request
+		code hubpb.ErrorCode
+		msg  string
+	}{
+		{"type not served", &hubpb.Request{Kind: hubpb.RequestKind_COMMAND, Type: "orders.Missing", Payload: []byte(`{}`)},
+			hubpb.ErrorCode_NO_HANDLER, "orders.Missing"},
+		{"a query sent as a command", &hubpb.Request{Kind: hubpb.RequestKind_COMMAND, Type: "orders.GetOrder", Payload: []byte(`{}`)},
+			hubpb.ErrorCode_NO_HANDLER, "orders.GetOrder"},
+		{"no kind", &hubpb.Request{Type: "orders.PlaceOrder", Payload: []byte(`{}`)},
+			hubpb.ErrorCode_INVALID_REQUEST, "kind"},
+		{"wrong shape", &hubpb.Request{Kind: hubpb.RequestKind_COMMAND, Type: "orders.PlaceOrder", Payload: []byte(`{"orderId":42}`)},
+			hubpb.ErrorCode_INVALID_REQUEST, "cannot decode payload"},
+		{"not json", &hubpb.Request{Kind: hubpb.RequestKind_COMMAND, Type: "orders.PlaceOrder", Payload: []byte(`not json`)},
+			hubpb.ErrorCode_INVALID_REQUEST, "cannot decode payload"},
+		{"an error", &hubpb.Request{Kind: hubpb.RequestKind_COMMAND, Type: "orders.PlaceOrder", Payload: []byte(`{"sku":"none"}`)},
+			hubpb.ErrorCode_HANDLER_ERROR, "out of stock"},
+		{"a panic", &hubpb.Request{Kind: hubpb.RequestKind_COMMAND, Type: "orders.PlaceOrder", Payload: []byte(`{"sku":"panic"}`)},
+			hubpb.ErrorCode_HANDLER_ERROR, "boom"},
+		{"a coded error", &hubpb.Request{Kind: hubpb.RequestKind_COMMAND, Type: "orders.PlaceOrder", Payload: []byte(`{"sku":"denied"}`)},
+			hubpb.ErrorCode_PERMISSION_DENIED, "orders-user required"},
+	}
+	for i, c := range cases {
+		c.req.Id = "bad-" + c.name
+		s.Send(t, fakehub.Forward(c.req))
+		e := nextReply(t, s).GetError()
+		if e.GetCode() != c.code || !strings.Contains(e.GetMessage(), c.msg) || strings.ContainsAny(e.GetMessage(), "\r\n") {
+			t.Fatalf("%s: got %v %q, want %v containing %q", c.name, e.GetCode(), e.GetMessage(), c.code, c.msg)
+		}
+		is(t, e.GetRequestId(), c.req.Id)
+		ok := "ok-" + string(rune('a'+i))
+		s.Send(t, command(ok, "orders.PlaceOrder", `{"orderId":"o-1"}`)) // the stream is still up
+		r := nextReply(t, s)
+		is(t, r.GetRequestId(), ok)
+		is(t, r.GetError() == nil, true)
+	}
+	hub.NoStreamWithin(t, 50*ms)
+}
+
+func TestTheReplyGoesOnlyToTheArrivalStream(t *testing.T) {
+	hub := fakehub.Start(t)
+	_, s := serving(t, hub, func(app *App) {
+		is(t, HandleCommand(app, func(context.Context, PlaceOrder) (Empty, error) {
+			time.Sleep(200 * ms)
+			return Empty{}, nil
+		}), nil)
+	})
+	s.Send(t, command("r-1", "orders.PlaceOrder", `{}`))
+	time.Sleep(20 * ms)
+	s.Close(codes.Unavailable, "restart")
+	s2 := hub.Next(t)
+	s2.RecvRegister(t)
+	s2.Ack(t, fakehub.Ack("hub-1"))
+	s2.Nothing(t, 400*ms, "reply", "permits")
+}
+
+func TestHandlersNeverExceedTheCapacity(t *testing.T) {
+	hub := fakehub.Start(t)
+	var running, most atomic.Int32
+	_, s := serving(t, hub, func(app *App) {
+		is(t, HandleCommand(app, func(context.Context, PlaceOrder) (Empty, error) {
+			n := running.Add(1)
+			for m := most.Load(); n > m && !most.CompareAndSwap(m, n); m = most.Load() {
+			}
+			time.Sleep(100 * ms)
+			running.Add(-1)
+			return Empty{}, nil
+		}), nil)
+	}, MaxConcurrent(2))
+	for i := 0; i < 4; i++ { // a hub ignoring the permits
+		s.Send(t, command("r-"+string(rune('1'+i)), "orders.PlaceOrder", `{}`))
+	}
+	for i := 0; i < 4; i++ {
+		nextReply(t, s)
+	}
+	is(t, most.Load(), int32(2))
+}
+
+func TestShutdownReturnsByItsDeadlineWithAStuckHandler(t *testing.T) {
+	hub := fakehub.Start(t)
+	release, started := make(chan struct{}), make(chan context.Context, 1)
+	t.Cleanup(func() { close(release) })
+	app, s := serving(t, hub, func(app *App) {
+		is(t, HandleCommand(app, func(ctx context.Context, _ PlaceOrder) (Empty, error) {
+			started <- ctx
+			<-release // ignores ctx
+			return Empty{}, nil
+		}), nil)
+	})
+	s.Send(t, command("r-1", "orders.PlaceOrder", `{}`))
+	hctx := receive(t, started)
+	start := time.Now()
+	err := app.Shutdown(ctxWithin(t, 300*ms))
+	is(t, errors.Is(err, context.DeadlineExceeded), true)
+	within(t, time.Since(start), 300*ms, 300*ms+killGrace)
+	select {
+	case <-hctx.Done(): // the handler's context ends with the hard stop
+	case <-time.After(time.Second):
+		t.Fatal("the stuck handler's context was not cancelled")
+	}
+}
+
+func TestShutdownDrainsTheHandlersBeforeTheHalfClose(t *testing.T) {
+	hub := fakehub.Start(t)
+	started := make(chan struct{}, 1)
+	app, s := serving(t, hub, func(app *App) {
+		is(t, HandleCommand(app, func(context.Context, PlaceOrder) (Empty, error) {
+			started <- struct{}{}
+			time.Sleep(250 * ms) // beyond the 100 ms deregister wait
+			return Empty{}, nil
+		}), nil)
+	})
+	s.Send(t, command("r-1", "orders.PlaceOrder", `{}`))
+	receive(t, started)
+	done := make(chan error, 1)
+	go func() { done <- app.Shutdown(ctxWithin(t, 5*time.Second)) }()
+	is(t, len(s.RecvRegister(t).GetCommandTypes()), 0) // the empty Register first
+	is(t, nextReply(t, s).GetRequestId(), "r-1")       // then the handler's reply
+	s.HalfClosed(t, time.Second)                       // then the half-close
+	is(t, <-done, nil)
+}
+
+// countingCodec is JSON, counting its calls.
+type countingCodec struct{ decoded, encoded atomic.Int32 }
+
+func (c *countingCodec) Marshal(v any) ([]byte, error) { c.encoded.Add(1); return JSON.Marshal(v) }
+func (c *countingCodec) Unmarshal(b []byte, v any) error {
+	c.decoded.Add(1)
+	return JSON.Unmarshal(b, v)
+}
+
+func TestTheCodecOptionDecodesAndEncodes(t *testing.T) {
+	hub := fakehub.Start(t)
+	codec := &countingCodec{}
+	_, s := serving(t, hub, func(app *App) { is(t, HandleCommand(app, place), nil) }, Codec(codec))
+	s.Send(t, command("r-1", "orders.PlaceOrder", `{"orderId":"o-1"}`))
+	is(t, string(s.RecvReply(t).GetPayload()), `{"orderId":"o-1","total":42}`)
+	is(t, codec.decoded.Load(), int32(1))
+	is(t, codec.encoded.Load(), int32(1))
+	_, err := New(Service("orders-service"), Hubs("127.0.0.1:7000"), Codec(nil))
+	is(t, err != nil && strings.Contains(err.Error(), "Codec"), true)
+}

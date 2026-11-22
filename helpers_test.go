@@ -108,7 +108,8 @@ func (r *logRecorder) count(level slog.Level, msg string) int {
 
 // PlaceOrder is a message with a value receiver.
 type PlaceOrder struct {
-	SKU string `json:"sku"`
+	OrderID string `json:"orderId,omitempty"`
+	SKU     string `json:"sku,omitempty"`
 }
 
 func (PlaceOrder) MessageType() string { return "orders.PlaceOrder" }
@@ -119,3 +120,16 @@ type CancelOrder struct {
 }
 
 func (*CancelOrder) MessageType() string { return "orders.CancelOrder" }
+
+// GetOrder is a query with a value receiver.
+type GetOrder struct {
+	OrderID string `json:"orderId"`
+}
+
+func (GetOrder) MessageType() string { return "orders.GetOrder" }
+
+// Receipt is an answer.
+type Receipt struct {
+	OrderID string `json:"orderId"`
+	Total   int    `json:"total"`
+}

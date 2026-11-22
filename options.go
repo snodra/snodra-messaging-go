@@ -22,6 +22,7 @@ type config struct {
 	loadFactor    uint32
 	tags          map[string]string
 	logger        *slog.Logger
+	codec         PayloadCodec
 	timings       timings
 }
 
@@ -29,6 +30,7 @@ func defaultConfig() config {
 	return config{
 		maxConcurrent: 256,
 		loadFactor:    100,
+		codec:         JSON,
 		timings:       defaultTimings(),
 	}
 }
@@ -114,6 +116,20 @@ func LoadFactor(n uint32) Option {
 func Tags(tags map[string]string) Option {
 	return func(c *config) error {
 		c.tags = maps.Clone(tags)
+		return nil
+	}
+}
+
+// Codec is the payload codec of every handler and send; the default is [JSON]. Every library
+// of the suite reads and writes JSON payloads
+// (https://snodra.damoreira.com/library-authors/messages/): change it only for a codec that
+// writes the same JSON.
+func Codec(c PayloadCodec) Option {
+	return func(cfg *config) error {
+		if c == nil {
+			return errors.New("snodra: Codec needs a codec")
+		}
+		cfg.codec = c
 		return nil
 	}
 }

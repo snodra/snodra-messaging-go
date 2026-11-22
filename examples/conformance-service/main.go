@@ -37,6 +37,9 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	if err := registerHandlers(app, e); err != nil {
+		return err
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
 	if err := app.Start(ctx); err != nil {

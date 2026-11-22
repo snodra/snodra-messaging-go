@@ -116,7 +116,15 @@ func errorFromWire(e *hubpb.Error) *Error {
 
 var lineBreaks = strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ")
 
+// errorToWire is the Error a handler's err answers: the code of the nearest error made by
+// Unauthenticated, PermissionDenied or InvalidRequest, else HANDLER_ERROR; the message on one
+// line; the nearest details, only for HANDLER_ERROR (the protocol keeps details for that code
+// only). A nil err, which no caller should pass, is a HANDLER_ERROR too.
 func errorToWire(requestID string, err error) *hubpb.Error {
+	if err == nil {
+		return &hubpb.Error{RequestId: requestID, Code: hubpb.ErrorCode_HANDLER_ERROR,
+			Message: "the handler failed without an error"}
+	}
 	w := &hubpb.Error{
 		RequestId: requestID,
 		Code:      hubpb.ErrorCode_HANDLER_ERROR,
@@ -135,6 +143,9 @@ func errorToWire(requestID string, err error) *hubpb.Error {
 			w.Details = he.details
 		}
 		e = he.cause
+	}
+	if w.Code != hubpb.ErrorCode_HANDLER_ERROR {
+		w.Details = nil
 	}
 	return w
 }

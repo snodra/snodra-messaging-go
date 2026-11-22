@@ -230,7 +230,9 @@ func (c *hubConn) runStream() (reached bool, err error) {
 	}
 
 	ref := newStreamRef()
-	_ = ref.send(&hubpb.ClientMessage{Message: &hubpb.ClientMessage_Register{Register: c.app.registerMsg()}})
+	register := c.app.registerMsg()
+	permits := newStreamPermits(ref, register.GetInitialPermits(), c.t.permitFlushAfter)
+	_ = ref.send(&hubpb.ClientMessage{Message: &hubpb.ClientMessage_Register{Register: register}})
 	_ = ref.send(heartbeat())
 	c.mu.Lock()
 	c.state, c.current = stateAwaitingAck, ref
@@ -270,7 +272,7 @@ func (c *hubConn) runStream() (reached bool, err error) {
 			}
 		}
 	}()
-	return c.serve(ref, inbox, ended, written, handshake.C)
+	return c.serve(ref, permits, inbox, ended, written, handshake.C)
 }
 
 // open starts the Connect stream, giving up at the handshake deadline, at the shutdown and at
@@ -300,9 +302,9 @@ func (c *hubConn) open(ctx context.Context, cancel context.CancelFunc, cc *grpc.
 	return nil, err
 }
 
-// serve is the stream's loop: the ack, heartbeats and the silent-hub check, the empty Register
-// and the half-close at shutdown.
-func (c *hubConn) serve(ref *streamRef, inbox <-chan *hubpb.ServerMessage, ended, written <-chan error,
+// serve is the stream's loop: the ack, heartbeats and the silent-hub check, the forwarded
+// requests (also before the ack), the empty Register and the half-close at shutdown.
+func (c *hubConn) serve(ref *streamRef, permits *streamPermits, inbox <-chan *hubpb.ServerMessage, ended, written <-chan error,
 	handshake <-chan time.Time) (reached bool, err error) {
 	interval := c.t.heartbeatBeforeAck
 	silentAfter := func() time.Duration { return interval * time.Duration(c.t.silentIntervals) }
@@ -355,6 +357,13 @@ func (c *hubConn) serve(ref *streamRef, inbox <-chan *hubpb.ServerMessage, ended
 				if silentC != nil {
 					silent.Reset(silentAfter())
 				}
+			case *hubpb.ServerMessage_Request:
+				if halfClosed {
+					// Nothing can be answered on a half-closed stream.
+					c.log.Debug("request dropped: the stream is half-closed", "request", k.Request.GetId())
+					break
+				}
+				c.app.dispatch(k.Request, ref, permits)
 			}
 		case err := <-ended:
 			if errors.Is(err, io.EOF) {
