@@ -14,6 +14,7 @@ func TestEveryCodeReadsAsItself(t *testing.T) { // SG-17 for the messages
 		2: "Timed out waiting for reply to 'orders.PlaceOrder'",
 		3: "Handler for 'orders.PlaceOrder' disconnected",
 		8: "Handler for 'orders.PlaceOrder' is busy",
+		9: "'orders.PlaceOrder': m", // the hub's message, prefixed with the type
 	}
 	for c := int32(1); c <= 9; c++ {
 		e := errorFromWire("orders.PlaceOrder", &hubpb.Error{Code: hubpb.ErrorCode(c), Message: "m", Details: []byte(`{"a":1}`)})

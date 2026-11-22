@@ -93,12 +93,13 @@ reference library departs from it. In each case this library follows the referen
 - **Specification:** [protocol.md, Replies and errors](https://snodra.damoreira.com/library-authors/protocol/) says a
   library must "keep `Error.message` for the codes a handler produces" (`HANDLER_ERROR`, `UNAUTHENTICATED`,
   `PERMISSION_DENIED`, `INVALID_REQUEST`); it says nothing of the message of the other codes.
-- **Reference library:** keeps the hub's message for `CANCELLED` (and for an unknown code, read as `HANDLER_ERROR`),
-  and replaces it with its own text naming the type for `NO_HANDLER` ("No handler registered for '<type>'"),
-  `TIMEOUT` ("Timed out waiting for reply to '<type>'"), `HANDLER_DISCONNECTED` ("Handler for '<type>'
-  disconnected") and `RESOURCE_EXHAUSTED` ("Handler for '<type>' is busy"). The Kotlin library does the same for
-  these four codes (for a unary request).
-- **This library:** does what the reference library does: `Error.Message` holds those texts for those four codes, the
-  hub's message otherwise (`errors.go`).
+- **Reference library:** keeps the hub's message for an unknown code (read as `HANDLER_ERROR`); keeps it for
+  `CANCELLED` too, prefixed with the type ("'<type>': <hub's message>"); and replaces it with its own text naming the
+  type for `NO_HANDLER` ("No handler registered for '<type>'"), `TIMEOUT` ("Timed out waiting for reply to
+  '<type>'"), `HANDLER_DISCONNECTED` ("Handler for '<type>' disconnected") and `RESOURCE_EXHAUSTED` ("Handler for
+  '<type>' is busy"). The Kotlin library does the same for these four codes (for a unary request), except that its
+  `RESOURCE_EXHAUSTED` text has a suffix: "Handler for '<type>' is busy: its hub queue or session buffer is full".
+- **This library:** does what the Rust library does: `Error.Message` holds those texts for those four codes, the
+  prefixed message for `CANCELLED`, the hub's message otherwise (`errors.go`).
 - **Question:** should a library keep the hub's message for every code (it is safe to log), or is it free to replace
   it for the codes no handler produces?

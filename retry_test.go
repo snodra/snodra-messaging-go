@@ -154,6 +154,7 @@ func TestNoRetryWithLessThanTheMinimumLeft(t *testing.T) { // SG-2
 	var e *Error
 	is(t, errors.As(await(t, sent).err, &e) && e.Code == CodeNoHandler, true)
 	s.Nothing(t, 400*ms, "request")
+	is(t, s.Recv(t).GetHeartbeat() != nil, true) // the stream is alive: no retry was written to it
 }
 
 func TestNoRetryAfterTheLastAttemptOrWithNoRetry(t *testing.T) {
@@ -171,4 +172,5 @@ func TestNoRetryAfterTheLastAttemptOrWithNoRetry(t *testing.T) {
 	s.Send(t, fakehub.HubError(r.GetId(), hubpb.ErrorCode_NO_HANDLER, "nobody"))
 	is(t, await(t, sent).err != nil, true)
 	s.Nothing(t, 200*ms, "request")
+	is(t, s.Recv(t).GetHeartbeat() != nil, true) // the stream is alive: no retry was written to it
 }

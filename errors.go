@@ -108,8 +108,8 @@ func WithDetails(err error, details any) error {
 // errorFromWire is the error a caller of a request of type typ gets for the hub's or the
 // handler's e: its code (an unknown one, and ERROR_CODE_UNSPECIFIED, read as HANDLER_ERROR), the
 // details for HANDLER_ERROR only, and the message, except for NO_HANDLER, TIMEOUT,
-// HANDLER_DISCONNECTED and RESOURCE_EXHAUSTED, whose message is the library's own, naming typ, as
-// in the reference libraries.
+// HANDLER_DISCONNECTED and RESOURCE_EXHAUSTED, whose message is the library's own, naming typ, and
+// CANCELLED, whose message is prefixed with "'<typ>': ", as in the reference library.
 // TODO(spec-gap): SG-17 (the message of the codes no handler produces).
 func errorFromWire(typ string, e *hubpb.Error) *Error {
 	code := Code(e.GetCode())
@@ -126,6 +126,8 @@ func errorFromWire(typ string, e *hubpb.Error) *Error {
 		msg = "Handler for '" + typ + "' disconnected"
 	case CodeResourceExhausted:
 		msg = "Handler for '" + typ + "' is busy"
+	case CodeCancelled:
+		msg = "'" + typ + "': " + msg
 	}
 	out := &Error{Code: code, Message: msg}
 	if code == CodeHandlerError && len(e.GetDetails()) > 0 {

@@ -281,11 +281,12 @@ func TestEveryErrorCodeReachesTheCaller(t *testing.T) { // SG-17 for the message
 		}
 		return e
 	}
-	library := map[Code]string{ // the reference library's own texts: the hub's message is not kept
+	library := map[Code]string{ // the reference library's own texts
 		CodeNoHandler:           "No handler registered for 'orders.PlaceOrder'",
 		CodeTimeout:             "Timed out waiting for reply to 'orders.PlaceOrder'",
 		CodeHandlerDisconnected: "Handler for 'orders.PlaceOrder' disconnected",
 		CodeResourceExhausted:   "Handler for 'orders.PlaceOrder' is busy",
+		CodeCancelled:           "'orders.PlaceOrder': hub says 9", // the hub's message, prefixed with the type
 	}
 	for _, c := range []struct {
 		wire int32
@@ -355,7 +356,9 @@ func TestContextDeadlineIsTheCallersTimeout(t *testing.T) {
 	defer cancel3()
 	_, err := Send[Empty](expired, app, PlaceOrder{})
 	is(t, errors.Is(err, context.DeadlineExceeded), true)
+	is(t, errors.Is(err, ErrNeverSent), true)
 	s.Nothing(t, 100*ms, "request")
+	is(t, s.Recv(t).GetHeartbeat() != nil, true) // the stream is alive: nothing was written to it
 }
 
 func TestATimeoutPerCallWinsOverTheDefault(t *testing.T) { // as in the reference libraries
@@ -417,6 +420,7 @@ func TestSendRefusesWhatItCannotSend(t *testing.T) {
 	_, err = Send[Empty](ctx, app, PlaceOrder{}, Retry(RetryPolicy{MaxAttempts: 2, Multiplier: 0.5}))
 	is(t, err != nil, true)
 	s.Nothing(t, 100*ms, "request")
+	is(t, s.Recv(t).GetHeartbeat() != nil, true) // the stream is alive: nothing was written to it
 }
 
 func TestTheOutboundBufferHoldsAtMost256Requests(t *testing.T) {
@@ -443,9 +447,65 @@ func TestTheOutboundBufferHoldsAtMost256Requests(t *testing.T) {
 	defer close(done)
 	m, _, ok := ref.next(context.Background(), done)
 	is(t, ok && m.GetRequest().GetId() == "0", true)
-	m, _, _ = ref.next(context.Background(), done) // the heartbeat: there is room again
-	is(t, m.GetHeartbeat() != nil || m.GetRequest() != nil, true)
-	is(t, await(t, waiting).err, nil)
+	is(t, await(t, waiting).err, nil) // taking one request made room for the waiting one
+	// The frames leave in the order they were queued: the other requests, the heartbeat, the
+	// request that waited.
+	for i := 1; i < outboundLimit; i++ {
+		m, _, _ = ref.next(context.Background(), done)
+		is(t, m.GetRequest().GetId(), fmt.Sprint(i))
+	}
+	m, _, _ = ref.next(context.Background(), done)
+	is(t, m.GetHeartbeat() != nil, true)
+	m, _, _ = ref.next(context.Background(), done)
+	is(t, m.GetRequest().GetId(), "next")
 	ref.end()
 	is(t, errors.Is(ref.sendRequest(context.Background(), req("gone"), &call{}), errStreamGone), true)
+}
+
+// fullBuffer fills the outbound buffer of app's only stream (its writer held by a blockRequests
+// hook) with outboundLimit requests and starts one more Send, which waits for room; it returns
+// that Send's outcome.
+func fullBuffer(t *testing.T, app *App) <-chan outcome[Empty] {
+	t.Helper()
+	ref := app.pool.conns[0].stream()
+	for range outboundLimit {
+		go func() { _, _ = Send[Empty](context.Background(), app, PlaceOrder{}) }() // they end with the stream
+	}
+	poll(t, func() bool { ref.mu.Lock(); defer ref.mu.Unlock(); return ref.requests == outboundLimit })
+	waiting := async(func() (Empty, error) { return Send[Empty](context.Background(), app, PlaceOrder{}) })
+	poll(t, func() bool { ref.mu.Lock(); defer ref.mu.Unlock(); return ref.room != nil }) // it waits for room
+	return waiting
+}
+
+// poll waits at most 5 s for cond.
+func poll(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatal("the condition did not hold within 5 s")
+		}
+		time.Sleep(5 * ms)
+	}
+}
+
+func TestASendWaitingForRoomEndsWithTheStream(t *testing.T) {
+	held := make(chan *hubpb.Request, 2)
+	app, _, s := sending(t, fakehub.Ack("hub-1"), blockRequests(held, nil))
+	waiting := fullBuffer(t, app)
+	s.Close(codes.Unavailable, "restart")
+	o := await(t, waiting)
+	is(t, errors.Is(o.err, ErrNeverSent), true)
+	is(t, errors.Is(o.err, ErrOutcomeUnknown), false)
+}
+
+func TestASendWaitingForRoomEndsWithShutdown(t *testing.T) {
+	held := make(chan *hubpb.Request, 2)
+	app, _, _ := sending(t, fakehub.Ack("hub-1"), blockRequests(held, nil))
+	waiting := fullBuffer(t, app)
+	stopped := async(func() (Empty, error) { return Empty{}, app.Shutdown(ctxWithin(t, 5*time.Second)) })
+	o := await(t, waiting)
+	is(t, errors.Is(o.err, ErrNeverSent), true)
+	is(t, errors.Is(o.err, ErrOutcomeUnknown), false)
+	await(t, stopped)
 }

@@ -54,7 +54,8 @@ func NoRetry() SendOption { return Retry(noRetry) }
 //
 // A failed call is one of:
 //   - an [*Error] (test with errors.As): the hub's or the handler's answer, by its [Code], or the
-//     library's own TIMEOUT when no answer came within the hub's bound for the request plus 1 s;
+//     library's own TIMEOUT when no answer came within the hub's bound for the request plus 1 s
+//     (a request still waiting in the library's buffer then is withdrawn and reported as TIMEOUT);
 //   - [ErrNeverSent] (test with errors.Is): no hub had an acknowledged stream, or the request was
 //     still in the library's buffer when the stream broke; the handler never saw it;
 //   - [ErrOutcomeUnknown]: the request was written, then its stream broke before the answer; the
