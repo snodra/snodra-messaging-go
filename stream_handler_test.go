@@ -254,7 +254,8 @@ func TestStreamAnswersOnTheArrivalStream(t *testing.T) {
 	sb.Send(t, fakehub.Flow("s#1", 1))
 	partIs(t, nextPart(t, sb), "s#1", 3)
 	is(t, nextEnd(t, sb).GetRequestId(), "s#1")
-	sa.Nothing(t, 300*ms, "part", "end", "reply")
+	is(t, sb.RecvPermits(t).GetCount(), uint32(1)) // the permit goes back to hub-b, which spent it
+	sa.Nothing(t, 300*ms, "part", "end", "reply", "permits")
 }
 
 func TestAStreamOnALostArrivalStreamEnds(t *testing.T) {
@@ -333,4 +334,36 @@ func TestRustDuration(t *testing.T) { // the reference library's Debug of a Dura
 	} {
 		is(t, rustDuration(d), want)
 	}
+}
+
+func TestASendWaitingBehindAnotherHonoursItsContext(t *testing.T) {
+	hub := fakehub.Start(t)
+	type result struct {
+		err     error
+		elapsed time.Duration
+	}
+	second := make(chan result, 1)
+	_, s := serving(t, hub, func(app *App) {
+		is(t, HandleStream(app, func(ctx context.Context, _ ListOrders, w *StreamWriter[OrderLine]) error {
+			// No credit: the first Send waits, holding the writer (polled at most 5 s, off the test
+			// goroutine).
+			go func() { _ = w.Send(ctx, OrderLine{N: 1}) }()
+			for i := 0; i < 1000 && len(w.out.sendSlot) == 0; i++ {
+				time.Sleep(5 * ms)
+			}
+			sctx, cancel := context.WithTimeout(ctx, 100*ms)
+			defer cancel()
+			start := time.Now()
+			err := w.Send(sctx, OrderLine{N: 2})
+			second <- result{err, time.Since(start)}
+			return nil
+		}), nil)
+	})
+	s.Send(t, streamRequest("s#1", 0, `{}`))
+	r := receive(t, second)
+	is(t, errors.Is(r.err, context.DeadlineExceeded), true)
+	within(t, r.elapsed, 90*ms, time.Second) // not the credit wait of the Send ahead of it
+	end := nextEnd(t, s)
+	is(t, end.GetRequestId(), "s#1")
+	is(t, end.GetError() == nil, true)
 }

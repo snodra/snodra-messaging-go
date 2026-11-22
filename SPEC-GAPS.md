@@ -253,9 +253,9 @@ reference library departs from it. In each case this library follows the referen
   of it as `Request.timeout_ms`"; it says nothing of a streaming query, whose `Request.timeout_ms` is an idle timeout
   (the longest wait for the next part), nor of when a stream stops being retried.
 - **Reference library:** retries a stream with the policy of a unary query, for the same errors, only until its first
-  part (or its end) arrives; a retry is a new stream with a fresh id that sends the caller's chosen idle timeout
-  again, not what is left of the budget (the budget only bounds when a retry may start). After the first part
-  nothing is retried.
+  part, a clean end or an error it does not retry; a retry is a new stream with a fresh id that sends the caller's
+  chosen idle timeout again, not what is left of the budget (the budget only bounds when a retry may start). After the
+  first part nothing is retried. The Kotlin library does the same.
 - **This library:** does the same (`stream_client.go`).
 - **Question:** should a retried stream send the remaining budget, as a unary request does, or its idle timeout
   unchanged; and should the specification say that a stream is retried only before its first part?

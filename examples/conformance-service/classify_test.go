@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	snodra "github.com/snodra/snodra-messaging-go"
 )
@@ -71,5 +72,23 @@ func TestEnvMapsTheRetryPolicy(t *testing.T) {
 		if _, err := readEnv(lookup(vars)); err == nil {
 			t.Errorf("%s=%s accepted", name, bad)
 		}
+	}
+}
+
+func TestTheReadDelayEndsWithTheContext(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	endless := func(yield func(json.RawMessage, error) bool) {
+		for yield(json.RawMessage(`{"n":1}`), nil) {
+		}
+	}
+	delay := int64(10_000)
+	start := time.Now()
+	out := readItems(ctx, endless, Send{ReadDelayMs: &delay}, nil)
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("the read waited %v past its context", elapsed)
+	}
+	if e, _ := out["error"].(map[string]any); out["result"] != "error" || e["message"] != context.DeadlineExceeded.Error() {
+		t.Fatalf("outcome %v", out)
 	}
 }

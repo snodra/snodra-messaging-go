@@ -314,13 +314,15 @@ func (p *pendingCalls) remove(id string) {
 	p.mu.Unlock()
 }
 
-// writtenTo counts the calls written to ref that await their answer.
+// writtenTo counts the calls written to ref that await their answer, except the streams and
+// subscriptions this instance reads: they end when their owners decide, so a certificate
+// rollover does not wait for them (it cuts them), as in the reference library.
 func (p *pendingCalls) writtenTo(ref *streamRef) int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	n := 0
 	for _, c := range p.byID {
-		if c.on.Load() == ref {
+		if c.on.Load() == ref && c.inbox == nil {
 			n++
 		}
 	}

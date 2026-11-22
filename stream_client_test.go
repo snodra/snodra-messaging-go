@@ -337,3 +337,105 @@ func TestStreamRefusesWhatItCannotSend(t *testing.T) {
 	s.Send(t, replyTo(r.GetId(), `{}`))
 	is(t, await(t, sent).err, nil)
 }
+
+// buffered is how many events wait in the inbox of the stream id.
+func buffered(app *App, id string) int {
+	app.calls.mu.Lock()
+	c := app.calls.byID[id]
+	app.calls.mu.Unlock()
+	if c == nil || c.inbox == nil {
+		return 0
+	}
+	c.inbox.mu.Lock()
+	defer c.inbox.mu.Unlock()
+	return len(c.inbox.events)
+}
+
+func TestACancelledContextWinsOverBufferedParts(t *testing.T) {
+	app, _, s := sending(t, fakehub.Ack("hub-1"))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	release := make(chan struct{})
+	read := async(func() ([]OrderLine, error) {
+		var got []OrderLine
+		for v, err := range Stream[OrderLine](ctx, app, ListOrders{}) {
+			if err != nil {
+				return got, err
+			}
+			got = append(got, v)
+			if len(got) == 1 {
+				<-release // parts 2 to 5 arrive meanwhile
+				cancel()
+			}
+		}
+		return got, nil
+	})
+	r := s.RecvRequest(t)
+	for seq := uint64(1); seq <= 5; seq++ {
+		s.Send(t, line(r.GetId(), seq))
+	}
+	poll(t, func() bool { return buffered(app, r.GetId()) == 4 })
+	close(release)
+	o := await(t, read)
+	is(t, len(o.value), 1) // none of the 4 buffered parts after the cancellation
+	is(t, errors.Is(o.err, context.Canceled), true)
+	is(t, errors.Is(o.err, ErrOutcomeUnknown), true)
+	c := s.RecvCancel(t)
+	is(t, c.GetRequestId(), r.GetId())
+	is(t, c.GetReason(), "dropped by the sender")
+	is(t, waiting(app), 0)
+}
+
+func TestAPanicInTheLoopBodyCancelsTheStream(t *testing.T) {
+	app, _, s := sending(t, fakehub.Ack("hub-1"))
+	recovered := make(chan any, 1)
+	go func() {
+		defer func() { recovered <- recover() }()
+		for _, err := range Stream[OrderLine](context.Background(), app, ListOrders{}) {
+			if err == nil {
+				panic("loop body defect")
+			}
+		}
+	}()
+	r := s.RecvRequest(t)
+	s.Send(t, line(r.GetId(), 1))
+	is(t, receive(t, recovered), any("loop body defect"))
+	c := s.RecvCancel(t)
+	is(t, c.GetRequestId(), r.GetId())
+	is(t, c.GetReason(), "dropped by the sender")
+	is(t, waiting(app), 0)
+}
+
+func TestEachRangeSendsTheStreamAnew(t *testing.T) {
+	app, _, s := sending(t, fakehub.Ack("hub-1"))
+	seq := Stream[OrderLine](context.Background(), app, ListOrders{Count: 1})
+	var ids []string
+	for range 2 {
+		read := async(func() ([]OrderLine, error) { return collect(seq) })
+		r := s.RecvRequest(t)
+		ids = append(ids, r.GetId())
+		s.Send(t, line(r.GetId(), 1))
+		s.Send(t, streamEnd(r.GetId(), 1, nil))
+		o := await(t, read)
+		is(t, o.err, nil)
+		is(t, len(o.value), 1)
+	}
+	is(t, ids[0] != ids[1], true) // a new request, with its own id
+	is(t, waiting(app), 0)
+}
+
+func TestTheRolloverIgnoresWhatThisInstanceConsumes(t *testing.T) {
+	ref := newStreamRef(nil)
+	p := newPendingCalls()
+	unary := &call{id: "u", answer: make(chan answer, 1)}
+	gather := &call{id: "g", answer: make(chan answer, 1), gather: true}
+	stream := &call{id: "s", inbox: newStreamInbox()} // a stream or a subscription read here
+	for _, c := range []*call{unary, gather, stream} {
+		c.on.Store(ref)
+		p.add(c)
+	}
+	is(t, p.writtenTo(ref), 2) // the rollover waits for these two only, as the reference library does
+	p.remove("u")
+	p.remove("g")
+	is(t, p.writtenTo(ref), 0)
+}

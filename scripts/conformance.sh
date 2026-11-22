@@ -15,8 +15,14 @@ set -euo pipefail
 runner_version=v0.2.0
 server_image="snodra/snodra-server:${SNODRA_SERVER_VERSION:-0.5.4}"
 base_port="${SNODRA_HUB_PORT:-7000}"
-if ! [[ "$base_port" =~ ^[0-9]+$ ]] || ((base_port < 1 || base_port > 65435)); then
-  echo "SNODRA_HUB_PORT must be a port number from 1 to 65435, got '$base_port'" >&2
+port_error="SNODRA_HUB_PORT must be a port number from 1 to 65435, got '$base_port'"
+if ! [[ "$base_port" =~ ^0*[0-9]{1,5}$ ]]; then
+  echo "$port_error" >&2
+  exit 2
+fi
+base_port=$((10#$base_port)) # base 10: bash arithmetic reads a leading zero as octal
+if ((base_port < 1 || base_port > 65435)); then
+  echo "$port_error" >&2
   exit 2
 fi
 

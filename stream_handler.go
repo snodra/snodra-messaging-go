@@ -109,8 +109,8 @@ func (c *streamCredit) add(n uint32) {
 var errNoCredit = errors.New("no credit")
 
 // take uses one credit, waiting for it at most wait: errNoCredit then, ctx's error when ctx ends
-// first, errStreamOver when one of stops closes first.
-func (c *streamCredit) take(ctx context.Context, wait time.Duration, stops ...<-chan struct{}) error {
+// first, errStreamOver when the stream ended, the hub cancelled it or its hub stream is gone.
+func (c *streamCredit) take(ctx context.Context, wait time.Duration, ended, cancelled, gone <-chan struct{}) error {
 	var timer *time.Timer
 	for {
 		c.mu.Lock()
@@ -128,11 +128,11 @@ func (c *streamCredit) take(ctx context.Context, wait time.Duration, stops ...<-
 		case <-c.more:
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-stops[0]:
+		case <-ended:
 			return errStreamOver
-		case <-stops[1]:
+		case <-cancelled:
 			return errStreamOver
-		case <-stops[2]:
+		case <-gone:
 			return errStreamOver
 		case <-timer.C:
 			return errNoCredit
@@ -149,7 +149,7 @@ type streamOut struct {
 	creditWait time.Duration
 	ended      chan struct{} // closed once the end is written, or must not be
 
-	sendMu sync.Mutex // one part at a time, in order
+	sendSlot chan struct{} // held by the Send under way: one part at a time, in order
 
 	mu   sync.Mutex
 	seq  uint64
@@ -158,7 +158,8 @@ type streamOut struct {
 }
 
 func newStreamOut(a *App, run *runningRequest, ref *streamRef, id string) *streamOut {
-	return &streamOut{run: run, ref: ref, id: id, creditWait: a.cfg.timings.creditWait, ended: make(chan struct{})}
+	return &streamOut{run: run, ref: ref, id: id, creditWait: a.cfg.timings.creditWait,
+		ended: make(chan struct{}), sendSlot: make(chan struct{}, 1)}
 }
 
 // finish marks the stream over with why (the first reason wins); true when it was open.
@@ -195,10 +196,17 @@ func (o *streamOut) stateNow() error {
 	return o.state()
 }
 
-// part sends payload as the next part once a credit is available.
+// part sends payload as the next part once a credit is available. A Send waiting behind another
+// (for its credit, say) gives up when its ctx ends or the stream is over.
 func (o *streamOut) part(ctx context.Context, payload []byte) error {
-	o.sendMu.Lock()
-	defer o.sendMu.Unlock()
+	select {
+	case o.sendSlot <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-o.ended:
+		return o.stateNow()
+	}
+	defer func() { <-o.sendSlot }()
 	if err := o.stateNow(); err != nil {
 		return err
 	}

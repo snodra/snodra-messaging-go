@@ -169,6 +169,11 @@ func (s *streaming) next(ctx context.Context) (*hubpb.ReplyPart, error) {
 	if s.done {
 		return nil, nil
 	}
+	// A caller that gave up gets its context's error at once, before what is buffered, and the
+	// hub its Cancel without delay.
+	if ctx.Err() != nil {
+		return nil, s.dropped(ctx)
+	}
 	wait := s.guard
 	if s.first {
 		wait = firstPartGuard(s.guard)
@@ -196,12 +201,18 @@ func (s *streaming) next(ctx context.Context) (*hubpb.ReplyPart, error) {
 			s.cancel("local guard timeout")
 			return nil, &Error{Code: CodeTimeout, Message: timeoutText(s.typ)}
 		case <-ctx.Done():
-			if !s.cancel("dropped by the sender") {
-				return nil, fmt.Errorf("%w: %w", ErrNeverSent, ctx.Err())
-			}
-			return nil, fmt.Errorf("%w: %w", ErrOutcomeUnknown, ctx.Err())
+			return nil, s.dropped(ctx)
 		}
 	}
+}
+
+// dropped cancels the stream of a caller whose ctx ended and is its error: ctx's error, with
+// ErrOutcomeUnknown once the request was written, else with ErrNeverSent.
+func (s *streaming) dropped(ctx context.Context) error {
+	if !s.cancel("dropped by the sender") {
+		return fmt.Errorf("%w: %w", ErrNeverSent, ctx.Err())
+	}
+	return fmt.Errorf("%w: %w", ErrOutcomeUnknown, ctx.Err())
 }
 
 // handle is what event e makes of the stream: its next part, its clean end (nil, nil) or its

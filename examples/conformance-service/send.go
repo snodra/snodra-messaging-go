@@ -175,30 +175,56 @@ func (s *service) stream(ctx context.Context, m Send) map[string]any {
 	default:
 		return unsupported("target " + m.Target + " is not a streaming target")
 	}
+	return readItems(ctx, items, m, nil)
+}
+
+// readItems ranges over items after got (a subscription's initial result), waiting readDelayMs
+// before taking each, until they end or read items were taken (got counted): then it stops
+// ranging, which cancels the stream or subscription. With read 0 and nothing taken yet, a stream
+// is opened and dropped at its first item. A context that ends during a wait ends the read.
+func readItems(ctx context.Context, items iter.Seq2[json.RawMessage, error], m Send, got []json.RawMessage) map[string]any {
+	if got == nil {
+		got = []json.RawMessage{}
+	}
+	enough := func() bool { return m.Read != nil && int64(len(got)) >= *m.Read }
+	if len(got) > 0 && enough() {
+		return map[string]any{"result": "ok", "items": got, "end": "stopped"}
+	}
 	delay := time.Duration(0)
 	if m.ReadDelayMs != nil {
 		delay = time.Duration(*m.ReadDelayMs) * time.Millisecond
 	}
-	got := []json.RawMessage{}
 	for item, err := range items {
 		if err != nil {
 			return map[string]any{"result": "error", "error": classify(err), "items": got}
 		}
-		if m.Read != nil && int64(len(got)) >= *m.Read {
+		if enough() {
 			break // read 0: opened, then dropped
 		}
-		if delay > 0 {
-			time.Sleep(delay)
+		if delay > 0 && !pause(ctx, delay) {
+			return map[string]any{"result": "error", "error": classify(ctx.Err()), "items": got}
 		}
 		got = append(got, item)
-		if m.Read != nil && int64(len(got)) >= *m.Read {
-			return map[string]any{"result": "ok", "items": got, "end": "stopped"}
+		if enough() {
+			break
 		}
 	}
-	if m.Read != nil && int64(len(got)) >= *m.Read {
+	if enough() {
 		return map[string]any{"result": "ok", "items": got, "end": "stopped"}
 	}
 	return map[string]any{"result": "ok", "items": got, "end": "completed"}
+}
+
+// pause waits d; false when ctx ended first.
+func pause(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 // classify is the contract's error of a failed call, by the library's typed errors.

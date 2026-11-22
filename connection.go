@@ -645,7 +645,7 @@ func (c *hubConn) wentLive(ref *streamRef, ack *hubpb.RegisterAck, interval time
 }
 
 // streamIdle is true when no handler of the stream's requests runs and none of the requests
-// written to it awaits its answer.
+// written to it awaits its answer (the streams and subscriptions this instance reads aside).
 func (c *hubConn) streamIdle(ref *streamRef, permits *streamPermits) bool {
 	return !permits.busy() && c.app.calls.writtenTo(ref) == 0
 }
