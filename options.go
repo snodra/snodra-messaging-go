@@ -35,6 +35,13 @@ type config struct {
 	rolesClaim      string // where a token's roles are; "": roles
 	forwardJWT      bool   // nested requests carry the handled request's authorization header
 
+	// The instance's own credential towards the hubs: one kind (credentials.go, tls.go).
+	token                 *secret     // Register.credentials.token; nil: none
+	tokenFile             string      // the token's file, read before every connect; wins over token
+	tokenSource           TokenSource // Register.credentials.jwt from it; nil: none
+	tls                   *TLSConfig  // TLS to the hubs; nil: plain text
+	clientCert, clientKey string      // the client certificate pair (mutual TLS)
+
 	// writeHook, when set (tests), runs before a stream's writer takes each frame from the
 	// outbound buffer; ctx ends with the stream.
 	writeHook func(ctx context.Context, m *hubpb.ClientMessage)
@@ -235,6 +242,69 @@ func (c *config) validate() error {
 	}
 	if c.logger == nil {
 		c.logger = slog.Default()
+	}
+	return c.validateCredentials()
+}
+
+// validateCredentials checks the instance's credential towards the hubs: one kind, a token file
+// that holds a token, a token source's settings, a CA file that holds a certificate, and a
+// client certificate pair the hub would accept now.
+func (c *config) validateCredentials() error {
+	var kinds []string
+	switch {
+	case c.tokenFile != "":
+		kinds = append(kinds, "a static token (TokenFile, SNODRA_SERVER_TOKEN_FILE)")
+	case c.token != nil:
+		kinds = append(kinds, "a static token (Token, SNODRA_SERVER_TOKEN)")
+	}
+	if c.tokenSource != nil {
+		kinds = append(kinds, "a JWT (JWT, SNODRA_SERVER_OAUTH2_TOKEN_URI)")
+	}
+	if c.clientCert != "" || c.clientKey != "" {
+		kinds = append(kinds, "a client certificate (ClientCertificate, SNODRA_SERVER_TLS_CLIENT_CERT)")
+	}
+	if len(kinds) > 1 {
+		return fmt.Errorf("snodra: %s and %s are both set: use one credential", kinds[0], kinds[1])
+	}
+	if c.tokenFile != "" {
+		// TODO(spec-gap): SG-20 (a token file that cannot be read or is empty at start is refused).
+		tok, err := readTokenFile(c.tokenFile)
+		if err != nil {
+			return fmt.Errorf("snodra: the token file (TokenFile, SNODRA_SERVER_TOKEN_FILE) '%s' cannot be read: %w", c.tokenFile, err)
+		}
+		if tok == "" {
+			return fmt.Errorf("snodra: the token file (TokenFile, SNODRA_SERVER_TOKEN_FILE) '%s' is empty", c.tokenFile)
+		}
+	}
+	if cc, ok := c.tokenSource.(*clientCredentials); ok {
+		checked, err := cc.prepared(c.service)
+		if err != nil {
+			return err
+		}
+		if checked.plainHTTPOverANetwork() {
+			c.logger.Warn("the OAuth2 token endpoint is plain http over a routed network: the client secret and the tokens travel unencrypted; use https")
+		}
+		c.tokenSource = checked
+	}
+	if c.clientCert != "" || c.clientKey != "" {
+		if c.clientCert == "" || c.clientKey == "" {
+			return errors.New("snodra: a client certificate needs both files (ClientCertificate, SNODRA_SERVER_TLS_CLIENT_CERT and SNODRA_SERVER_TLS_CLIENT_KEY)")
+		}
+		if c.tls == nil {
+			c.tls = &TLSConfig{} // a client certificate implies TLS
+		}
+		id, err := loadClientIdentity(c.clientCert, c.clientKey, c.service)
+		if err == nil {
+			err = id.validAt(time.Now())
+		}
+		if err != nil {
+			return fmt.Errorf("snodra: %w", err)
+		}
+	}
+	if c.tls != nil && c.tls.CAFile != "" {
+		if _, err := readCAFile(c.tls.CAFile); err != nil {
+			return fmt.Errorf("snodra: the hub CA file (TLSConfig.CAFile, SNODRA_SERVER_TLS_CA) '%s' %w", c.tls.CAFile, err)
+		}
 	}
 	return nil
 }

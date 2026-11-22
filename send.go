@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/snodra/snodra-messaging-go/internal/hubpb"
@@ -221,6 +222,8 @@ type call struct {
 	answer chan answer // buffered: the one answer
 	// written is set (under the stream's mu) when the stream's writer took the request.
 	written bool
+	// on is the stream the request was written to; nil until it was.
+	on atomic.Pointer[streamRef]
 }
 
 // pendingCalls are the attempts awaiting their answer, by request id.
@@ -241,6 +244,19 @@ func (p *pendingCalls) remove(id string) {
 	p.mu.Lock()
 	delete(p.byID, id)
 	p.mu.Unlock()
+}
+
+// writtenTo counts the calls written to ref that await their answer.
+func (p *pendingCalls) writtenTo(ref *streamRef) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	n := 0
+	for _, c := range p.byID {
+		if c.on.Load() == ref {
+			n++
+		}
+	}
+	return n
 }
 
 // deliver hands a the call with id; false when nothing waits for it (answered, given up).

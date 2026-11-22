@@ -76,6 +76,13 @@ func (p *streamPermits) arrived() {
 	p.mu.Unlock()
 }
 
+// busy is true while a request that arrived on the stream has not finished.
+func (p *streamPermits) busy() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.ledger.received-p.ledger.returned-p.ledger.pending != 0
+}
+
 // finished gives the permit of a finished request back, at once or batched.
 func (p *streamPermits) finished() {
 	p.mu.Lock()

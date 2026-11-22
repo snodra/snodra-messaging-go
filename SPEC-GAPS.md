@@ -39,6 +39,18 @@ reference library departs from it. In each case this library follows the referen
 - **Question:** should the specification name the budget without a caller's timeout, and the least time left for a
   retry?
 
+### SG-5: when a JWT is renewed
+
+- **Specification:** [protocol.md, Credentials](https://snodra.damoreira.com/library-authors/protocol/) says "both
+  official libraries renew at 80 % of its lifetime", and the timing summary says "JWT renewal: at 80 % of the token's
+  lifetime".
+- **Reference library:** renews when a margin of a fifth of the lifetime, at least 5 s and at most half the lifetime,
+  is left: at 80 % of a lifetime of 25 s or more, at 50 % of a 10 s token (renewed after 5 s), at 4 s of an 8 s one.
+  Between two renewals it waits at least 1 s. The Kotlin library computes the same margin.
+- **This library:** does what the reference libraries do (`credentials.go`, `refreshAt`).
+- **Question:** should the specification state the margin (max(20 %, 5 s), at most half the lifetime) instead of a
+  flat 80 %?
+
 ### SG-6: forwarded tokens without a JWKS
 
 - **Specification:** [messages.md, Forwarded identity](https://snodra.damoreira.com/library-authors/messages/) says a
@@ -53,6 +65,40 @@ reference library departs from it. In each case this library follows the referen
   is logged once per `App`, and the guards pass on the unverified claims (`identity.go`, `internal/jwt`).
 - **Question:** may a library run a guarded handler on an unverified token, or must a guarded handler refuse every
   caller when no JWKS is configured?
+
+### SG-7: a token endpoint that fails before any stream
+
+- **Specification:** [protocol.md, Credentials](https://snodra.damoreira.com/library-authors/protocol/) says what to
+  do after the hub closed a JWT session; it says nothing of an access token that cannot be had at all (the endpoint
+  refuses, answers an error or cannot be reached) when a stream is about to open.
+- **Reference library:** opens no stream (a token past its renewal margin is never presented), keeps the endpoint's
+  error, prefixed "no access token for <service> (<instance>):", as the connection's last rejection (a per-connection
+  value that a later accepted `Register` clears, not the application-wide latest refusal of a hub), logs it at error
+  once per distinct message, and retries at the ordinary backoff (500 ms doubling to 5 s), not at the cap of a
+  refusal. A failed renewal while a stream is registered keeps the current token and retries after 1 s, doubling to
+  30 s.
+- **This library:** does the same, and since it exposes only the application-wide refusal, `App.Rejection` shows the
+  failure (code `UNAUTHENTICATED`, the message naming the access token) until a newer refusal replaces it
+  (`connection.go`, `credentials.go`).
+- **Question:** should the specification say that no stream is opened without a valid token, how that failure is
+  exposed, and at which backoff it is retried?
+
+### SG-8: the client certificate rollover
+
+- **Specification:** [writing-a-library.md, Credentials](https://snodra.damoreira.com/library-authors/writing-a-library/)
+  says the official libraries "watch the files, wait a random delay so replicas do not all leave at once, and roll
+  their hubs over one at a time"; it names no period, no bound of the delay and no limit of a hub's rollover.
+- **Reference library:** reads the files every 3 s; for a valid pair (past its notBefore, before its notAfter, for
+  the service) that a registered connection does not present, waits once per pair a random delay uniform in
+  `[0, min(30 s, a tenth of the presented certificate's remaining validity)]`, reads the files again, then rolls the
+  connections in the order of the configured hubs, one at a time: a `Register` with no types, at most 10 s for the
+  hub's requests (handlers running, requests written to it unanswered) to finish, the half-close, and a reconnect at
+  once with the new pair; the next hub is rolled only once this one registered again, within 30 s, else the rollover
+  stops until the files change again. A pair that cannot be used leaves every connection as it is (logged at error
+  when it persists for a period); one not valid yet is waited for. The Kotlin library also reads the files every 3 s.
+- **This library:** does the same (`tls.go`, `connection.go`).
+- **Question:** should the specification name the period, the delay's bound and the limits, or leave them to each
+  library?
 
 ### SG-9: the bounds of a shutdown
 
@@ -85,8 +131,9 @@ reference library departs from it. In each case this library follows the referen
 - **Reference library:** treats such a close as a refusal whether or not the stream was acknowledged (kept as the
   latest rejection, the next attempt after 80 to 100 % of the backoff cap), except a certificate session's
   `UNAUTHENTICATED`.
-- **This library:** treats it as a refusal whether or not the stream was acknowledged (`connection.go`); the
-  certificate exception comes with client certificates.
+- **This library:** treats it as a refusal whether or not the stream was acknowledged, except an `UNAUTHENTICATED`
+  close of an acknowledged stream when a client certificate is configured, which is an ordinary reconnect at the
+  normal backoff, reading the certificate files again, as in the reference library (`connection.go`).
 - **Question:** is a refusal code on an acknowledged stream a refusal of the registration?
 
 ### SG-16: a configured reconnect backoff outside the specified range
@@ -154,3 +201,17 @@ reference library departs from it. In each case this library follows the referen
   reference library (as the Kotlin library, whose ticks start at the ack).
 - **Question:** should the specification name the drop moment (for example "on the first heartbeat tick after three
   unanswered heartbeats"), so that every library drops a silent hub within the same window?
+
+### SG-20: the static token file
+
+- **Specification:** [writing-a-library.md, Credentials](https://snodra.damoreira.com/library-authors/writing-a-library/)
+  says a token file "is read again before every connect, and an empty file after a good read is a rotation caught
+  half way: keep the last good token"; it says nothing of a file that cannot be read or is empty when the service
+  starts, nor of a token that changes in the file while a stream is registered.
+- **Reference library:** refuses to start when the file cannot be read or is empty. On every heartbeat tick of a
+  registered stream it reads the file again and, when it holds another non-empty token, sends it once as
+  `ClientMessage.credentials` (a rotation without a reconnect); a file that cannot be read or is empty changes
+  nothing. The Kotlin library does both too.
+- **This library:** does the same (`options.go`, `credentials.go`).
+- **Question:** should the specification say that a token file must hold a token at startup, and that a changed
+  token is sent on the live streams?

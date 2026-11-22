@@ -22,13 +22,31 @@ type env struct {
 	// jwksURL and issuer check the callers' tokens (CONFORMANCE_JWKS_URL, CONFORMANCE_ISSUER);
 	// without a URL the tokens are read unverified.
 	jwksURL, issuer string
+	// hubToken is the static token towards the hubs (CONFORMANCE_HUB_TOKEN).
+	hubToken string
+	// oauth2 is the JWT's client-credentials grant (CONFORMANCE_OAUTH2_TOKEN_URL, _CLIENT_ID,
+	// _CLIENT_SECRET); nil without a token URL.
+	oauth2 *snodra.ClientCredentials
+	// tlsCA and tlsServerName are TLS to the hubs (CONFORMANCE_TLS_CA, CONFORMANCE_TLS_SERVER_NAME).
+	tlsCA, tlsServerName string
+	// clientCert and clientKey are the client certificate pair (CONFORMANCE_TLS_CLIENT_CERT,
+	// CONFORMANCE_TLS_CLIENT_KEY).
+	clientCert, clientKey string
 }
 
 // readEnv reads the environment through getenv; a blank variable is an absent one.
 func readEnv(getenv func(string) string) (env, error) {
 	get := func(name string) string { return strings.TrimSpace(getenv(name)) }
 	e := env{service: get("CONFORMANCE_SERVICE_NAME"), instance: get("CONFORMANCE_INSTANCE_ID"), capacity: 64,
-		jwksURL: get("CONFORMANCE_JWKS_URL"), issuer: get("CONFORMANCE_ISSUER")}
+		jwksURL: get("CONFORMANCE_JWKS_URL"), issuer: get("CONFORMANCE_ISSUER"),
+		hubToken: get("CONFORMANCE_HUB_TOKEN"), tlsCA: get("CONFORMANCE_TLS_CA"),
+		tlsServerName: get("CONFORMANCE_TLS_SERVER_NAME"), clientCert: get("CONFORMANCE_TLS_CLIENT_CERT"),
+		clientKey: get("CONFORMANCE_TLS_CLIENT_KEY")}
+	if url := get("CONFORMANCE_OAUTH2_TOKEN_URL"); url != "" {
+		e.oauth2 = &snodra.ClientCredentials{
+			TokenURL: url, ClientID: get("CONFORMANCE_OAUTH2_CLIENT_ID"), ClientSecret: get("CONFORMANCE_OAUTH2_CLIENT_SECRET"),
+		}
+	}
 	for _, h := range strings.Split(get("CONFORMANCE_HUBS"), ",") {
 		if h = strings.TrimSpace(h); h != "" {
 			e.hubs = append(e.hubs, h)
@@ -81,6 +99,18 @@ func (e env) options() []snodra.Option {
 	}
 	if e.jwksURL != "" {
 		opts = append(opts, snodra.JWKS(e.jwksURL, e.issuer))
+	}
+	if e.hubToken != "" {
+		opts = append(opts, snodra.Token(e.hubToken))
+	}
+	if e.oauth2 != nil {
+		opts = append(opts, snodra.JWT(snodra.NewClientCredentials(*e.oauth2)))
+	}
+	if e.tlsCA != "" || e.tlsServerName != "" {
+		opts = append(opts, snodra.TLS(snodra.TLSConfig{CAFile: e.tlsCA, ServerName: e.tlsServerName}))
+	}
+	if e.clientCert != "" || e.clientKey != "" {
+		opts = append(opts, snodra.ClientCertificate(e.clientCert, e.clientKey))
 	}
 	return opts
 }

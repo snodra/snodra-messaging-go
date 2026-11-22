@@ -26,6 +26,17 @@ type timings struct {
 	closeWait time.Duration
 	// permitFlushAfter is how long a batch of permit grants waits after its first one.
 	permitFlushAfter time.Duration
+	// certCheckInterval is how often the client certificate files are read for a renewal.
+	certCheckInterval time.Duration
+	// rollDelayMax bounds the random delay before a rollover to a renewed client certificate
+	// (also bounded by a tenth of the presented certificate's remaining validity).
+	rollDelayMax time.Duration
+	// rollIdleLimit bounds the wait for a rolled hub's requests to finish before its stream is
+	// half-closed.
+	rollIdleLimit time.Duration
+	// rollReconnectLimit bounds the wait for a rolled hub to register again with the renewed
+	// certificate before the next hub is rolled.
+	rollReconnectLimit time.Duration
 }
 
 // permitBatch pending permit grants are written at once; it also caps the low-water mark
@@ -64,6 +75,28 @@ const (
 	jwksFetchTimeout = 5 * time.Second
 )
 
+// The instance's own credentials towards the hubs
+// (https://snodra.damoreira.com/library-authors/protocol/, Credentials).
+const (
+	// tokenFetchTimeout bounds one request to the OAuth2 token endpoint (one TokenSource call).
+	tokenFetchTimeout = 10 * time.Second
+	// defaultTokenLifetime is the lifetime of an access token whose expiry is unknown.
+	defaultTokenLifetime = 60 * time.Second
+	// minRefreshMargin is the least time before its expiry an access token is renewed.
+	minRefreshMargin = 5 * time.Second
+	// tokenRetryMin is the wait after a failed renewal, doubling up to tokenRetryMax; it is also
+	// the least wait between two renewals.
+	tokenRetryMin = 1 * time.Second
+	tokenRetryMax = 30 * time.Second
+	// tokenWakeInterval is how often, at least, the renewal looks at the clocks again: a
+	// suspended machine stops the timers, not the wall clock.
+	tokenWakeInterval = 5 * time.Second
+	// rollSettle is the pause after a rolled hub's empty Register before its requests are counted.
+	rollSettle = 50 * time.Millisecond
+	// rollPoll is how often a rolled hub's requests are counted again.
+	rollPoll = 10 * time.Millisecond
+)
+
 // defaultTimings are the shipped values.
 func defaultTimings() timings {
 	return timings{
@@ -79,6 +112,10 @@ func defaultTimings() timings {
 		subscriptionEnd:    2 * time.Second,
 		closeWait:          2 * time.Second,
 		permitFlushAfter:   50 * time.Millisecond,
+		certCheckInterval:  3 * time.Second,
+		rollDelayMax:       30 * time.Second,
+		rollIdleLimit:      10 * time.Second,
+		rollReconnectLimit: 30 * time.Second,
 	}
 }
 

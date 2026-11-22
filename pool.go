@@ -23,22 +23,33 @@ func newPool(a *App) *pool {
 	return p
 }
 
-// start runs every connection's goroutine.
-func (p *pool) start() {
+// start runs every connection's goroutine, and the client certificate watch.
+func (p *pool) start(a *App) {
 	for _, c := range p.conns {
 		go c.run()
 	}
+	if a.cfg.clientCert != "" {
+		go p.watchCertificates(a)
+	}
 }
 
-// pick returns an acknowledged connection, round-robin; with none, an error wrapping
+// pick returns an acknowledged connection, round-robin, one being rolled over to a renewed
+// client certificate only when no other is acknowledged; with none, an error wrapping
 // ErrNeverSent. The routing key is not used yet.
 func (p *pool) pick(key string) (*hubConn, error) {
 	_ = key
-	var live []*hubConn
+	var live, rolling []*hubConn
 	for _, c := range p.conns {
-		if c.ack() != nil {
+		switch {
+		case c.ack() == nil:
+		case c.isRolling():
+			rolling = append(rolling, c)
+		default:
 			live = append(live, c)
 		}
+	}
+	if len(live) == 0 {
+		live = rolling
 	}
 	if len(live) == 0 {
 		return nil, fmt.Errorf("%w: no hub has acknowledged the registration", ErrNeverSent)

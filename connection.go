@@ -3,6 +3,7 @@ package snodramessaging
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"math/rand/v2"
@@ -11,7 +12,6 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/status"
 
@@ -58,10 +58,24 @@ type hubConn struct {
 
 	stopOnce, closeOnce, deregOnce sync.Once
 
-	mu      sync.Mutex
-	state   connState
-	current *streamRef         // the open stream, nil between streams
-	acked   *hubpb.RegisterAck // the current stream's RegisterAck, nil until it came
+	rollReq chan *streamRef // a client certificate rollover asked for this stream (buffered)
+
+	// The credentials, touched by the connection's goroutine only.
+	token           string          // the static token the streams register with (from a file: the last read)
+	emptyWarned     bool            // the empty token file was warned about since the last good read
+	jwt             *issuedToken    // the access token the Registers carry
+	sentGen         uint64          // the newest token generation the current stream registered with or got
+	presentedJWT    string          // the access token the current stream presented last
+	identity        *clientIdentity // the last good client certificate pair
+	identityProblem string          // the problem with the certificate files warned about last
+	rolled          bool            // the stream ended for a rollover: reconnect at once
+
+	mu            sync.Mutex
+	state         connState
+	current       *streamRef         // the open stream, nil between streams
+	acked         *hubpb.RegisterAck // the current stream's RegisterAck, nil until it came
+	presentedCert *clientIdentity    // the client certificate of the current stream
+	rolling       bool               // being rolled over to a renewed client certificate
 }
 
 func newHubConn(a *App, address string) *hubConn {
@@ -74,6 +88,7 @@ func newHubConn(a *App, address string) *hubConn {
 		closing:   make(chan struct{}),
 		deregDone: make(chan struct{}),
 		done:      make(chan struct{}),
+		rollReq:   make(chan *streamRef, 1),
 	}
 }
 
@@ -155,7 +170,8 @@ func (c *hubConn) run() {
 	// is logged at error once, its repeats at debug. Bounded: past refusalsKept distinct
 	// refusals, the set starts over.
 	logged := map[[2]string]bool{}
-	failures := 0 // ordinary closures since the last ack; the first is logged at warn
+	failures := 0     // ordinary closures since the last ack; the first is logged at warn
+	tokenLogged := "" // the access token failure logged at error last; a repeat goes to debug
 	for !c.stopRequested() {
 		c.setState(stateConnecting)
 		reached, err := c.runStream()
@@ -164,16 +180,50 @@ func (c *hubConn) run() {
 		}
 		if reached {
 			// A hub that acknowledged the Register is healthy: come back quickly.
-			wait, failures = c.t.backoffMin, 0
+			wait, failures, tokenLogged = c.t.backoffMin, 0, ""
 			clear(logged)
+		}
+		if c.rolled {
+			// A client certificate rollover closed the stream on purpose: back at once.
+			c.rolled = false
+			continue
 		}
 		st := status.Convert(err)
 		if err == nil {
 			st = status.New(codes.Unavailable, "the hub ended the stream")
 		}
+		if st.Code() == codes.Unauthenticated {
+			c.retirePresentedToken()
+		}
+		var noToken *noTokenError
 		var pause time.Duration
+		switch {
+		case errors.As(err, &noToken):
+			// No stream was opened: the token endpoint refused or could not be reached. Kept as
+			// the latest rejection, retried at the ordinary backoff.
+			// TODO(spec-gap): SG-7 (a token source failing before any stream).
+			c.setState(stateBackoff)
+			c.app.recordRejection(Rejection{Hub: c.address, Code: codeName(codes.Unauthenticated), Message: noToken.msg, At: time.Now()})
+			pause = backoff.Jitter(wait, c.t.backoffMax, rand.Float64())
+			wait = backoff.Next(wait, c.t.backoffMin, c.t.backoffMax)
+			level := slog.LevelError
+			if noToken.msg == tokenLogged {
+				level = slog.LevelDebug
+			}
+			tokenLogged = noToken.msg
+			c.log.Log(context.Background(), level, "could not get an access token for the hub; no stream opened",
+				"reason", noToken.msg, "retry_in", pause)
+		case reached && st.Code() == codes.Unauthenticated && c.app.cfg.clientCert != "":
+			// The hub ends a certificate session at the certificate's notAfter ("certificate
+			// expired"): an ordinary reconnect, which reads the files again, not a refusal.
+			// TODO(spec-gap): SG-15 (the exception of the certificate session).
+			c.setState(stateBackoff)
+			pause = backoff.Jitter(wait, c.t.backoffMax, rand.Float64())
+			wait = backoff.Next(wait, c.t.backoffMin, c.t.backoffMax)
+			c.log.Info("the hub ended the certificate session; reconnecting with the certificate in the files",
+				"reason", st.Message(), "retry_in", pause)
 		// TODO(spec-gap): SG-15 (a refusal code counts as a refusal also on an acknowledged stream).
-		if isRefusal(st.Code()) {
+		case isRefusal(st.Code()):
 			// TODO(spec-gap): SG-11 (the latest refusal is kept app-wide, never cleared).
 			c.setState(stateRejected)
 			rej := Rejection{Hub: c.address, Code: codeName(st.Code()), Message: st.Message(), At: time.Now()}
@@ -191,7 +241,7 @@ func (c *hubConn) run() {
 			}
 			c.log.Log(context.Background(), level, "the hub refused the registration",
 				"code", rej.Code, "reason", rej.Message, "retry_in", pause)
-		} else {
+		default:
 			// TODO(spec-gap): SG-1 (UNAVAILABLE keeps doubling: the floor comes back only after an ack).
 			c.setState(stateBackoff)
 			pause = backoff.Jitter(wait, c.t.backoffMax, rand.Float64())
@@ -220,8 +270,35 @@ func (c *hubConn) run() {
 // runStream runs one stream from its opening to its end. reached reports whether it was
 // acknowledged; err is why it ended (nil: shutdown, or the hub finished after the half-close).
 func (c *hubConn) runStream() (reached bool, err error) {
+	if err := c.resolveToken(); err != nil {
+		return false, err
+	}
+	var tokens <-chan struct{} // closed when the provider publishes a newer access token
+	if p := c.app.tokens; p != nil {
+		_, tokens = p.follow() // before the fetch: a token published meanwhile is a change to follow
+		ctx, cancel := c.stopCtx()
+		tok, err := p.token(ctx)
+		cancel()
+		if err != nil {
+			if c.stopRequested() {
+				return false, nil
+			}
+			return false, &noTokenError{msg: fmt.Sprintf("no access token for %s (%s): %v", c.app.cfg.service, c.app.cfg.instance, err)}
+		}
+		c.jwt, c.sentGen, c.presentedJWT = tok, tok.gen, tok.value
+	}
+	var id *clientIdentity
+	if c.app.cfg.clientCert != "" {
+		if id, err = c.loadIdentity(); err != nil {
+			return false, err
+		}
+	}
+	creds, err := c.transport(id)
+	if err != nil {
+		return false, err
+	}
 	cc, err := grpc.NewClient("passthrough:///"+c.address,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithTransportCredentials(creds),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
 			Time: c.t.keepaliveTime, Timeout: c.t.keepaliveTimeout, PermitWithoutStream: true,
 		}))
@@ -241,6 +318,7 @@ func (c *hubConn) runStream() (reached bool, err error) {
 
 	ref := newStreamRef(c.app.cfg.writeHook)
 	register := c.app.registerMsg()
+	register.Credentials = c.credentials()
 	permits := newStreamPermits(ref, register.GetInitialPermits(), c.t.permitFlushAfter)
 	_ = ref.send(&hubpb.ClientMessage{Message: &hubpb.ClientMessage_Register{Register: register}})
 	_ = ref.send(heartbeat())
@@ -282,7 +360,20 @@ func (c *hubConn) runStream() (reached bool, err error) {
 			}
 		}
 	}()
-	return c.serve(ref, permits, inbox, ended, written, handshake.C)
+	return c.serve(&streamRun{ref: ref, permits: permits, inbox: inbox, ended: ended, written: written,
+		handshake: handshake.C, tokens: tokens, identity: id})
+}
+
+// streamRun is what serve needs of one stream.
+type streamRun struct {
+	ref       *streamRef
+	permits   *streamPermits
+	inbox     <-chan *hubpb.ServerMessage
+	ended     <-chan error
+	written   <-chan error
+	handshake <-chan time.Time
+	tokens    <-chan struct{} // closed at a newer access token; nil without JWT
+	identity  *clientIdentity // the client certificate presented; nil without one
 }
 
 // open starts the Connect stream, giving up at the handshake deadline, at the shutdown and at
@@ -314,8 +405,12 @@ func (c *hubConn) open(ctx context.Context, cancel context.CancelFunc, cc *grpc.
 
 // serve is the stream's loop: the ack, heartbeats and the silent-hub check, the forwarded
 // requests (also before the ack), the empty Register and the half-close at shutdown.
-func (c *hubConn) serve(ref *streamRef, permits *streamPermits, inbox <-chan *hubpb.ServerMessage, ended, written <-chan error,
-	handshake <-chan time.Time) (reached bool, err error) {
+// It also follows the credentials: a newer access token, or a changed token file, goes to the
+// registered stream as a credentials refresh; and it rolls the stream over to a renewed client
+// certificate when asked.
+func (c *hubConn) serve(sr *streamRun) (reached bool, err error) {
+	ref, permits, inbox, ended, written, handshake := sr.ref, sr.permits, sr.inbox, sr.ended, sr.written, sr.handshake
+	tokens := sr.tokens
 	interval := c.t.heartbeatBeforeAck
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -348,6 +443,14 @@ func (c *hubConn) serve(ref *streamRef, permits *streamPermits, inbox <-chan *hu
 		closeWait = closeTimer.C
 	}
 	registers, acks, deregisterAt := 1, 0, 0 // Registers written, acks received, the empty one's number
+	// A client certificate rollover: the empty Register is written, then the stream's requests
+	// are counted (after rollSettle, then every rollPoll) until none is left or rollIdleLimit.
+	rollTimer := time.NewTimer(time.Hour)
+	rollTimer.Stop()
+	defer rollTimer.Stop()
+	var rollCheck <-chan time.Time
+	var rollUntil time.Time
+	rolling := false
 
 	for {
 		select {
@@ -372,7 +475,11 @@ func (c *hubConn) serve(ref *streamRef, permits *streamPermits, inbox <-chan *hu
 					if !halfClosed {
 						watchSilence, lastEcho, unanswered = true, time.Now(), 0
 					}
-					c.wentLive(ref, k.RegisterAck, interval)
+					c.wentLive(ref, k.RegisterAck, interval, sr.identity)
+					if p := c.app.tokens; p != nil { // a token published since the Register
+						tok, _ := p.follow()
+						c.followToken(ref, true, tok)
+					}
 				}
 				if deregisterAt > 0 && acks >= deregisterAt {
 					c.deregistered()
@@ -419,18 +526,49 @@ func (c *hubConn) serve(ref *streamRef, permits *streamPermits, inbox <-chan *hu
 				unanswered++
 			}
 			_ = ref.send(heartbeat())
+			if reached && !rolling {
+				c.followTokenFile(ref)
+			}
+		case <-tokens:
+			var tok *issuedToken
+			tok, tokens = c.app.tokens.follow()
+			if !halfClosed {
+				c.followToken(ref, reached, tok)
+			}
+		case r := <-c.rollReq:
+			if r != ref || !reached || halfClosed || rolling || stopping == nil {
+				break // not this stream's, or it is leaving anyway
+			}
+			rolling = true
+			registers++
+			_ = ref.send(&hubpb.ClientMessage{Message: &hubpb.ClientMessage_Register{Register: c.emptyRegister()}})
+			rollUntil = time.Now().Add(c.t.rollIdleLimit)
+			rollTimer.Reset(rollSettle)
+			rollCheck = rollTimer.C
+		case <-rollCheck:
+			idle := c.streamIdle(ref, permits)
+			if !idle && time.Now().Before(rollUntil) {
+				rollTimer.Reset(rollPoll)
+				break
+			}
+			if !idle {
+				c.log.Warn("requests still running after the rollover's wait; closing the hub stream for the certificate rollover anyway",
+					"waited", c.t.rollIdleLimit)
+			}
+			rollCheck, c.rolled = nil, true
+			halfClose()
 		case <-handshake:
 			return false, status.Errorf(codes.DeadlineExceeded, "no RegisterAck within %v", c.t.handshakeTimeout)
 		case <-stopping:
-			stopping = nil
-			if !reached {
-				c.deregistered() // nothing acknowledged, nothing to take out of the routing
+			stopping, rollCheck = nil, nil
+			if !reached || halfClosed {
+				c.deregistered() // nothing acknowledged (or left already), nothing to take out of the routing
 				break
 			}
 			c.setState(stateDraining)
 			registers++
 			deregisterAt = registers
-			_ = ref.send(&hubpb.ClientMessage{Message: &hubpb.ClientMessage_Register{Register: c.app.emptyRegisterMsg()}})
+			_ = ref.send(&hubpb.ClientMessage{Message: &hubpb.ClientMessage_Register{Register: c.emptyRegister()}})
 		case <-closing:
 			// A request this stream forwarded after the shutdown's drain found no handler
 			// running is still answered: the half-close waits for the handlers in flight, until
@@ -463,18 +601,33 @@ func (c *hubConn) serve(ref *streamRef, permits *streamPermits, inbox <-chan *hu
 	}
 }
 
-// wentLive records the stream's RegisterAck.
-func (c *hubConn) wentLive(ref *streamRef, ack *hubpb.RegisterAck, interval time.Duration) {
+// wentLive records the stream's RegisterAck, and the client certificate it presents.
+func (c *hubConn) wentLive(ref *streamRef, ack *hubpb.RegisterAck, interval time.Duration, id *clientIdentity) {
 	c.mu.Lock()
+	var before *clientIdentity
 	if c.current == ref {
 		c.acked = ack
 		if c.state == stateAwaitingAck {
 			c.state = stateLive
 		}
+		before, c.presentedCert = c.presentedCert, id
 	}
 	c.mu.Unlock()
 	c.log.Info("registered with the hub", "hub_id", ack.GetHubId(), "heartbeat", interval)
+	switch {
+	case id == nil:
+	case before == nil:
+		c.log.Info("presenting the client certificate", "fingerprint", id.fingerprint, "not_after", id.notAfter)
+	case before.fingerprint != id.fingerprint:
+		c.log.Info("presenting a renewed client certificate", "fingerprint", id.fingerprint, "not_after", id.notAfter)
+	}
 	c.app.connLive()
+}
+
+// streamIdle is true when no handler of the stream's requests runs and none of the requests
+// written to it awaits its answer.
+func (c *hubConn) streamIdle(ref *streamRef, permits *streamPermits) bool {
+	return !permits.busy() && c.app.calls.writtenTo(ref) == 0
 }
 
 func heartbeat() *hubpb.ClientMessage {
@@ -637,6 +790,7 @@ func (r *streamRef) next(ctx context.Context, done <-chan struct{}) (m *hubpb.Cl
 			r.queue = r.queue[1:]
 			if f.call != nil {
 				f.call.written = true
+				f.call.on.Store(r)
 				r.requests--
 				r.freeRoom()
 			}

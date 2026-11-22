@@ -102,3 +102,68 @@ func TestEnvReadsTheCallersIssuer(t *testing.T) {
 		t.Fatal("New accepted a JWKS without an issuer")
 	}
 }
+
+func TestEnvReadsTheCredentials(t *testing.T) {
+	base := map[string]string{
+		"CONFORMANCE_SERVICE_NAME": "conformance-go",
+		"CONFORMANCE_INSTANCE_ID":  "i-7",
+		"CONFORMANCE_HUBS":         "127.0.0.1:7000",
+	}
+	with := func(extra map[string]string) env {
+		t.Helper()
+		vars := map[string]string{}
+		for k, v := range base {
+			vars[k] = v
+		}
+		for k, v := range extra {
+			vars[k] = v
+		}
+		e, err := readEnv(lookup(vars))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return e
+	}
+	e := with(map[string]string{"CONFORMANCE_HUB_TOKEN": "conformance-token"})
+	if e.hubToken != "conformance-token" {
+		t.Fatalf("token %q", e.hubToken)
+	}
+	if _, err := snodra.New(e.options()...); err != nil {
+		t.Fatalf("New with a token: %v", err)
+	}
+	e = with(map[string]string{
+		"CONFORMANCE_OAUTH2_TOKEN_URL":     "http://127.0.0.1:9000/token",
+		"CONFORMANCE_OAUTH2_CLIENT_ID":     "conformance",
+		"CONFORMANCE_OAUTH2_CLIENT_SECRET": "conformance-secret",
+	})
+	if e.oauth2 == nil || e.oauth2.TokenURL != "http://127.0.0.1:9000/token" || e.oauth2.ClientID != "conformance" ||
+		e.oauth2.ClientSecret != "conformance-secret" {
+		t.Fatalf("oauth2 %v", e.oauth2)
+	}
+	if _, err := snodra.New(e.options()...); err != nil {
+		t.Fatalf("New with a JWT: %v", err)
+	}
+	// Both: the library refuses them, which proves both reached it.
+	e = with(map[string]string{
+		"CONFORMANCE_HUB_TOKEN":            "conformance-token",
+		"CONFORMANCE_OAUTH2_TOKEN_URL":     "http://127.0.0.1:9000/token",
+		"CONFORMANCE_OAUTH2_CLIENT_SECRET": "conformance-secret",
+	})
+	if _, err := snodra.New(e.options()...); err == nil || !strings.Contains(err.Error(), "use one credential") {
+		t.Fatalf("New with a token and a JWT: %v", err)
+	}
+	e = with(map[string]string{
+		"CONFORMANCE_TLS_CA":          "/run/ca.pem",
+		"CONFORMANCE_TLS_SERVER_NAME": "conformance-hub.test",
+		"CONFORMANCE_TLS_CLIENT_CERT": "/run/client.crt",
+		"CONFORMANCE_TLS_CLIENT_KEY":  "/run/client.key",
+	})
+	if e.tlsCA != "/run/ca.pem" || e.tlsServerName != "conformance-hub.test" || e.clientCert != "/run/client.crt" ||
+		e.clientKey != "/run/client.key" {
+		t.Fatalf("tls %+v", e)
+	}
+	// The files do not exist: New reads them, which proves they reached it.
+	if _, err := snodra.New(e.options()...); err == nil || !strings.Contains(err.Error(), "/run/client.crt") {
+		t.Fatalf("New with missing certificate files: %v", err)
+	}
+}

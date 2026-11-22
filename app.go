@@ -47,6 +47,7 @@ type App struct {
 	commandTypes, queryTypes []string
 	calls                    *pendingCalls // the sent requests awaiting their answer
 	identity                 *identityResolver
+	tokens                   *tokenProvider // the access tokens towards the hubs; nil without JWT
 
 	drainMu    sync.Mutex
 	drainUntil time.Time // when the shutdown's handler drain ends; zero before it
@@ -63,7 +64,9 @@ type App struct {
 // Rejection is a hub's refusal of the instance's Register: the hub closed the stream with
 // ALREADY_EXISTS (a type another service owns), INVALID_ARGUMENT, UNAUTHENTICATED or
 // PERMISSION_DENIED instead of acknowledging it. The instance keeps running and retries at
-// its backoff cap.
+// its backoff cap. With [JWT], a failure to get an access token, when no stream could be
+// opened, is kept too (Code UNAUTHENTICATED, a Message that names the access token); it is
+// retried at the ordinary backoff.
 type Rejection struct {
 	// Hub is the hub's address (host:port); a refused Register carries no hub id.
 	Hub string
@@ -93,6 +96,10 @@ func New(opts ...Option) (*App, error) {
 	}
 	hctx, cancel := context.WithCancel(context.Background())
 	log := cfg.logger.With("service", cfg.service, "instance", cfg.instance)
+	var tokens *tokenProvider
+	if cfg.tokenSource != nil {
+		tokens = newTokenProvider(cfg.tokenSource, log)
+	}
 	return &App{
 		cfg:            cfg,
 		log:            log,
@@ -107,6 +114,7 @@ func New(opts ...Option) (*App, error) {
 		handlers:       map[string]*handler{},
 		calls:          newPendingCalls(),
 		identity:       newIdentityResolver(cfg, log),
+		tokens:         tokens,
 	}, nil
 }
 
@@ -132,7 +140,7 @@ func (a *App) Start(ctx context.Context) error {
 	a.freezeTypes()
 	a.started = true
 	a.pool = newPool(a)
-	a.pool.start()
+	a.pool.start(a)
 	return nil
 }
 
@@ -213,6 +221,9 @@ func (a *App) kill() {
 	a.killOnce.Do(func() {
 		close(a.killed)
 		a.cancelHandlers()
+		if a.tokens != nil {
+			a.tokens.close()
+		}
 	})
 }
 

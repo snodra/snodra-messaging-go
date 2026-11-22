@@ -36,6 +36,17 @@ const defaultHubAddress = "static://snodra-server:7000"
 //     tokens are read unverified)
 //   - SNODRA_SECURITY_ROLES_CLAIM: [RolesClaim] (default "roles")
 //   - SNODRA_FORWARD_JWT: [ForwardJWT], true or false (default true)
+//   - SNODRA_SERVER_TOKEN, SNODRA_SERVER_TOKEN_FILE: [Token], [TokenFile]
+//   - SNODRA_SERVER_OAUTH2_TOKEN_URI: [JWT] with [NewClientCredentials], from
+//     SNODRA_SERVER_OAUTH2_CLIENT_ID (default the service name), SNODRA_SERVER_OAUTH2_CLIENT_SECRET
+//     or SNODRA_SERVER_OAUTH2_CLIENT_SECRET_FILE, SNODRA_SERVER_OAUTH2_SCOPE and
+//     SNODRA_SERVER_OAUTH2_CA; the other SNODRA_SERVER_OAUTH2_* variables need the token URI
+//   - SNODRA_SERVER_TLS: true sets [TLS] with SNODRA_SERVER_TLS_CA and
+//     SNODRA_SERVER_TLS_SERVER_NAME (which need it); default false
+//   - SNODRA_SERVER_TLS_CLIENT_CERT, SNODRA_SERVER_TLS_CLIENT_KEY: [ClientCertificate], which
+//     implies TLS (an error with SNODRA_SERVER_TLS=false)
+//
+// The credential kinds (token, JWT, client certificate) exclude each other.
 func FromEnv() Option {
 	return func(c *config) error { return c.applyEnv(os.Getenv) }
 }
@@ -109,7 +120,63 @@ func (c *config) applyEnv(getenv func(string) string) error {
 	if err := c.applySecurityEnv(get); err != nil {
 		return err
 	}
+	if err := c.applyCredentialsEnv(get); err != nil {
+		return err
+	}
 	return c.applySendEnv(get)
+}
+
+// applyCredentialsEnv reads the instance's credential towards the hubs, with the reference
+// library's rules.
+func (c *config) applyCredentialsEnv(get func(string) (string, bool)) error {
+	if v, ok := get("SNODRA_SERVER_TOKEN"); ok {
+		c.token = newSecret(v)
+	}
+	if v, ok := get("SNODRA_SERVER_TOKEN_FILE"); ok {
+		c.tokenFile = v
+	}
+	tlsFlag, tlsSet := false, false
+	if v, ok := get("SNODRA_SERVER_TLS"); ok {
+		on, err := envFlag("SNODRA_SERVER_TLS", v)
+		if err != nil {
+			return err
+		}
+		tlsFlag, tlsSet = on, true
+	}
+	ca, hasCA := get("SNODRA_SERVER_TLS_CA")
+	name, hasName := get("SNODRA_SERVER_TLS_SERVER_NAME")
+	cert, hasCert := get("SNODRA_SERVER_TLS_CLIENT_CERT")
+	key, hasKey := get("SNODRA_SERVER_TLS_CLIENT_KEY")
+	clientCert := hasCert || hasKey
+	switch {
+	case clientCert && tlsSet && !tlsFlag:
+		return fmt.Errorf("snodra: SNODRA_SERVER_TLS_CLIENT_CERT and SNODRA_SERVER_TLS_CLIENT_KEY need TLS, but SNODRA_SERVER_TLS=false")
+	case tlsFlag || clientCert:
+		c.tls = &TLSConfig{CAFile: ca, ServerName: name}
+		if clientCert {
+			c.clientCert, c.clientKey = cert, key
+		}
+	case hasCA || hasName:
+		return fmt.Errorf("snodra: SNODRA_SERVER_TLS_CA and SNODRA_SERVER_TLS_SERVER_NAME need SNODRA_SERVER_TLS=true")
+	}
+	id, hasID := get("SNODRA_SERVER_OAUTH2_CLIENT_ID")
+	sec, hasSecret := get("SNODRA_SERVER_OAUTH2_CLIENT_SECRET")
+	secFile, hasSecretFile := get("SNODRA_SERVER_OAUTH2_CLIENT_SECRET_FILE")
+	scope, hasScope := get("SNODRA_SERVER_OAUTH2_SCOPE")
+	oauthCA, hasOAuthCA := get("SNODRA_SERVER_OAUTH2_CA")
+	uri, hasURI := get("SNODRA_SERVER_OAUTH2_TOKEN_URI")
+	switch {
+	case hasURI:
+		if !hasID {
+			id = c.service // "" here: New fills it with the service name
+		}
+		c.tokenSource = NewClientCredentials(ClientCredentials{
+			TokenURL: uri, ClientID: id, ClientSecret: sec, ClientSecretFile: secFile, Scope: scope, CAFile: oauthCA,
+		})
+	case hasID || hasSecret || hasSecretFile || hasScope || hasOAuthCA:
+		return fmt.Errorf("snodra: the SNODRA_SERVER_OAUTH2_* variables need SNODRA_SERVER_OAUTH2_TOKEN_URI")
+	}
+	return nil
 }
 
 // applySecurityEnv reads the settings of the callers' tokens.
