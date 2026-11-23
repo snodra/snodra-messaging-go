@@ -163,7 +163,8 @@ func TestALocalCallActsForTheHandledRequestsCaller(t *testing.T) {
 }
 
 func TestALocalCallFailsAsThroughTheHub(t *testing.T) {
-	app := newApp(t, Hubs("127.0.0.1:1"), DefaultRetry(RetryPolicy{MaxAttempts: 3, InitialBackoff: ms, Multiplier: 2, MaxBackoff: ms}))
+	app := newApp(t, Hubs("127.0.0.1:1"), DefaultRetry(RetryPolicy{MaxAttempts: 3, InitialBackoff: ms, Multiplier: 2, MaxBackoff: ms}),
+		JWKS("https://issuer.test/jwks", testIssuer))
 	calls := 0
 	is(t, HandleCommand(app, func(context.Context, PlaceOrder) (Empty, error) {
 		calls++

@@ -40,8 +40,7 @@ func registerHandlers(app *snodra.App, e env) error {
 		}, snodra.Shared()),
 		snodra.HandleCommand(app, s.fail),
 		snodra.HandleCommand(app, func(_ context.Context, m Strict) (StrictAnswer, error) { return StrictAnswer(m), nil }),
-		// An authenticated caller, and not the subject the contract names as refused.
-		snodra.HandleCommand(app, guarded, snodra.RequireCaller(func(c snodra.Caller) bool { return c.Subject != "conformance-refused" })),
+		registerGuarded(app, e),
 		snodra.HandleCommand(app, s.relay),
 		snodra.HandleCommand(app, func(ctx context.Context, m Send) (json.RawMessage, error) { return s.send(ctx, m) }),
 		snodra.HandleQuery(app, func(ctx context.Context, m Outcome) (json.RawMessage, error) { return s.outcome(ctx, m) }),
@@ -78,6 +77,19 @@ func (s *service) echo(ctx context.Context, payload []byte) EchoAnswer {
 		a.RequestID = info.ID
 	}
 	return a
+}
+
+// registerGuarded registers conformance.Guarded: for an authenticated caller that is not the
+// subject the contract names as refused. A guard needs the issuer's keys; without them (the
+// runner gives them only to the checks that call Guarded) no caller can be verified, so the
+// handler refuses every one itself.
+func registerGuarded(app *snodra.App, e env) error {
+	if e.jwksURL == "" {
+		return snodra.HandleCommand(app, func(context.Context, Guarded) (GuardedAnswer, error) {
+			return GuardedAnswer{}, snodra.Unauthenticated("handler requires authentication")
+		})
+	}
+	return snodra.HandleCommand(app, guarded, snodra.RequireCaller(func(c snodra.Caller) bool { return c.Subject != "conformance-refused" }))
 }
 
 // guarded answers the count and the caller's subject; its guard ran before the payload was

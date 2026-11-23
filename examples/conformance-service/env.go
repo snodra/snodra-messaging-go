@@ -20,7 +20,7 @@ type env struct {
 	// CONFORMANCE_RETRY_INITIAL_BACKOFF_MS (default 100); nil when the first is not set.
 	retry *snodra.RetryPolicy
 	// jwksURL and issuer check the callers' tokens (CONFORMANCE_JWKS_URL, CONFORMANCE_ISSUER);
-	// without a URL the tokens are read unverified.
+	// without a URL no caller is verified.
 	jwksURL, issuer string
 	// hubToken is the static token towards the hubs (CONFORMANCE_HUB_TOKEN).
 	hubToken string

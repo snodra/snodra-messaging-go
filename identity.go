@@ -14,33 +14,29 @@ import (
 )
 
 // Caller is who sent a request: the acting user of its forwarded token (the authorization
-// header, "Bearer <JWT>"). See https://snodra.damoreira.com/library-authors/messages/
-// (Forwarded identity).
+// header, "Bearer <JWT>"), verified against the issuer's keys ([JWKS]). Without a JWKS no token
+// is an identity: every caller is anonymous. See
+// https://snodra.damoreira.com/library-authors/messages/ (Forwarded identity).
 type Caller struct {
 	// Subject is the token's sub claim.
 	Subject string
 	// Roles are read from the token's roles claim (see [RolesClaim]).
 	Roles []string
-	// Verified is true when this process checked the token against the issuer's JWKS (see
-	// [JWKS]); false when the token was read without verification.
-	Verified bool
 }
 
 // HasRole reports whether the caller has role.
 func (c Caller) HasRole(role string) bool { return slices.Contains(c.Roles, role) }
 
-// RequireAuthenticated lets only a caller with a token run the handler: a request without one is
-// answered UNAUTHENTICATED, decided before the payload is decoded. With [JWKS] the token is
-// verified (signature, issuer, expiry) first; without it the claims of any signed token are read
-// unverified and can be forged by whoever reaches the hub (see [Caller].Verified).
+// RequireAuthenticated lets only a caller with a verified token run the handler: a request
+// without one is answered UNAUTHENTICATED, decided before the payload is decoded. Every guard
+// needs [JWKS]: registering a guarded handler without it is an error, and [App.Start] fails.
 func RequireAuthenticated() HandlerOption {
 	return RequireCaller(func(Caller) bool { return true })
 }
 
 // RequireRole lets only a caller with role run the handler: an anonymous caller is answered
 // UNAUTHENTICATED, a caller without the role PERMISSION_DENIED, decided before the payload is
-// decoded. The roles come from the token's claims, verified only with [JWKS] (see
-// [Caller].Verified).
+// decoded. The roles come from the token's verified claims (see [RolesClaim]); it needs [JWKS].
 func RequireRole(role string) HandlerOption {
 	return RequireCaller(func(c Caller) bool { return c.HasRole(role) })
 }
@@ -48,8 +44,7 @@ func RequireRole(role string) HandlerOption {
 // RequireCaller lets only a caller allow accepts run the handler: an anonymous caller is
 // answered UNAUTHENTICATED, a caller allow refuses PERMISSION_DENIED, decided before the
 // payload is decoded. When a handler has several of these options, every one must accept. The
-// Caller is read from the token's claims, verified only with [JWKS]: without it, allow can check
-// [Caller].Verified to refuse unverified callers.
+// Caller is read from the token's verified claims; it needs [JWKS].
 func RequireCaller(allow func(Caller) bool) HandlerOption {
 	return func(c *handlerConfig) {
 		if allow == nil {
@@ -62,9 +57,11 @@ func RequireCaller(allow func(Caller) bool) HandlerOption {
 
 // JWKS checks every forwarded token against the issuer's signing keys at url (RS256), its
 // issuer (the iss claim must be issuer) and its expiry, before a handler runs; a token that
-// fails is answered UNAUTHENTICATED, also when the keys cannot be fetched. Without it, the claims
-// of a signed token are read without verification and a warning is logged once (see
-// SPEC-GAPS.md, SG-6): set it wherever the hub is reachable by callers you do not trust.
+// fails is answered UNAUTHENTICATED, also when the keys cannot be fetched. It is required by every
+// guard ([RequireAuthenticated], [RequireRole], [RequireCaller]). Without it a token is no
+// identity: the caller is anonymous (the token still goes on with the requests the handler
+// sends, see [ForwardJWT]), a token that is not a bearer token, not a JWS or unsigned is still
+// answered UNAUTHENTICATED, and a warning is logged once (see SPEC-GAPS.md, SG-6).
 func JWKS(url, issuer string) Option {
 	return func(c *config) error {
 		url, issuer = strings.TrimSpace(url), strings.TrimSpace(issuer)
@@ -89,12 +86,12 @@ func RolesClaim(path string) Option {
 	}
 }
 
-// warnUnverified is logged once when a token is read without a JWKS.
-const warnUnverified = "forwarded identities are trusted without verification: no JWKS configured (JWKS, SNODRA_JWKS_URL)"
+// warnUnverified is logged once when a token arrives without a JWKS to verify it.
+const warnUnverified = "forwarded tokens are not verified without a JWKS (JWKS, SNODRA_JWKS_URL): their callers are anonymous"
 
 // identityResolver turns a request's authorization header into its caller.
 type identityResolver struct {
-	verifier *jwt.Verifier // nil: signed tokens are read unverified
+	verifier *jwt.Verifier // nil: no token is an identity
 	roles    rolesClaim
 	warned   atomic.Bool
 	log      *slog.Logger
@@ -109,9 +106,10 @@ func newIdentityResolver(cfg config, log *slog.Logger) *identityResolver {
 }
 
 // resolve is the caller of a request whose authorization header is authorization: nil (an
-// anonymous caller) when it is absent; an error, whose text is the short reason the request is
-// answered UNAUTHENTICATED with, for a header that is not a bearer token or a token that fails.
-// TODO(spec-gap): SG-6 (without a JWKS, signed tokens are read unverified).
+// anonymous caller) when it is absent, and for any token without a JWKS; an error, whose text is
+// the short reason the request is answered UNAUTHENTICATED with, for a header that is not a
+// bearer token or a token that fails (without a JWKS: one that is not a signed JWS).
+// TODO(spec-gap): SG-6 (without a JWKS a token is no identity, and a guard is a startup error).
 func (r *identityResolver) resolve(ctx context.Context, authorization string) (*Caller, error) {
 	raw := strings.TrimSpace(authorization)
 	if raw == "" {
@@ -134,7 +132,8 @@ func (r *identityResolver) resolve(ctx context.Context, authorization string) (*
 		if !r.warned.Swap(true) {
 			r.log.Warn(warnUnverified)
 		}
-		claims, err = jwt.Unverified(token)
+		// Only what can be judged without the keys: the claims are never read as an identity.
+		_, err = jwt.Unverified(token)
 	}
 	if err != nil {
 		var je *jwt.Error
@@ -147,8 +146,11 @@ func (r *identityResolver) resolve(ctx context.Context, authorization string) (*
 		}
 		return nil, err // its text is the short reason
 	}
+	if r.verifier == nil {
+		return nil, nil
+	}
 	sub, _ := claims["sub"].(string)
-	return &Caller{Subject: sub, Roles: r.roles.of(claims), Verified: r.verifier != nil}, nil
+	return &Caller{Subject: sub, Roles: r.roles.of(claims)}, nil
 }
 
 // rolesClaim is where a token's roles are: the space-separated scope claim, or a path of claim

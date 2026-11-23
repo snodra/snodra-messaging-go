@@ -36,7 +36,7 @@ type config struct {
 	// handles itself ([AlwaysThroughHub]).
 	alwaysThroughHub bool
 
-	jwksURL, issuer string // the callers' tokens are verified against them; "": read unverified
+	jwksURL, issuer string // the callers' tokens are verified against them; "": no token is an identity
 	rolesClaim      string // where a token's roles are; "": roles
 	forwardJWT      bool   // nested requests carry the handled request's authorization header
 

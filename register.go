@@ -92,8 +92,8 @@ func (e *decodeError) Unwrap() error { return e.err }
 //
 // Handlers are registered before [App.Start]. A registration error (after Start:
 // [ErrRegistrationClosed]; a type registered twice, as a command and a query, an empty type
-// name, an interface type parameter, a nil handler, a [RequireCaller] without a function, a
-// command with [Shared]) is returned, and also kept: Start returns every one of them, joined,
+// name, an interface type parameter, a nil handler, a [RequireCaller] without a function, a guard
+// without [JWKS], a command with [Shared]) is returned, and also kept: Start returns every one of them, joined,
 // and does not start.
 // See https://snodra.damoreira.com/library-authors/protocol/ (Handling a request).
 func HandleCommand[C Message, R any](app *App, h func(context.Context, C) (R, error), opts ...HandlerOption) error {
@@ -218,6 +218,11 @@ func (a *App) addHandler(h *handler, err error) error {
 func (a *App) checkHandler(h *handler) error {
 	if a.started || a.stopping {
 		return fmt.Errorf("%w: %s %s registered after Start", ErrRegistrationClosed, h.kind, h.name)
+	}
+	if len(h.cfg.guards) > 0 && a.cfg.jwksURL == "" {
+		// Without the issuer's keys no caller can be verified, so no guard could ever pass on
+		// anything but a forgeable claim.
+		return fmt.Errorf("snodra: %s %s has a guard (RequireAuthenticated, RequireRole or RequireCaller), which needs a JWKS to verify its callers: configure JWKS (or SNODRA_JWKS_URL and SNODRA_ISSUER)", h.kind, h.name)
 	}
 	if prev, ok := a.handlers[h.name]; ok {
 		if prev.kind != h.kind {

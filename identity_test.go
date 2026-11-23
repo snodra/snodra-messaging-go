@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -134,11 +135,13 @@ func placeOrder(t *testing.T, s *fakehub.Stream, authorization, payload string) 
 }
 
 func TestTheCallerIsCheckedBeforeDecoding(t *testing.T) {
-	s, _ := guarded(t, nil, RequireAuthenticated())
+	key, _ := testKeys(t)
+	srv, _ := testJWKS(t)
+	s, _ := guarded(t, []Option{JWKS(srv.URL, testIssuer)}, RequireAuthenticated())
 	code, msg := placeOrder(t, s, "", "not json")
 	is(t, code, hubpb.ErrorCode_UNAUTHENTICATED) // not INVALID_REQUEST: an anonymous caller learns nothing of the payload
 	is(t, msg, "handler requires authentication")
-	code, _ = placeOrder(t, s, "Bearer "+readableToken(t, map[string]any{"sub": "u-1"}), "not json")
+	code, _ = placeOrder(t, s, "Bearer "+mint(t, key, "k1", userClaims("u-1", time.Minute, nil)), "not json")
 	is(t, code, hubpb.ErrorCode_INVALID_REQUEST) // an authenticated caller gets the decode error
 }
 
@@ -174,7 +177,6 @@ func TestCallerValidation(t *testing.T) {
 	is(t, got != nil, true)
 	is(t, got.Subject, "u-1")
 	is(t, slices.Equal(got.Roles, []string{"orders-user"}), true)
-	is(t, got.Verified, true)
 	is(t, got.HasRole("orders-user"), true)
 	is(t, got.HasRole("admin"), false)
 
@@ -253,22 +255,58 @@ func TestAnUnknownKidRefreshesTheJWKSAtMostOncePerMinute(t *testing.T) {
 	is(t, fetches.Load(), int32(2)) // a known kid is served from the cache
 }
 
-func TestWithoutJWKSSignedTokensAreReadUnverified(t *testing.T) { // SG-6
+func TestWithoutJWKSTheCallerIsAnonymous(t *testing.T) { // SG-6
 	rec := &logRecorder{}
-	s, callers := guarded(t, []Option{Logger(slog.New(rec))}, RequireAuthenticated())
+	s, callers := guarded(t, []Option{Logger(slog.New(rec))})
 	for range 2 {
 		code, _ := placeOrder(t, s, "Bearer "+readableToken(t, map[string]any{"sub": "u-1", "roles": []any{"orders-user"}}), `{}`)
-		is(t, code, hubpb.ErrorCode(0)) // the guard passes
-		got := receive(t, callers)
-		is(t, got.Subject, "u-1")
-		is(t, got.Verified, false)
-		is(t, got.Roles[0], "orders-user")
+		is(t, code, hubpb.ErrorCode(0)) // served, for nobody: its claims are no identity
+		is(t, receive(t, callers) == nil, true)
 	}
 	is(t, rec.count(slog.LevelWarn, warnUnverified), 1) // once
+	// What can be judged without the keys is still refused.
 	unsigned := jsonSegment(t, map[string]any{"alg": "none"}) + "." + jsonSegment(t, map[string]any{"sub": "u-1"}) + "."
-	code, msg := placeOrder(t, s, "Bearer "+unsigned, `{}`)
-	is(t, code, hubpb.ErrorCode_UNAUTHENTICATED)
-	is(t, msg, "unsigned token")
+	for auth, want := range map[string]string{
+		"Bearer " + unsigned: "unsigned token",
+		"Bearer a.b.c.d.e":   "unsupported token",
+		"Bearer abc":         "unreadable token",
+		"Basic dXNlcjpwYXNz": "malformed authorization header",
+		"Bearer !!.e30.c":    "unreadable token",
+	} {
+		code, msg := placeOrder(t, s, auth, `{}`)
+		is(t, code, hubpb.ErrorCode_UNAUTHENTICATED)
+		is(t, msg, want)
+	}
+}
+
+func TestAGuardNeedsAJWKS(t *testing.T) {
+	guards := map[string]HandlerOption{
+		"RequireAuthenticated": RequireAuthenticated(),
+		"RequireRole":          RequireRole("orders-user"),
+		"RequireCaller":        RequireCaller(func(Caller) bool { return true }),
+	}
+	for name, guard := range guards {
+		app := newApp(t, Hubs("127.0.0.1:7000"))
+		is(t, HandleQuery(app, get), nil) // no guard: fine without a JWKS
+		err := HandleCommand(app, place, guard)
+		if err == nil || !strings.Contains(err.Error(), "JWKS") || !strings.Contains(err.Error(), "orders.PlaceOrder") {
+			t.Fatalf("%s: got %v, want an error naming the type and the JWKS", name, err)
+		}
+		_, err = HandleSubscription(app, watchOrders, guard)
+		is(t, err != nil, true)
+		is(t, HandleStream(app, listOrders, guard) != nil, true)
+		startErr := app.Start(context.Background())
+		if startErr == nil || !strings.Contains(startErr.Error(), "JWKS") {
+			t.Fatalf("%s: Start returned %v, want the guard's error", name, startErr)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		is(t, app.Run(ctx) != nil, true) // Run fails the same way
+		cancel()
+		// With a JWKS, the same registrations start.
+		withKeys := newApp(t, Hubs("127.0.0.1:7000"), JWKS("https://issuer.test/jwks", testIssuer))
+		is(t, HandleCommand(withKeys, place, guard), nil)
+		is(t, withKeys.Start(context.Background()), nil)
+	}
 }
 
 func TestABadTokenIsRefusedEvenWithoutAGuard(t *testing.T) { // SG-18

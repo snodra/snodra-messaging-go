@@ -139,7 +139,7 @@ func Example_subscriptions() {
 func Example_guards() {
 	var app *snodra.App
 	// readme:begin guards
-	// The caller is checked before the payload is decoded.
+	// The caller is checked before the payload is decoded; a guard needs snodra.JWKS.
 	_ = snodra.HandleCommand(app, func(ctx context.Context, cmd ArchiveOrder) (snodra.Empty, error) {
 		caller, _ := snodra.CallerFrom(ctx)
 		fmt.Println("archived by", caller.Subject)

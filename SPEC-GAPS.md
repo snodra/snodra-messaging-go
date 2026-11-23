@@ -86,14 +86,18 @@ what the Kotlin library does where it differs, and what this library does. The c
   library "must validate the token before it runs a handler that requires an authenticated caller, exactly as the
   service validates a REST call (signature against the issuer's JWKS, expiry, issuer)"; it does not say what a
   service configured without a JWKS does.
-- **Reference library:** without a JWKS URL, reads the claims of a signed token without checking its signature (the
-  caller's `verified` is false), logs a warning once, and lets the guards pass on those claims; it refuses an
-  unsigned token (`alg: none`, or an empty signature) and an encrypted one (five segments) with `UNAUTHENTICATED`. The
-  Kotlin library does the same without a `JwtDecoder`.
-- **This library:** does the same: without `JWKS` (or `SNODRA_JWKS_URL`), `Caller.Verified` is false, the warning
-  is logged once per `App`, and the guards pass on the unverified claims (`identity.go`, `internal/jwt`).
-- **Question:** may a library run a guarded handler on an unverified token, or must a guarded handler refuse every
-  caller when no JWKS is configured?
+- **Settled:** a JWKS is required wherever a token is used as an identity. Registering a handler with a guard
+  (authenticated caller, role, caller check) without a configured JWKS is a startup error. Without a JWKS a library
+  never presents a token's claims as the caller: the caller is anonymous, and the token is only forwarded with the
+  requests the handler sends. What can be judged without the keys is still refused with `UNAUTHENTICATED` before the
+  handler lookup (SG-18): a header that is not a bearer token, a token that is not a JWS, an unsigned token (`alg:
+  none`, an empty signature), an encrypted one (five segments). With a JWKS nothing changes.
+- **This library:** does so. `RequireAuthenticated`, `RequireRole` and `RequireCaller` without `JWKS` (or
+  `SNODRA_JWKS_URL`) make the registration fail, and so `Start` and `Run`; without a JWKS `CallerFrom` reports no
+  caller and a warning is logged once per `App` when a token arrives (`identity.go`, `register.go`, `internal/jwt`).
+  Before, it read the claims of a signed token unverified (`Caller.Verified` false, now removed) and let the guards
+  pass on them, as the Rust library and the Kotlin library (without a `JwtDecoder`) still do.
+- **Question:** settled.
 
 ### SG-7: a token endpoint that fails before any stream
 

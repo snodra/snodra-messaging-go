@@ -205,7 +205,7 @@ nothing is retried and a lost hub stream ends the sequence with `ErrOutcomeUnkno
 ## Guarding a handler
 
 ```go
-// The caller is checked before the payload is decoded.
+// The caller is checked before the payload is decoded; a guard needs snodra.JWKS.
 _ = snodra.HandleCommand(app, func(ctx context.Context, cmd ArchiveOrder) (snodra.Empty, error) {
 	caller, _ := snodra.CallerFrom(ctx)
 	fmt.Println("archived by", caller.Subject)
@@ -213,9 +213,12 @@ _ = snodra.HandleCommand(app, func(ctx context.Context, cmd ArchiveOrder) (snodr
 }, snodra.RequireRole("orders-admin"))
 ```
 
-`RequireAuthenticated`, `RequireRole` and `RequireCaller` answer UNAUTHENTICATED or PERMISSION_DENIED. The token is
-verified (signature, issuer, expiry) only when you configure `snodra.JWKS`; without it the claims of any signed token are
-read as they are, `Caller.Verified` is false, and whoever can reach the hub can forge them.
+`RequireAuthenticated`, `RequireRole` and `RequireCaller` answer UNAUTHENTICATED or PERMISSION_DENIED. They need
+`snodra.JWKS` (or `SNODRA_JWKS_URL` and `SNODRA_ISSUER`): the token is verified (signature, issuer, expiry) against the
+issuer's keys, and registering a guarded handler without them is an error that also fails `Start` and `Run`. Without a
+JWKS no token is an identity: every caller is anonymous (`CallerFrom` reports none), the token still goes on with the
+requests the handler sends, and a header that is not a bearer token, or a token that is not a signed JWS, is still
+answered UNAUTHENTICATED.
 
 ## Configuration
 
@@ -236,7 +239,7 @@ defaults, is in the documentation of `FromEnv` (`go doc snodra.FromEnv`) and at
 | `SNODRA_SERVER_OAUTH2_TOKEN_URI` (and `_CLIENT_ID`, `_CLIENT_SECRET[_FILE]`, `_SCOPE`, `_CA`) | `JWT`, `NewClientCredentials` | none |
 | `SNODRA_SERVER_TLS`, `SNODRA_SERVER_TLS_CA`, `SNODRA_SERVER_TLS_SERVER_NAME` | `TLS` | false |
 | `SNODRA_SERVER_TLS_CLIENT_CERT`, `SNODRA_SERVER_TLS_CLIENT_KEY` | `ClientCertificate` | none (implies TLS) |
-| `SNODRA_JWKS_URL`, `SNODRA_ISSUER` | `JWKS` | none |
+| `SNODRA_JWKS_URL`, `SNODRA_ISSUER` | `JWKS` | none (no caller is verified; guards need it) |
 | `SNODRA_ALWAYS_THROUGH_HUB` | `AlwaysThroughHub` | false (own types answered in-process) |
 
 - An instance opens one stream to every hub it is given and registers the same types on each. A second address that

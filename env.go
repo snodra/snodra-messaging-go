@@ -39,7 +39,7 @@ const defaultHubAddress = "static://snodra-server:7000"
 //     number of at least 1) and SNODRA_SERVER_RETRY_MAX_BACKOFF_MS (2000); default false. The
 //     policy variables are checked even when retry is off.
 //   - SNODRA_JWKS_URL, SNODRA_ISSUER: [JWKS] (the issuer is required with the URL; without a URL
-//     tokens are read unverified)
+//     no token is an identity, and a guarded handler cannot be registered)
 //   - SNODRA_SECURITY_ROLES_CLAIM: [RolesClaim] (default "roles")
 //   - SNODRA_FORWARD_JWT: [ForwardJWT], true or false (default true)
 //   - SNODRA_ALWAYS_THROUGH_HUB: [AlwaysThroughHub], true or false (default false)

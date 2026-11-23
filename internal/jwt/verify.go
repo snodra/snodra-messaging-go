@@ -130,8 +130,8 @@ func (v *Verifier) check(claims map[string]any, now time.Time) error {
 	return nil
 }
 
-// Unverified returns the claims of a signed token without checking its signature, for a service
-// without a JWKS. It refuses an unsigned token (alg "none", or no signature), an encrypted one
+// Unverified returns the claims of a signed token without checking its signature: what a
+// service without a JWKS can judge of a token (its claims are never an identity). It refuses an unsigned token (alg "none", or no signature), an encrypted one
 // (five segments) and anything that is not a JWS.
 func Unverified(token string) (map[string]any, error) {
 	parts := strings.SplitN(token, ".", 6) // at most 6: a token of many dots costs nothing

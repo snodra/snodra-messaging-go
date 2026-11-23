@@ -2,9 +2,16 @@ package main
 
 import (
 	"context"
+	"crypto"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math/big"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -370,18 +377,56 @@ func TestRelayFailsWithTheNestedCallsError(t *testing.T) {
 	}
 }
 
-// token is a signed-looking token for sub; without a JWKS the service reads it unverified.
-func token(sub string) string {
-	seg := func(v string) string { return base64.RawURLEncoding.EncodeToString([]byte(v)) }
-	return seg(`{"alg":"RS256","typ":"JWT"}`) + "." + seg(`{"sub":"`+sub+`"}`) + "." + seg("signature")
+// issuer signs tokens and publishes its key as a JWKS, as the runner's issuer does.
+type issuer struct {
+	key *rsa.PrivateKey
+	url string
+}
+
+const issuerName = "https://issuer.test"
+
+func newIssuer(t *testing.T) issuer {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b64 := base64.RawURLEncoding.EncodeToString
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"keys": []any{map[string]any{
+			"kty": "RSA", "kid": "k1", "use": "sig", "alg": "RS256",
+			"n": b64(key.N.Bytes()), "e": b64(big.NewInt(int64(key.E)).Bytes()),
+		}}})
+	}))
+	t.Cleanup(srv.Close)
+	return issuer{key: key, url: srv.URL}
+}
+
+// token is an RS256 token of the issuer for sub, valid for an hour.
+func (i issuer) token(t *testing.T, sub string) string {
+	t.Helper()
+	b64 := base64.RawURLEncoding.EncodeToString
+	now := time.Now().Unix()
+	head, _ := json.Marshal(map[string]any{"alg": "RS256", "typ": "JWT", "kid": "k1"})
+	body, _ := json.Marshal(map[string]any{"iss": issuerName, "sub": sub, "iat": now, "exp": now + 3600})
+	input := b64(head) + "." + b64(body)
+	sum := sha256.Sum256([]byte(input))
+	sig, err := rsa.SignPKCS1v15(rand.Reader, i.key, crypto.SHA256, sum[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return input + "." + b64(sig)
 }
 
 func TestGuardedNeedsAnAcceptedCaller(t *testing.T) {
-	app, _, s := started(t, env{service: "conformance-go", instance: "i-1", capacity: 4})
+	iss := newIssuer(t)
+	app, _, s := started(t, env{service: "conformance-go", instance: "i-1", capacity: 4, jwksURL: iss.url, issuer: issuerName})
 	s.Ack(t, fakehub.Ack("hub-1"))
 	ready(t, app)
 	const cmd = hubpb.RequestKind_COMMAND
-	auth := func(sub string) map[string]string { return map[string]string{"authorization": "Bearer " + token(sub)} }
+	auth := func(sub string) map[string]string {
+		return map[string]string{"authorization": "Bearer " + iss.token(t, sub)}
+	}
 	if m := decode(t, call(t, s, cmd, "conformance.Guarded", `{"count":2}`, auth("alice"))); m["count"] != float64(2) || m["user"] != "alice" {
 		t.Fatalf("Guarded %v", m)
 	}
@@ -400,6 +445,20 @@ func TestGuardedNeedsAnAcceptedCaller(t *testing.T) {
 	} {
 		if e := call(t, s, cmd, "conformance.Guarded", c.payload, c.headers).GetError(); e.GetCode() != c.want {
 			t.Fatalf("Guarded %s %v: %v, want %v", c.payload, c.headers, e, c.want)
+		}
+	}
+}
+
+// Without a JWKS no caller can be verified: the service still starts, and Guarded refuses
+// every caller.
+func TestGuardedWithoutAJWKSRefusesEveryCaller(t *testing.T) {
+	iss := newIssuer(t)
+	app, _, s := started(t, env{service: "conformance-go", instance: "i-1", capacity: 4})
+	s.Ack(t, fakehub.Ack("hub-1"))
+	ready(t, app)
+	for _, headers := range []map[string]string{nil, {"authorization": "Bearer " + iss.token(t, "alice")}} {
+		if e := call(t, s, hubpb.RequestKind_COMMAND, "conformance.Guarded", `{"count":2}`, headers).GetError(); e.GetCode() != hubpb.ErrorCode_UNAUTHENTICATED {
+			t.Fatalf("Guarded %v: %v, want UNAUTHENTICATED", headers, e)
 		}
 	}
 }
