@@ -10,10 +10,11 @@ import (
 // permitLedger is the permit accounting of one stream
 // (https://snodra.damoreira.com/library-authors/protocol/, Flow control). The hub holds
 // offered - received + returned of the stream's permits; a finished request's grant goes back
-// at once when that is at or below min(permitBatch, offered/2) (with one permit: every
-// completion) or when permitBatch grants are pending, else when the timer fires. offered counts
-// the top-ups too (SG-4).
+// at once when that is at or below min(permitBatch, initial/2) (with one permit: every
+// completion) or when permitBatch grants are pending, else when the timer fires. The mark is the
+// Register's initial_permits alone: a top-up does not move it (SG-4).
 type permitLedger struct {
+	initial  uint32 // Register.initial_permits
 	offered  uint32 // Register.initial_permits plus the top-ups (several hubs)
 	received uint32 // requests that arrived on the stream
 	returned uint32 // grants written in Permits messages
@@ -42,8 +43,8 @@ func (l *permitLedger) finished() (flushNow uint32, armTimer bool) {
 	// The counters may wrap; their difference, the permits the hub spent and did not get
 	// back, is small, so it is read as a signed 32-bit number.
 	held := int64(l.offered) - int64(int32(l.received-l.returned))
-	// TODO(spec-gap): SG-4 (the mark of a stream that was topped up uses what it offered in all).
-	lowWater := int64(min(permitBatch, l.offered/2))
+	// TODO(spec-gap): SG-4 (the mark of a stream that was topped up is its Register's).
+	lowWater := int64(min(permitBatch, l.initial/2))
 	switch {
 	case held <= lowWater || l.pending >= permitBatch:
 		return l.take(), false
@@ -78,7 +79,7 @@ type streamPermits struct {
 }
 
 func newStreamPermits(ref *streamRef, offered uint32, flushAfter time.Duration) *streamPermits {
-	return &streamPermits{ref: ref, flushAfter: flushAfter, ledger: permitLedger{offered: offered}}
+	return &streamPermits{ref: ref, flushAfter: flushAfter, ledger: permitLedger{initial: offered, offered: offered}}
 }
 
 // arrived counts a forwarded request; called from the stream's read loop, before the request

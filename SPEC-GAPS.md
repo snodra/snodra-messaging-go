@@ -62,11 +62,11 @@ what the Kotlin library does where it differs, and what this library does. The c
   finished request's permit back at once when the hub holds at most `min(16, initial_permits / 2)` of the stream's
   permits; with several hubs ([Several hubs](https://snodra.damoreira.com/library-authors/protocol/)) a stream is
   topped up with `Permits{count, grant}` when another hub leaves, and the page does not say whether the mark follows.
-- **Reference library:** computes the mark from what the stream offered in all: its `Register.initial_permits` plus
-  every top-up.
-- **This library:** does the same (`permits.go`).
-- **Question:** should the specification say that `initial_permits` in the low-water mark means the permits the
-  stream offered in all, top-ups included?
+- **Settled:** the mark is the stream's `Register.initial_permits` alone, as the Kotlin library computes it; a top-up
+  raises what the hub holds (and its cap on the session), not the mark. The Rust library computes the mark from
+  everything the stream offered, top-ups included.
+- **This library:** does what the Kotlin library does (`permits.go`); before, it followed the Rust library.
+- **Question:** settled; the specification's `initial_permits` is the Register's.
 
 ### SG-5: when a JWT is renewed
 

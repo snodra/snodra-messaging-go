@@ -12,11 +12,11 @@ import (
 )
 
 func TestPermitFlushRule(t *testing.T) {
-	one := permitLedger{offered: 1}
+	one := permitLedger{initial: 1, offered: 1}
 	one.arrived()
 	n, _ := one.finished()
 	is(t, n, uint32(1)) // one permit: every completion
-	big := permitLedger{offered: 64}
+	big := permitLedger{initial: 64, offered: 64}
 	for i := 0; i < 10; i++ {
 		big.arrived()
 	}
@@ -27,7 +27,7 @@ func TestPermitFlushRule(t *testing.T) {
 		n, _ = big.finished()
 	}
 	is(t, n, uint32(16)) // 16 pending: flush
-	small := permitLedger{offered: 8}
+	small := permitLedger{initial: 8, offered: 8}
 	for i := 0; i < 5; i++ {
 		small.arrived()
 	}
@@ -36,7 +36,7 @@ func TestPermitFlushRule(t *testing.T) {
 }
 
 func TestTheTimerTakesEveryPendingGrant(t *testing.T) {
-	l := permitLedger{offered: 64}
+	l := permitLedger{initial: 64, offered: 64}
 	for i := 0; i < 3; i++ {
 		l.arrived()
 	}
@@ -52,7 +52,7 @@ func TestTheTimerTakesEveryPendingGrant(t *testing.T) {
 }
 
 func TestTheLedgerSurvivesItsCountersWrapping(t *testing.T) {
-	l := permitLedger{offered: 1, received: math.MaxUint32, returned: math.MaxUint32}
+	l := permitLedger{initial: 1, offered: 1, received: math.MaxUint32, returned: math.MaxUint32}
 	l.arrived() // received wraps to 0
 	n, _ := l.finished()
 	is(t, n, uint32(1)) // still "the hub holds none": at once, not batched
@@ -114,8 +114,8 @@ func TestPermitsGoBackOnTheArrivalStream(t *testing.T) {
 	sa.Nothing(t, 200*ms, "reply", "permits")
 }
 
-func TestTheLowWaterMarkUsesTheOfferedTotal(t *testing.T) { // SG-4
-	l := permitLedger{offered: 3}
+func TestTheLowWaterMarkUsesTheRegistersPermits(t *testing.T) { // SG-4
+	l := permitLedger{initial: 3, offered: 3}
 	is(t, l.raise(5), uint32(2)) // topped up to 5: Permits{count 2, grant 5}
 	is(t, l.raise(4), uint32(0)) // never lowered
 	is(t, l.raise(5), uint32(0)) // offered already
@@ -124,8 +124,13 @@ func TestTheLowWaterMarkUsesTheOfferedTotal(t *testing.T) { // SG-4
 		l.arrived()
 	}
 	n, arm := l.finished()
-	// The hub holds 5 - 3 = 2 <= min(16, 5/2): at once (with the Register's 3 the mark would be
-	// 1, and the grant would wait for the batch).
-	is(t, n, uint32(1))
-	is(t, arm, false)
+	// The hub holds 5 - 3 = 2, above the mark of the Register's 3, min(16, 3/2) = 1: the grant
+	// waits for the batch, as in the reference library (the top-ups do not move the mark).
+	is(t, n, uint32(0))
+	is(t, arm, true)
+	for range 2 {
+		l.arrived()
+	}
+	n, _ = l.finished() // the hub holds 5 - 5 + 0 = 0: at once, with what is pending
+	is(t, n, uint32(2))
 }
