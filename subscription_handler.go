@@ -461,26 +461,18 @@ func (a *App) decodeQuery(h *handler, req *hubpb.Request) (query any, werr *hubp
 }
 
 // lookupSubscription is the subscription handler of req, or the error code and message to
-// answer: NO_HANDLER for a type not served here as a query (or a command); INVALID_REQUEST for
-// an unknown kind and for a query handler of another mode, with the reference library's texts.
+// answer, as the reference library answers: whatever the request's kind, INVALID_REQUEST "no
+// subscription handler for <type> on this instance" for a type without a query handler (a
+// command type, a type not served), and INVALID_REQUEST for a query handler of another mode.
+// TODO(spec-gap): SG-12 (the answers to a request in a mode its handler does not serve).
 func (a *App) lookupSubscription(req *hubpb.Request) (*handler, hubpb.ErrorCode, string) {
 	typ := req.GetType()
 	h := a.handlers[typ] // read-only once started
-	switch req.GetKind() {
-	case hubpb.RequestKind_QUERY:
-	case hubpb.RequestKind_COMMAND:
-		return nil, hubpb.ErrorCode_NO_HANDLER, noHandlerText(typ)
-	default:
-		return nil, hubpb.ErrorCode_INVALID_REQUEST, fmt.Sprintf("unsupported request kind %d", req.GetKind())
-	}
-	// TODO(spec-gap): SG-12 (the mode answers of a subscription request).
 	switch {
 	case h == nil || h.kind == kindCommand:
-		return nil, hubpb.ErrorCode_NO_HANDLER, noHandlerText(typ)
-	case h.kind == kindQuery:
-		return nil, hubpb.ErrorCode_INVALID_REQUEST, typ + " is not a subscription query handler (it answers mode UNARY)"
-	case h.kind == kindStream:
-		return nil, hubpb.ErrorCode_INVALID_REQUEST, typ + " is not a subscription query handler (it answers mode STREAMING)"
+		return nil, hubpb.ErrorCode_INVALID_REQUEST, "no subscription handler for " + typ + " on this instance"
+	case h.kind != kindSubscription:
+		return nil, hubpb.ErrorCode_INVALID_REQUEST, typ + " is not a subscription query handler (it answers mode " + h.mode() + ")"
 	}
 	return h, 0, ""
 }

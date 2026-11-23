@@ -315,15 +315,28 @@ func (a *App) admit(run *runningRequest, req *hubpb.Request, streaming bool) (*h
 }
 
 // lookup is the handler of req in its mode (streaming or unary), or the error code and message
-// to answer: NO_HANDLER for a type not served here in the request's kind; INVALID_REQUEST for an
-// unknown kind, and for a query handler of the other mode (the caller used the wrong call, which
-// no retry fixes), with the reference library's texts.
+// to answer, as the reference library answers. A unary request: NO_HANDLER for a type not served
+// here in the request's kind, INVALID_REQUEST for an unknown kind and for a streaming or a
+// subscription query handler (the caller used the wrong call, which no retry fixes; a
+// subscription's initial request <id>#0 excepted). A streaming request is served by a streaming
+// query handler whatever its kind: NO_HANDLER for a type without a query handler (a command
+// type, a type not served), INVALID_REQUEST for a query handler of another mode.
+// TODO(spec-gap): SG-12 (the answers to a request in a mode its handler does not serve).
 func (a *App) lookup(req *hubpb.Request, streaming bool) (*handler, hubpb.ErrorCode, string) {
 	typ := req.GetType()
 	h := a.handlers[typ] // read-only once started
+	if streaming {
+		switch {
+		case h == nil || h.kind == kindCommand:
+			return nil, hubpb.ErrorCode_NO_HANDLER, noHandlerText(typ)
+		case h.kind != kindStream:
+			return nil, hubpb.ErrorCode_INVALID_REQUEST, typ + " is not a streaming query handler (it answers mode " + h.mode() + ")"
+		}
+		return h, 0, ""
+	}
 	switch req.GetKind() {
 	case hubpb.RequestKind_COMMAND:
-		if h == nil || h.kind != kindCommand || streaming {
+		if h == nil || h.kind != kindCommand {
 			return nil, hubpb.ErrorCode_NO_HANDLER, noHandlerText(typ)
 		}
 		return h, 0, ""
@@ -334,11 +347,7 @@ func (a *App) lookup(req *hubpb.Request, streaming bool) (*handler, hubpb.ErrorC
 	switch {
 	case h == nil || h.kind == kindCommand:
 		return nil, hubpb.ErrorCode_NO_HANDLER, noHandlerText(typ)
-	case streaming && h.kind == kindSubscription:
-		// As in the reference library: no streaming handler of the type.
-		// TODO(spec-gap): SG-12 (a streaming request to a subscription handler is NO_HANDLER).
-		return nil, hubpb.ErrorCode_NO_HANDLER, noHandlerText(typ)
-	case !streaming && h.kind == kindSubscription:
+	case h.kind == kindSubscription:
 		// A subscription's initial result is the unary request <id>#0, answered by the
 		// subscription's initial handler; any other unary request used the wrong call.
 		// TODO(spec-gap): SG-13 (recognised by the #0 suffix alone, which scatter-gather target ids share).
@@ -346,10 +355,7 @@ func (a *App) lookup(req *hubpb.Request, streaming bool) (*handler, hubpb.ErrorC
 			return h, 0, ""
 		}
 		return nil, hubpb.ErrorCode_INVALID_REQUEST, typ + " is a subscription query: send it with Subscribe (mode SUBSCRIPTION)"
-	case streaming && h.kind != kindStream:
-		// TODO(spec-gap): SG-12 (a streaming request to a unary query handler is INVALID_REQUEST).
-		return nil, hubpb.ErrorCode_INVALID_REQUEST, typ + " is not a streaming query handler (it answers mode UNARY)"
-	case !streaming && h.kind == kindStream:
+	case h.kind == kindStream:
 		return nil, hubpb.ErrorCode_INVALID_REQUEST, typ + " is a streaming query: send it with Stream (mode STREAMING)"
 	}
 	return h, 0, ""

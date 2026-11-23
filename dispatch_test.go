@@ -509,3 +509,114 @@ func TestALastResortFailsOnlyTheRequest(t *testing.T) {
 	app.route(&hubpb.ServerMessage{Message: &hubpb.ServerMessage_Part{Part: &hubpb.ReplyPart{RequestId: "q-1"}}})
 	is(t, rec.count(slog.LevelError, "a frame from the hub could not be handled; it is dropped, the stream goes on"), 1)
 }
+
+// TestEveryModeAgainstEveryHandler pins what a request in each mode (unary, streaming,
+// subscription) is answered with by a handler of each kind (command, query, streaming query,
+// subscription query) and for a type not served: the code and the frame it rides in, as the
+// reference library answers. The kind of a streaming or subscription request is not looked at:
+// only query handlers serve those modes.
+func TestEveryModeAgainstEveryHandler(t *testing.T) {
+	hub := fakehub.Start(t)
+	var updates *Updates[WatchOrders]
+	app, s := serving(t, hub, func(app *App) {
+		is(t, HandleCommand(app, place), nil)
+		is(t, HandleQuery(app, get), nil)
+		is(t, HandleStream(app, listOrders), nil)
+		u, err := HandleSubscription(app, watchOrders)
+		is(t, err, nil)
+		updates = u
+	})
+	const (
+		reply = "Reply"
+		end   = "ReplyEnd"
+		ok    = hubpb.ErrorCode_ERROR_CODE_UNSPECIFIED // answered, no error
+		cmd   = hubpb.RequestKind_COMMAND
+		qry   = hubpb.RequestKind_QUERY
+		unary = hubpb.RequestMode_UNARY
+		strm  = hubpb.RequestMode_STREAMING
+		sub   = hubpb.RequestMode_SUBSCRIPTION
+	)
+	cells := []struct {
+		id    string
+		kind  hubpb.RequestKind
+		typ   string
+		mode  hubpb.RequestMode
+		frame string
+		code  hubpb.ErrorCode
+		msg   string
+	}{
+		// Unary requests: a Reply.
+		{"u-1", cmd, "orders.PlaceOrder", unary, reply, ok, ""},
+		{"u-2", qry, "orders.GetOrder", unary, reply, ok, ""},
+		{"u-3", qry, "orders.ListOrders", unary, reply, hubpb.ErrorCode_INVALID_REQUEST,
+			"orders.ListOrders is a streaming query: send it with Stream (mode STREAMING)"},
+		{"u-4", qry, "orders.WatchOrders", unary, reply, hubpb.ErrorCode_INVALID_REQUEST,
+			"orders.WatchOrders is a subscription query: send it with Subscribe (mode SUBSCRIPTION)"},
+		{"u-5#0", qry, "orders.WatchOrders", unary, reply, ok, ""}, // a subscription's initial request
+		{"u-6", qry, "orders.Missing", unary, reply, hubpb.ErrorCode_NO_HANDLER, ""},
+		{"u-7", cmd, "orders.Missing", unary, reply, hubpb.ErrorCode_NO_HANDLER, ""},
+		{"u-8", qry, "orders.PlaceOrder", unary, reply, hubpb.ErrorCode_NO_HANDLER, ""}, // a command type asked as a query
+		{"u-9", cmd, "orders.GetOrder", unary, reply, hubpb.ErrorCode_NO_HANDLER, ""},   // a query type sent as a command
+		// Streaming requests: a ReplyEnd (after the parts, when served).
+		{"s-1#1", qry, "orders.PlaceOrder", strm, end, hubpb.ErrorCode_NO_HANDLER, ""},
+		{"s-2#1", qry, "orders.GetOrder", strm, end, hubpb.ErrorCode_INVALID_REQUEST,
+			"orders.GetOrder is not a streaming query handler (it answers mode UNARY)"},
+		{"s-3#1", qry, "orders.ListOrders", strm, end, ok, ""},
+		{"s-4#1", qry, "orders.WatchOrders", strm, end, hubpb.ErrorCode_INVALID_REQUEST,
+			"orders.WatchOrders is not a streaming query handler (it answers mode SUBSCRIPTION)"},
+		{"s-5#1", qry, "orders.Missing", strm, end, hubpb.ErrorCode_NO_HANDLER, ""},
+		{"s-6#1", cmd, "orders.ListOrders", strm, end, ok, ""}, // the kind is not looked at
+		// Subscription requests: a ReplyEnd when refused, nothing when admitted.
+		{"w-1#1", qry, "orders.PlaceOrder", sub, end, hubpb.ErrorCode_INVALID_REQUEST,
+			"no subscription handler for orders.PlaceOrder on this instance"},
+		{"w-2#1", qry, "orders.GetOrder", sub, end, hubpb.ErrorCode_INVALID_REQUEST,
+			"orders.GetOrder is not a subscription query handler (it answers mode UNARY)"},
+		{"w-3#1", qry, "orders.ListOrders", sub, end, hubpb.ErrorCode_INVALID_REQUEST,
+			"orders.ListOrders is not a subscription query handler (it answers mode STREAMING)"},
+		{"w-4#1", qry, "orders.WatchOrders", sub, "", ok, ""}, // admitted
+		{"w-5#1", qry, "orders.Missing", sub, end, hubpb.ErrorCode_INVALID_REQUEST,
+			"no subscription handler for orders.Missing on this instance"},
+		{"w-6#1", cmd, "orders.WatchOrders", sub, "", ok, ""}, // the kind is not looked at
+	}
+	for _, c := range cells {
+		credit := uint32(0)
+		if c.mode == strm {
+			credit = 4
+		}
+		s.Send(t, fakehub.Forward(&hubpb.Request{Id: c.id, Kind: c.kind, Type: c.typ, Mode: c.mode,
+			InitialCredit: credit, Payload: []byte(`{"count":1,"topic":"` + c.id + `"}`)}))
+		if c.frame == "" {
+			match := func(q WatchOrders) bool { return q.Topic == c.id }
+			poll(t, func() bool { return updates.Emit(match, OrderUpdate{Value: 1}) == 1 })
+			p := nextPart(t, s)
+			if p.GetRequestId() != c.id {
+				t.Fatalf("%s: a part of %s, want one of the admitted subscription", c.id, p.GetRequestId())
+			}
+			continue
+		}
+		m := streamFrame(t, s)
+		if c.frame == end && c.code == ok {
+			for m.GetPart() != nil { // a served stream's parts come first
+				m = streamFrame(t, s)
+			}
+		}
+		var werr *hubpb.Error
+		switch {
+		case c.frame == reply && m.GetReply() != nil:
+			is(t, m.GetReply().GetRequestId(), c.id)
+			werr = m.GetReply().GetError()
+		case c.frame == end && m.GetEnd() != nil:
+			is(t, m.GetEnd().GetRequestId(), c.id)
+			werr = m.GetEnd().GetError()
+		default:
+			t.Fatalf("%s %s %s: got %v, want a %s", c.id, c.mode, c.typ, m, c.frame)
+		}
+		if werr.GetCode() != c.code {
+			t.Fatalf("%s %s %s: answered %v (%q), want %v", c.id, c.mode, c.typ, werr.GetCode(), werr.GetMessage(), c.code)
+		}
+		if c.msg != "" {
+			is(t, werr.GetMessage(), c.msg)
+		}
+	}
+	is(t, app.SubscriptionsServed(), 2)
+}

@@ -166,30 +166,35 @@ what the Kotlin library does where it differs, and what this library does. The c
   `connection.go`).
 - **Question:** is the kept rejection per connection and cleared on acceptance, or the application's latest refusal?
 
-### SG-12: a streaming request to a unary query handler
+### SG-12: a request in a mode the handler does not serve
 
 - **Specification:** [protocol.md, Handling a request](https://snodra.damoreira.com/library-authors/protocol/) says
   a request in the wrong mode for the handler ("a unary request to a streaming handler, for example") is
   `INVALID_REQUEST`; [Streaming](https://snodra.damoreira.com/library-authors/protocol/) also lists what the hub does
   with "a unary `Reply` to the target (a handler that does not stream)": it relays it as one part and an end, which
   reads as if a unary query handler could answer a streaming request.
-- **Reference library:** answers a streaming request to a unary query handler with
-  `ReplyEnd{error = INVALID_REQUEST "<type> is not a streaming query handler (it answers mode UNARY)"}`, and a unary
-  request to a streaming handler with `Reply{error = INVALID_REQUEST "<type> is a streaming query: send it with ...
-  (mode STREAMING)"}` (the Kotlin library does both too). A streaming request of a type not served, or of a command
-  type, is `ReplyEnd{error = NO_HANDLER}`.
-- **This library:** does the same, naming its own call in the second text (`dispatch.go`).
-- **Subscriptions:** the reference library answers a subscription request to a unary query handler or to a streaming
-  handler with `ReplyEnd{error = INVALID_REQUEST "<type> is not a subscription query handler (it answers mode UNARY)"}`
-  (or `STREAMING`), one of a type not served or of a command type with `ReplyEnd{error = NO_HANDLER}`, and a
-  streaming request to a subscription handler with `ReplyEnd{error = NO_HANDLER}` (it looks for a streaming handler
-  only). The Kotlin library answers a subscription request of a type it does not serve as a subscription with
-  `INVALID_REQUEST` "no subscription handler for <type> on this instance". This library does what the reference
-  library does (`subscription_handler.go`, `dispatch.go`).
-- **Question:** is the hub's relay of a unary `Reply` only for other clients, so that a library must refuse the wrong
-  mode both ways, or should a unary query handler answer a streaming request with one part? And which code answers a
-  request of a mode no handler of the type serves (`INVALID_REQUEST` throughout, or `NO_HANDLER` where no handler of
-  that mode exists)?
+- **Settled:** a library answers as the Kotlin library does; the Kotlin library's answers are the standard. After the
+  token check (SG-18), whatever the handler:
+
+  | Request | Command handler | Query handler | Streaming handler | Subscription handler | Type not served |
+  |---|---|---|---|---|---|
+  | unary | served (`COMMAND`); `NO_HANDLER` (`QUERY`) | served (`QUERY`); `NO_HANDLER` (`COMMAND`) | `Reply` `INVALID_REQUEST` | `Reply` `INVALID_REQUEST` (`<id>#0`: served) | `Reply` `NO_HANDLER` |
+  | streaming | `ReplyEnd` `NO_HANDLER` | `ReplyEnd` `INVALID_REQUEST` | served | `ReplyEnd` `INVALID_REQUEST` | `ReplyEnd` `NO_HANDLER` |
+  | subscription | `ReplyEnd` `INVALID_REQUEST` | `ReplyEnd` `INVALID_REQUEST` | `ReplyEnd` `INVALID_REQUEST` | admitted | `ReplyEnd` `INVALID_REQUEST` |
+
+  A unary request of an unknown kind is `INVALID_REQUEST`; the kind of a streaming or a subscription request is not
+  looked at (only query handlers serve those modes, and the hub refuses a command in them). The texts:
+  "<type> is a streaming query: send it with Stream (mode STREAMING)", "<type> is a subscription query: send it with
+  Subscribe (mode SUBSCRIPTION)", "<type> is not a streaming query handler (it answers mode UNARY)" (or
+  `SUBSCRIPTION`), "<type> is not a subscription query handler (it answers mode UNARY)" (or `STREAMING`), and "no
+  subscription handler for <type> on this instance". The Kotlin library names the handler's method in its "is not a
+  ... handler" texts and says mode `UNARY` for every handler of another mode; this library names the mode the handler
+  serves.
+- **This library:** answers as the table says (`dispatch.go`, `subscription_handler.go`), pinned cell by cell by
+  `TestEveryModeAgainstEveryHandler`. Before, it answered a streaming request to a subscription handler, and a
+  subscription request of a command type or of a type not served, with `NO_HANDLER`, as the Rust library does.
+- **Question:** settled; what remains is the specification's wording of the hub's relay of a unary `Reply`, which no
+  official library's handler sends to a streaming request.
 
 ### SG-13: the initial request of a subscription and scatter-gather target ids
 

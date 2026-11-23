@@ -47,6 +47,17 @@ func (k handlerKind) String() string {
 	return [...]string{"command", "query", "streaming query", "subscription query"}[k]
 }
 
+// mode is the request mode h serves, as the protocol names it.
+func (h *handler) mode() string {
+	switch h.kind {
+	case kindStream:
+		return "STREAMING"
+	case kindSubscription:
+		return "SUBSCRIPTION"
+	}
+	return "UNARY"
+}
+
 // invoker runs a handler on a payload: decoded with the codec, encoded back. A payload that
 // does not decode is a *decodeError.
 type invoker func(ctx context.Context, codec PayloadCodec, payload []byte) ([]byte, error)
