@@ -63,7 +63,9 @@ func MaxSubscriptions(n int) Option {
 // waits for a hub stream. It is safe for concurrent use, also from a match.
 //
 // A subscription is reached from the moment its request is read: what is emitted before its
-// admission is decided is held, then sent first (or dropped when it is refused).
+// admission is decided is held, then sent first (or dropped when it is refused). Its query is
+// decoded off the hub stream, so a call waits for the decoding of the queries of the
+// subscriptions read before it, to run match on them.
 type Updates[Q Message] struct {
 	app *App
 	typ string
@@ -151,10 +153,15 @@ func (a *App) SubscriptionsServed() int { return a.subs.count() }
 // servedSubscription is one subscription target (<id>#n) served here: its decoded query, the
 // hub stream it arrived on and what it sent.
 type servedSubscription struct {
-	id    string
-	typ   string
-	query any
-	ref   *streamRef
+	id  string
+	typ string
+	ref *streamRef
+
+	// query is the decoded query (nil when it did not decode), set once by settle, before
+	// decoded is closed: read it only after <-decoded.
+	query   any
+	decoded chan struct{}
+	settled sync.Once
 
 	// Under servedSubscriptions.mu:
 	seq      uint64                 // the updates sent (the seq of the last part)
@@ -183,10 +190,10 @@ func (s *servedSubscriptions) count() int {
 	return len(s.byID)
 }
 
-// register records subscription id of typ with its decoded query, arrived on ref, pending its
+// register records subscription id of typ, arrived on ref, pending its decoding and its
 // admission; nil when the instance already serves its limit (nothing recorded). A second
 // subscription with the same id replaces the first, which sends nothing more.
-func (s *servedSubscriptions) register(id, typ string, query any, ref *streamRef) *servedSubscription {
+func (s *servedSubscriptions) register(id, typ string, ref *streamRef) *servedSubscription {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	old := s.byID[id]
@@ -196,9 +203,18 @@ func (s *servedSubscriptions) register(id, typ string, query any, ref *streamRef
 	if old != nil {
 		old.over, old.held = true, nil
 	}
-	sub := &servedSubscription{id: id, typ: typ, query: query, ref: ref}
+	sub := &servedSubscription{id: id, typ: typ, ref: ref, decoded: make(chan struct{})}
 	s.byID[id] = sub
 	return sub
+}
+
+// settle records sub's decoded query (nil: it did not decode) and lets the matches run on it.
+// Only the first call counts.
+func (sub *servedSubscription) settle(query any) {
+	sub.settled.Do(func() {
+		sub.query = query
+		close(sub.decoded)
+	})
 }
 
 // removeLocked forgets sub if it is still the one registered under its id.
@@ -301,8 +317,8 @@ func (s *servedSubscriptions) endAll() []*streamRef {
 // deliver sends what frame makes (from the subscription's id and seq) to every subscription of
 // typ whose query match accepts, and returns how many it reached. A part counts one more update
 // (seq + 1); an end (remove) carries the count and removes the subscription first. The matches
-// run outside the lock, on a snapshot: one that panics skips its subscription, and one may call
-// deliver again.
+// run outside the lock, on a snapshot, each once its subscription's query is decoded: one that
+// panics skips its subscription, and one may call deliver again.
 func (s *servedSubscriptions) deliver(typ string, match func(any) bool, frame func(id string, seq uint64) *hubpb.ClientMessage, remove bool) int {
 	s.mu.Lock()
 	var candidates []*servedSubscription
@@ -314,6 +330,7 @@ func (s *servedSubscriptions) deliver(typ string, match func(any) bool, frame fu
 	s.mu.Unlock()
 	var matched []*servedSubscription
 	for _, sub := range candidates {
+		<-sub.decoded // decoded off the hub stream, by its admission
 		if s.matches(match, sub) {
 			matched = append(matched, sub)
 		}
@@ -351,9 +368,10 @@ func (s *servedSubscriptions) matches(match func(any) bool, sub *servedSubscript
 
 // subscribe serves the subscription request req (<id>#n, mode SUBSCRIPTION) that arrived on
 // ref. Called from the stream's read loop: it is registered at once, as far as it can be before
-// its admission (its handler looked up, its query decoded, the limit), so that a hub Cancel or a
-// lost stream that follows finds it and an update emitted after the initial request was read
-// reaches it; the admission then runs on its own goroutine.
+// its admission (its handler looked up, the limit), so that a hub Cancel or a lost stream that
+// follows finds it and an update emitted after the request was read reaches it (Emit waits for
+// its query); its query is decoded, and its admission decided, on its own goroutine, so that no
+// codec runs on the stream's loop.
 func (a *App) subscribe(req *hubpb.Request, ref *streamRef) {
 	id := req.GetId()
 	fail := func(code hubpb.ErrorCode, msg string) *hubpb.Error {
@@ -362,26 +380,45 @@ func (a *App) subscribe(req *hubpb.Request, ref *streamRef) {
 	h, code, msg := a.lookupSubscription(req)
 	var (
 		unserved *hubpb.Error // no subscription handler of the type
-		flaw     *hubpb.Error // the query does not decode, or the limit is reached
+		full     *hubpb.Error // the limit is reached
 		sub      *servedSubscription
 	)
 	if h == nil {
 		unserved = fail(code, msg)
-	} else if query, err := h.decode(a.cfg.codec, req.GetPayload()); err != nil {
-		flaw = handlerFailure(id, err)
-	} else if sub = a.subs.register(id, req.GetType(), query, ref); sub == nil {
-		flaw = fail(hubpb.ErrorCode_RESOURCE_EXHAUSTED, fmt.Sprintf("subscription limit (%d) reached", a.subs.max))
+	} else if sub = a.subs.register(id, req.GetType(), ref); sub == nil {
+		full = fail(hubpb.ErrorCode_RESOURCE_EXHAUSTED, fmt.Sprintf("subscription limit (%d) reached", a.subs.max))
 	}
-	go a.admitSubscription(req, ref, h, sub, unserved, flaw)
+	go a.admitSubscription(req, ref, h, sub, unserved, full)
 }
 
-// admitSubscription decides the admission of a subscription request, in the reference
-// library's order: the caller's token, then a type not served here, then the guards (before
-// the decoding's verdict: an anonymous caller cannot probe the query's shape), then the
-// decoding and the limit. Admitted, what was emitted meanwhile goes out; refused, the refusal is
-// its one ReplyEnd (none when the hub cancelled it meanwhile).
-func (a *App) admitSubscription(req *hubpb.Request, ref *streamRef, h *handler, sub *servedSubscription, unserved, flaw *hubpb.Error) {
+// admitSubscription decodes the query of a subscription request (h's, when it has a handler)
+// and decides its admission, in the reference library's order: the caller's token, then a type
+// not served here, then the guards (before the decoding's verdict: an anonymous caller cannot
+// probe the query's shape), then the decoding (a decoding that panics is HANDLER_ERROR "handler
+// panicked", as for a unary handler) and the limit (full). Admitted, what was emitted meanwhile
+// goes out; refused, the refusal is its one ReplyEnd (none when the hub cancelled it meanwhile).
+func (a *App) admitSubscription(req *hubpb.Request, ref *streamRef, h *handler, sub *servedSubscription, unserved, full *hubpb.Error) {
 	id := req.GetId()
+	if sub != nil {
+		defer sub.settle(nil) // whatever happens: an Emit never waits for it for ever
+	}
+	defer a.lastResort(req, func(werr *hubpb.Error) {
+		if sub != nil {
+			a.subs.refuse(sub, werr)
+			return
+		}
+		_ = ref.send(subscriptionEnd(id, 0, werr))
+	})
+	flaw := full
+	if h != nil {
+		query, werr := a.decodeQuery(h, req)
+		if sub != nil {
+			sub.settle(query)
+		}
+		if werr != nil {
+			flaw = werr // the decoding's verdict comes before the limit's
+		}
+	}
 	werr := unserved
 	// TODO(spec-gap): SG-18 (every forwarded token is checked, also for a handler without a guard).
 	caller, err := a.identity.resolve(a.handlerCtx, req.GetHeaders()[authorizationHeader])
@@ -409,6 +446,18 @@ func (a *App) admitSubscription(req *hubpb.Request, ref *streamRef, h *handler, 
 	if err := ref.send(subscriptionEnd(id, 0, werr)); err != nil {
 		a.log.Debug("refusal dropped: its hub stream is gone", "request", id, "type", req.GetType())
 	}
+}
+
+// decodeQuery decodes the query of the subscription request req with h's decoder, under
+// recover: a query that does not decode is INVALID_REQUEST, a decoding that panics (the codec, an
+// UnmarshalJSON) HANDLER_ERROR "handler panicked", logged with its stack, as for a unary handler.
+func (a *App) decodeQuery(h *handler, req *hubpb.Request) (query any, werr *hubpb.Error) {
+	defer a.recoverHandler(req, &werr)
+	q, err := h.decode(a.cfg.codec, req.GetPayload())
+	if err != nil {
+		return nil, handlerFailure(req.GetId(), err)
+	}
+	return q, nil
 }
 
 // lookupSubscription is the subscription handler of req, or the error code and message to

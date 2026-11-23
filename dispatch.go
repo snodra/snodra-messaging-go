@@ -19,9 +19,11 @@ import (
 // its own goroutine, which writes to ref only (dropped if that stream is gone; nothing at all
 // once the hub cancelled the request) exactly one terminal message (a Reply, or for a streaming
 // request its parts and one ReplyEnd) and gives the permit back to ref's hub once the request is
-// finished: a streaming request holds it until its end.
+// finished: a streaming request holds it until its end. No user code runs on the read loop, and
+// a defect that panics there or on the request's goroutine fails that request alone (lastResort).
 // See https://snodra.damoreira.com/library-authors/protocol/ (Handling a request).
 func (a *App) dispatch(req *hubpb.Request, ref *streamRef, permits *streamPermits) {
+	defer a.lastResort(req, func(werr *hubpb.Error) { failRequest(req, ref, werr) })
 	if req.GetMode() == hubpb.RequestMode_SUBSCRIPTION {
 		// A subscription target is passive: no permit, no handler slot, not in flight.
 		a.subscribe(req, ref)
@@ -36,6 +38,13 @@ func (a *App) dispatch(req *hubpb.Request, ref *streamRef, permits *streamPermit
 	run := a.running.add(a.handlerCtx, req.GetId(), ref, credit)
 	go func() {
 		defer a.inflight.done()
+		defer permits.finished()
+		defer a.lastResort(req, func(werr *hubpb.Error) {
+			a.running.remove(req.GetId(), run)
+			if !run.isCancelled() {
+				failRequest(req, ref, werr)
+			}
+		})
 		if credit != nil {
 			a.serveStream(run, req, ref)
 			a.running.remove(req.GetId(), run)
@@ -49,8 +58,65 @@ func (a *App) dispatch(req *hubpb.Request, ref *streamRef, permits *streamPermit
 				}
 			}
 		}
-		permits.finished()
 	}()
+}
+
+// route hands a frame of the hub that answers this instance's requests (Reply, Error, ReplyPart,
+// ReplyEnd) or steers the requests it serves (Cancel, Flow) to its owner. Called from the
+// stream's read loop; a defect that panics there is logged and the frame dropped: the stream
+// goes on.
+func (a *App) route(m *hubpb.ServerMessage) {
+	defer func() {
+		if r := recover(); r != nil {
+			a.log.Error("a frame from the hub could not be handled; it is dropped, the stream goes on",
+				"frame", fmt.Sprintf("%T", m.GetMessage()), "panic", fmt.Sprint(r), "stack", string(debug.Stack()))
+		}
+	}()
+	switch k := m.GetMessage().(type) {
+	case *hubpb.ServerMessage_Reply:
+		ans := answer{payload: k.Reply.GetPayload()}
+		if e, ok := k.Reply.GetResult().(*hubpb.Reply_Error); ok {
+			ans = answer{failure: e.Error}
+		}
+		a.calls.reply(k.Reply.GetRequestId(), ans)
+	case *hubpb.ServerMessage_Error:
+		a.calls.deliver(k.Error.GetRequestId(), answer{failure: k.Error})
+	case *hubpb.ServerMessage_Part:
+		a.calls.part(k.Part)
+	case *hubpb.ServerMessage_End:
+		a.calls.end(k.End)
+	case *hubpb.ServerMessage_Cancel:
+		a.cancelRequest(k.Cancel.GetRequestId(), k.Cancel.GetReason())
+	case *hubpb.ServerMessage_Flow:
+		a.flow(k.Flow.GetRequestId(), k.Flow.GetCredits())
+	}
+}
+
+// lastResort, deferred where a request from the hub is served (on the stream's read loop and on
+// the request's own goroutine), turns a panic that escaped every other recover, a defect of the
+// library, into the failure of that request alone: logged at error with its stack, then fail
+// answers HANDLER_ERROR "handler panicked". The stream and the process go on.
+func (a *App) lastResort(req *hubpb.Request, fail func(werr *hubpb.Error)) {
+	r := recover()
+	if r == nil {
+		return
+	}
+	a.log.Error("serving a request from the hub panicked; the request fails, the stream goes on",
+		"request", req.GetId(), "type", req.GetType(), "panic", fmt.Sprint(r), "stack", string(debug.Stack()))
+	defer func() { _ = recover() }() // a failure that cannot be answered is dropped
+	fail(errorToWire(req.GetId(), errors.New("handler panicked")))
+}
+
+// failRequest answers req, which arrived on ref, with werr: a ReplyEnd for a streaming or a
+// subscription request, else a Reply.
+func failRequest(req *hubpb.Request, ref *streamRef, werr *hubpb.Error) {
+	switch req.GetMode() {
+	case hubpb.RequestMode_STREAMING, hubpb.RequestMode_SUBSCRIPTION:
+		_ = ref.send(subscriptionEnd(req.GetId(), 0, werr))
+	default:
+		_ = ref.send(&hubpb.ClientMessage{Message: &hubpb.ClientMessage_Reply{Reply: &hubpb.Reply{
+			RequestId: req.GetId(), Result: &hubpb.Reply_Error{Error: werr}}}})
+	}
 }
 
 // cancelRequest is the hub's Cancel{id, reason} for a request this instance serves (a

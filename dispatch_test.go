@@ -444,3 +444,68 @@ func TestACancelForAnUnknownIDIsIgnored(t *testing.T) {
 	s.Send(t, command("r-1", "orders.PlaceOrder", `{"orderId":"o-1"}`))
 	is(t, string(nextReply(t, s).GetPayload()), `{"orderId":"o-1","total":42}`)
 }
+
+// takeFrame waits at most 5 s for the next frame queued on ref other than Permits, and takes it.
+func takeFrame(t *testing.T, ref *streamRef) *hubpb.ClientMessage {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		ref.mu.Lock()
+		for len(ref.queue) > 0 {
+			m := ref.queue[0].m
+			ref.queue = ref.queue[1:]
+			if m.GetPermits() == nil {
+				ref.mu.Unlock()
+				return m
+			}
+		}
+		ref.mu.Unlock()
+		time.Sleep(5 * ms)
+	}
+	t.Fatal("no frame queued within 5 s")
+	return nil
+}
+
+func TestALastResortFailsOnlyTheRequest(t *testing.T) {
+	const lastResort = "serving a request from the hub panicked; the request fails, the stream goes on"
+	rec := &logRecorder{}
+	app := newApp(t, Hubs("localhost:7000"), Logger(slog.New(rec)))
+	is(t, HandleCommand(app, place), nil)
+	updates, err := HandleSubscription(app, watchOrders)
+	is(t, err, nil)
+	ref := newStreamRef(nil)
+	permits := newStreamPermits(ref, 4, time.Hour)
+	auth := map[string]string{"authorization": "Bearer a.b.c"}
+
+	// A defect on the stream's read loop (here: no permits): the request fails, the loop goes on.
+	app.dispatch(&hubpb.Request{Id: "r-1", Kind: hubpb.RequestKind_COMMAND, Type: "orders.PlaceOrder", Payload: []byte(`{}`)}, ref, nil)
+	r := takeFrame(t, ref).GetReply()
+	is(t, r.GetRequestId(), "r-1")
+	is(t, r.GetError().GetCode(), hubpb.ErrorCode_HANDLER_ERROR)
+	is(t, r.GetError().GetMessage(), "handler panicked")
+	is(t, rec.count(slog.LevelError, lastResort), 1)
+
+	// A defect on the request's goroutine (here: no identity resolver), for a unary request and
+	// for a subscription: each fails alone; the permit and the place come back.
+	app.identity = nil
+	app.dispatch(&hubpb.Request{Id: "r-2", Kind: hubpb.RequestKind_COMMAND, Type: "orders.PlaceOrder",
+		Payload: []byte(`{}`), Headers: auth}, ref, permits)
+	r = takeFrame(t, ref).GetReply()
+	is(t, r.GetRequestId(), "r-2")
+	is(t, r.GetError().GetMessage(), "handler panicked")
+	poll(t, func() bool { return !permits.busy() && app.inflight.count() == 0 })
+	app.dispatch(&hubpb.Request{Id: "w#1", Kind: hubpb.RequestKind_QUERY, Type: "orders.WatchOrders",
+		Mode: hubpb.RequestMode_SUBSCRIPTION, Payload: []byte(`{"topic":"t"}`), Headers: auth}, ref, permits)
+	end := takeFrame(t, ref).GetEnd()
+	is(t, end.GetRequestId(), "w#1")
+	is(t, end.GetError().GetCode(), hubpb.ErrorCode_HANDLER_ERROR)
+	is(t, end.GetError().GetMessage(), "handler panicked")
+	is(t, app.SubscriptionsServed(), 0)
+	is(t, updates.Emit(nil, OrderUpdate{Value: 1}), 0) // and an Emit does not wait for it
+	is(t, rec.count(slog.LevelError, lastResort), 3)
+
+	// A defect while routing a frame for this instance's own calls: dropped and logged.
+	app.calls = nil
+	app.route(&hubpb.ServerMessage{Message: &hubpb.ServerMessage_Part{Part: &hubpb.ReplyPart{RequestId: "q-1"}}})
+	is(t, rec.count(slog.LevelError, "a frame from the hub could not be handled; it is dropped, the stream goes on"), 1)
+}

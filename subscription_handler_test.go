@@ -2,8 +2,10 @@ package snodra
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -488,4 +490,115 @@ func TestAPanickingMatchSkipsItsSubscription(t *testing.T) {
 	// An update that does not encode reaches nobody.
 	is(t, updates.Emit(nil, func() {}), 0)
 	s.Nothing(t, 200*ms, "part")
+}
+
+// BrittleWatch is a subscription query whose decoding panics on the topic "boom" and, on a topic
+// with a gate in brittleGates, waits until the gate is closed: a buggy or a slow UnmarshalJSON.
+type BrittleWatch struct {
+	Topic string `json:"topic"`
+}
+
+func (BrittleWatch) MessageType() string { return "orders.BrittleWatch" }
+
+// brittleGates holds the decoding of a BrittleWatch of a topic (key) until its channel closes.
+var brittleGates sync.Map
+
+func (b *BrittleWatch) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Topic string `json:"topic"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	if raw.Topic == "boom" {
+		panic("boom in UnmarshalJSON") // a defect of the decoder
+	}
+	if gate, ok := brittleGates.Load(raw.Topic); ok {
+		<-gate.(chan struct{})
+	}
+	b.Topic = raw.Topic
+	return nil
+}
+
+// brittleRequest is a forwarded subscription target id of BrittleWatch on topic tp.
+func brittleRequest(id, tp string) *hubpb.ServerMessage {
+	return fakehub.Forward(&hubpb.Request{Id: id, Kind: hubpb.RequestKind_QUERY, Type: "orders.BrittleWatch",
+		Mode: hubpb.RequestMode_SUBSCRIPTION, Payload: []byte(`{"topic":"` + tp + `"}`)})
+}
+
+// brittle serves BrittleWatch (and PlaceOrder) on a fresh hub and returns its Updates, the app
+// and its first stream, acknowledged.
+func brittle(t *testing.T, opts ...Option) (*Updates[BrittleWatch], *App, *fakehub.Stream) {
+	t.Helper()
+	var updates *Updates[BrittleWatch]
+	app, s := serving(t, fakehub.Start(t), func(app *App) {
+		u, err := HandleSubscription(app, func(_ context.Context, q BrittleWatch) (OrderView, error) {
+			return OrderView{Topic: q.Topic}, nil
+		})
+		is(t, err, nil)
+		updates = u
+		is(t, HandleCommand(app, place), nil)
+	}, opts...)
+	return updates, app, s
+}
+
+func TestASubscriptionQueryWhoseDecodingPanicsIsAHandlerError(t *testing.T) {
+	rec := &logRecorder{}
+	updates, app, s := brittle(t, Logger(slog.New(rec)))
+	s.Send(t, brittleRequest("b#1", "boom"))
+	end := nextEnd(t, s)
+	is(t, end.GetRequestId(), "b#1")
+	is(t, end.GetError().GetCode(), hubpb.ErrorCode_HANDLER_ERROR)
+	is(t, end.GetError().GetMessage(), "handler panicked") // as for a unary handler; the value goes to the log
+	is(t, end.GetError().GetRequestId(), "b#1")
+	is(t, end.GetParts(), uint32(0))
+	is(t, app.SubscriptionsServed(), 0)
+	is(t, rec.count(slog.LevelError, "handler panicked"), 1)
+	// The stream and the process go on: a command is answered, another subscription is served.
+	alive(t, s, "r-1")
+	s.Send(t, brittleRequest("b#2", "fine"))
+	poll(t, func() bool { return updates.Emit(nil, OrderUpdate{Value: 1}) == 1 })
+	p := nextPart(t, s)
+	is(t, p.GetRequestId(), "b#2")
+	is(t, p.GetSeq(), uint64(1))
+}
+
+func TestASlowSubscriptionQueryDecodingDoesNotHoldTheStream(t *testing.T) {
+	gate := make(chan struct{})
+	brittleGates.Store("slow", gate)
+	t.Cleanup(func() { brittleGates.Delete("slow") })
+	updates, app, s := brittle(t)
+	s.Send(t, brittleRequest("b#1", "slow"))
+	poll(t, func() bool { return app.SubscriptionsServed() == 1 }) // registered at once, before its decoding
+	// The stream's loop is free while the query decodes: a command is answered meanwhile.
+	alive(t, s, "r-1")
+	// An update emitted after the request was read still reaches it: Emit waits for the decoding.
+	emitted := make(chan int, 1)
+	go func() { emitted <- updates.Emit(topicOf("slow"), OrderUpdate{Value: 1}) }()
+	select {
+	case n := <-emitted:
+		t.Fatalf("Emit returned %d before the query was decoded", n)
+	case <-time.After(100 * ms):
+	}
+	close(gate)
+	is(t, receive(t, emitted), 1)
+	p := nextPart(t, s)
+	is(t, p.GetRequestId(), "b#1")
+	is(t, string(p.GetPayload()), `{"value":1}`)
+	// A cancel while the query decodes ends it without a word.
+	gate2 := make(chan struct{})
+	brittleGates.Store("slow-2", gate2)
+	t.Cleanup(func() { brittleGates.Delete("slow-2") })
+	s.Send(t, brittleRequest("b#2", "slow-2"))
+	poll(t, func() bool { return app.SubscriptionsServed() == 2 })
+	s.Send(t, fakehub.Cancel("b#2", "sender disconnected"))
+	poll(t, func() bool { return app.SubscriptionsServed() == 1 })
+	close(gate2)
+	is(t, updates.Emit(topicOf("slow-2"), OrderUpdate{Value: 2}), 0)
+	s.Nothing(t, 200*ms, "part", "end")
+}
+
+// topicOf matches the subscriptions of BrittleWatch on tp.
+func topicOf(tp string) func(BrittleWatch) bool {
+	return func(q BrittleWatch) bool { return q.Topic == tp }
 }
