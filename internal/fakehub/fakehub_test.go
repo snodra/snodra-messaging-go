@@ -310,6 +310,8 @@ func TestInvalidRegistersAreRefused(t *testing.T) {
 		"no permits":        {ServiceName: "orders-service", InstanceId: "i-1"},
 		"reserved service":  {ServiceName: "snodra-server", InstanceId: "i-1", InitialPermits: 1},
 		"reserved instance": {ServiceName: "orders-service", InstanceId: "snodra-server/x", InitialPermits: 1},
+		"subscription type not a query type": {ServiceName: "orders-service", InstanceId: "i-1", InitialPermits: 1,
+			CommandTypes: []string{"orders.Watch"}, SubscriptionQueryTypes: []string{"orders.Watch"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			hub := Start(t)

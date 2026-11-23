@@ -50,7 +50,8 @@ type Subscription[I, U any] struct {
 //	}
 //
 // Subscribe returns once the initial result arrived, so its errors are those of [Query]: an
-// [*Error] (NO_HANDLER without an owner, INVALID_REQUEST for a type served in another mode,
+// [*Error] (NO_HANDLER without an owner, INVALID_REQUEST for a type no owner declared a
+// subscription query type, which the hub refuses itself, or one served in another mode,
 // TIMEOUT when the initial result is not in time, the handler's error, RESOURCE_EXHAUSTED, ...),
 // [ErrNeverSent], [ErrOutcomeUnknown], the context's error, or a local failure (an initial result
 // that does not decode, a hub that ended the subscription without one). The retry policy applies

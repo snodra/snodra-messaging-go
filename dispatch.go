@@ -351,7 +351,7 @@ func (a *App) lookup(req *hubpb.Request, streaming bool) (*handler, hubpb.ErrorC
 	case h.kind == kindSubscription:
 		// A subscription's initial result is the unary request <id>#0, answered by the
 		// subscription's initial handler; any other unary request used the wrong call.
-		// TODO(spec-gap): SG-13 (recognised by the #0 suffix alone, which scatter-gather target ids share).
+		// TODO(spec-gap): SG-13 (recognised by the #0 suffix; the hub gathers no declared subscription type).
 		if strings.HasSuffix(req.GetId(), "#0") {
 			return h, 0, ""
 		}

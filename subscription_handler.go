@@ -15,7 +15,10 @@ import (
 // (each a U) to the subscriptions this instance serves, until they complete or fail. I and U are
 // what a subscriber reads with [Subscribe][I, U]. U cannot be inferred: give the three types,
 // HandleSubscription[Q, I, U](app, initial). Q is registered in
-// Register.query_types (with [Shared], in Register.shared_query_types).
+// Register.query_types (with [Shared], in Register.shared_query_types), and declared in
+// Register.subscription_query_types: the hub serves it in mode SUBSCRIPTION only, so a [Query],
+// [Stream] or [Gather] of Q is answered INVALID_REQUEST by the hub before any instance sees it
+// (this instance answers one that reaches it, through another hub or in-process, the same way).
 //
 // The hub subscribes every live instance of every owner of Q: each gets the subscription (a
 // request <id>#n, which this instance registers at once, before its admission: the caller's

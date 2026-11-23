@@ -193,23 +193,27 @@ func (ControlRefusal) EnumDescriptor() ([]byte, []int) {
 
 // How the hub delivers a Request and its answers. The modes other than UNARY are for
 // queries only: a command fails with INVALID_REQUEST, and so does a mode value this file does not
-// define. No live instance fails with an Error NO_HANDLER.
+// define. No live instance fails with an Error NO_HANDLER. A subscription type
+// (Register.subscription_query_types) is served in mode SUBSCRIPTION only: a sender's Request for
+// it in any other mode fails with INVALID_REQUEST, and no instance gets anything.
 type RequestMode int32
 
 const (
-	// One handler, one Reply or Error.
+	// One handler, one Reply or Error. A subscription type fails with INVALID_REQUEST.
 	RequestMode_UNARY RequestMode = 0
 	// Every live instance of every owner gets an ordinary unary Request; the sender gets one
-	// ReplyPart per answer, in arrival order, then a ReplyEnd.
+	// ReplyPart per answer, in arrival order, then a ReplyEnd. A subscription type
+	// (Register.subscription_query_types) fails with INVALID_REQUEST, and no instance gets anything.
 	RequestMode_SCATTER_GATHER RequestMode = 1
 	// One live instance gets the Request (mode STREAMING, id "<id>#1", the sender's
 	// initial_credit) and answers with ReplyParts and a ReplyEnd, relayed to the sender under the
-	// sender's credits (initial_credit, then Flow).
+	// sender's credits (initial_credit, then Flow). A subscription type fails with INVALID_REQUEST.
 	RequestMode_STREAMING RequestMode = 2
 	// The initial result comes from one live instance (an ordinary unary Request "<id>#0"); every
 	// live instance of every owner gets the Request with mode SUBSCRIPTION ("<id>#n", n >= 1) and
 	// pushes its updates as ReplyParts. The sender gets the initial result, then the updates, as
-	// ReplyParts under its credits, until a ReplyEnd or its Cancel.
+	// ReplyParts under its credits, until a ReplyEnd or its Cancel. Only for a subscription type
+	// (Register.subscription_query_types): any other type fails with INVALID_REQUEST.
 	RequestMode_SUBSCRIPTION RequestMode = 3
 )
 
@@ -877,11 +881,13 @@ func (*ServerMessage_Control) isServerMessage_Message() {}
 // registered exclusive by one registrant and shared by another is rejected with ALREADY_EXISTS
 // (the later Register fails). A type listed in shared_query_types and in command_types or
 // query_types of the same Register is rejected with INVALID_ARGUMENT. Commands are never shared.
+// A query type may also be declared a subscription type (subscription_query_types); registrants
+// must agree on that too.
 //
 // Every accepted Register is answered with a RegisterAck, written before the echo of any
 // Heartbeat that follows it. credentials, initial_permits, load_factor, tags and client_version
 // are read from the first Register of a stream only; later Registers cannot change them. Field 11
-// is reserved for contexts.
+// is reserved for contexts; fields 5 and 6 were used by an earlier version and are never reused.
 type Register struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Logical service name, for example "orders-service"; each event-store add-on derives its
@@ -913,8 +919,19 @@ type Register struct {
 	// for example a "search.FindAnything" every service answers. A point query to such a
 	// type goes to one live instance of any owner; a scatter-gather query to all of them.
 	SharedQueryTypes []string `protobuf:"bytes,13,rep,name=shared_query_types,json=sharedQueryTypes,proto3" json:"shared_query_types,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// Of the types in query_types and shared_query_types, the ones this instance serves with a
+	// subscription handler, for example a "prices.WatchPrices" whose handler recognises the initial
+	// request by its "<id>#0" id. A type listed here and in neither is rejected with
+	// INVALID_ARGUMENT. Registrants must agree: a type registered as a subscription type by one
+	// registrant and not by another is rejected with ALREADY_EXISTS (the later Register fails), also
+	// when the only instance re-registers it (until the hub forgets the type: owner grace, then a
+	// sweep). The hub serves a subscription type in mode SUBSCRIPTION only, and mode SUBSCRIPTION
+	// for subscription types only: anything else fails with INVALID_REQUEST before any instance gets
+	// anything (see RequestMode). The initial request "<id>#0" is the hub's own and reaches the
+	// handler as usual.
+	SubscriptionQueryTypes []string `protobuf:"bytes,14,rep,name=subscription_query_types,json=subscriptionQueryTypes,proto3" json:"subscription_query_types,omitempty"`
+	unknownFields          protoimpl.UnknownFields
+	sizeCache              protoimpl.SizeCache
 }
 
 func (x *Register) Reset() {
@@ -1013,6 +1030,13 @@ func (x *Register) GetClientVersion() string {
 func (x *Register) GetSharedQueryTypes() []string {
 	if x != nil {
 		return x.SharedQueryTypes
+	}
+	return nil
+}
+
+func (x *Register) GetSubscriptionQueryTypes() []string {
+	if x != nil {
+		return x.SubscriptionQueryTypes
 	}
 	return nil
 }
@@ -4453,7 +4477,7 @@ const file_hub_proto_rawDesc = "" +
 	"\x06cancel\x18\t \x01(\v2\x15.snodra.hub.v1.CancelH\x00R\x06cancel\x129\n" +
 	"\acontrol\x18\n" +
 	" \x01(\v2\x1d.snodra.hub.v1.ControlRequestH\x00R\acontrolB\t\n" +
-	"\amessage\"\xe1\x03\n" +
+	"\amessage\"\xa7\x04\n" +
 	"\bRegister\x12!\n" +
 	"\fservice_name\x18\x01 \x01(\tR\vserviceName\x12\x1f\n" +
 	"\vinstance_id\x18\x02 \x01(\tR\n" +
@@ -4468,10 +4492,11 @@ const file_hub_proto_rawDesc = "" +
 	"\x04tags\x18\n" +
 	" \x03(\v2!.snodra.hub.v1.Register.TagsEntryR\x04tags\x12%\n" +
 	"\x0eclient_version\x18\f \x01(\tR\rclientVersion\x12,\n" +
-	"\x12shared_query_types\x18\r \x03(\tR\x10sharedQueryTypes\x1a7\n" +
+	"\x12shared_query_types\x18\r \x03(\tR\x10sharedQueryTypes\x128\n" +
+	"\x18subscription_query_types\x18\x0e \x03(\tR\x16subscriptionQueryTypes\x1a7\n" +
 	"\tTagsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"5\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01J\x04\b\x05\x10\x06J\x04\b\x06\x10\a\"5\n" +
 	"\aPermits\x12\x14\n" +
 	"\x05count\x18\x01 \x01(\rR\x05count\x12\x14\n" +
 	"\x05grant\x18\x02 \x01(\rR\x05grant\"\xaa\x01\n" +

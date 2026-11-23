@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -417,6 +418,12 @@ func checkFirst(m *hubpb.ClientMessage) (codes.Code, string) {
 		return codes.InvalidArgument, "service_name is reserved"
 	case strings.HasPrefix(r.GetInstanceId(), "snodra-server/"):
 		return codes.InvalidArgument, "instance_id is reserved"
+	}
+	// As the hub: a subscription type must be one of the Register's query types.
+	for _, t := range r.GetSubscriptionQueryTypes() {
+		if !slices.Contains(r.GetQueryTypes(), t) && !slices.Contains(r.GetSharedQueryTypes(), t) {
+			return codes.InvalidArgument, "subscription type " + t + " is not one of the query types"
+		}
 	}
 	return codes.OK, ""
 }

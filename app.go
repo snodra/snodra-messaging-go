@@ -42,10 +42,11 @@ type App struct {
 	cancelHandlers context.CancelFunc
 	slots          chan struct{} // MaxConcurrent handlers at once
 	inflight       *inflight     // requests being served
-	// handlers by type, written before Start only; commandTypes, queryTypes and
-	// sharedQueryTypes are their names, sorted, fixed by Start.
+	// handlers by type, written before Start only; commandTypes, queryTypes,
+	// sharedQueryTypes and subscriptionTypes are their names, sorted, fixed by Start.
 	handlers                                   map[string]*handler
 	commandTypes, queryTypes, sharedQueryTypes []string
+	subscriptionTypes                          []string         // of query_types or shared_query_types
 	calls                                      *pendingCalls    // the sent requests awaiting their answer
 	running                                    *runningRequests // the forwarded requests being served, for the hub's Cancel
 	subs                                       *servedSubscriptions
@@ -418,10 +419,13 @@ func (a *App) registerMsg() *hubpb.Register {
 		CommandTypes:     slices.Clone(a.commandTypes),
 		QueryTypes:       slices.Clone(a.queryTypes),
 		SharedQueryTypes: slices.Clone(a.sharedQueryTypes),
-		InitialPermits:   uint32(a.cfg.maxConcurrent),
-		LoadFactor:       a.cfg.loadFactor,
-		Tags:             maps.Clone(a.cfg.tags),
-		ClientVersion:    clientVersion(),
+		// The types served by subscription handlers, also in one of the query lists: the hub
+		// serves them in mode SUBSCRIPTION only.
+		SubscriptionQueryTypes: slices.Clone(a.subscriptionTypes),
+		InitialPermits:         uint32(a.cfg.maxConcurrent),
+		LoadFactor:             a.cfg.loadFactor,
+		Tags:                   maps.Clone(a.cfg.tags),
+		ClientVersion:          clientVersion(),
 	}
 }
 
@@ -429,6 +433,6 @@ func (a *App) registerMsg() *hubpb.Register {
 // of its routing.
 func (a *App) emptyRegisterMsg() *hubpb.Register {
 	r := a.registerMsg()
-	r.CommandTypes, r.QueryTypes, r.SharedQueryTypes = nil, nil, nil
+	r.CommandTypes, r.QueryTypes, r.SharedQueryTypes, r.SubscriptionQueryTypes = nil, nil, nil, nil
 	return r
 }

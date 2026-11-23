@@ -198,6 +198,11 @@ spot.
   subscription handler for <type> on this instance". The Kotlin library names the handler's method in its "is not a
   ... handler" texts and says mode `UNARY` for every handler of another mode; this library names the mode the handler
   serves.
+- **The hub first:** since services declare their subscription types (SG-13), the hub itself refuses with one
+  `Error{INVALID_REQUEST}`, before any instance gets anything, a unary, streaming or scatter-gather request of a
+  declared subscription type, and a subscription request of a query type nobody declared; and a streaming or a
+  subscription request of a command type. The handler-side answers above stay as a second line of defence: a hub
+  that does not check, and a request answered in-process, reach them.
 - **This library:** answers as the table says (`dispatch.go`, `subscription_handler.go`), pinned cell by cell by
   `TestEveryModeAgainstEveryHandler`. Before, it answered a streaming request to a subscription handler, and a
   subscription request of a command type or of a type not served, with `NO_HANDLER`, as the Rust library does.
@@ -209,14 +214,17 @@ spot.
 - **Specification:** [protocol.md, Subscription](https://snodra.damoreira.com/library-authors/protocol/) says the
   handler of a subscription type "recognises the initial request by its `#0` id and answers any other unary request
   with `ErrorCode.INVALID_REQUEST`"; [Scatter-gather](https://snodra.damoreira.com/library-authors/protocol/) numbers
-  the targets `<id>#0`, `<id>#1`, ... too.
-- **Rust library:** recognises the initial request by the `#0` suffix alone, as the specification says, and
-  notes the collision: a scatter-gather of a subscription type would have its target `<id>#0` answered with the
-  initial result (and the other targets with `INVALID_REQUEST`). Only a raw client can send one: the typed calls never
-  gather a subscription type. The Kotlin library recognises it by the suffix alone too.
-- **This library:** does the same, as the Kotlin library does (`dispatch.go`).
-- **Question:** should the initial request carry something no scatter-gather target can (its own mode, or a header),
-  or should the hub refuse a scatter-gather of a subscription type?
+  the targets `<id>#0`, `<id>#1`, ... too, so a scatter-gather of a subscription type would have its target `<id>#0`
+  answered with an initial result.
+- **Settled:** a service declares the types its subscription handlers serve in `Register.subscription_query_types`
+  (each also in `query_types` or `shared_query_types`; the registrants of a type must agree, else `ALREADY_EXISTS`).
+  The hub serves a declared type in mode `SUBSCRIPTION` only: a point query, a streaming query or a scatter-gather of
+  it is refused with one `Error{INVALID_REQUEST}` before any instance gets anything, and a subscription of a query
+  type nobody declared likewise. A `#0` request at a subscription handler therefore always comes from the hub.
+- **This library:** declares every type registered with `HandleSubscription`, shared or not, on every `Register`
+  (the empty one of a shutdown, a rollover or a withdrawn address clears it with the other lists), and still
+  recognises the initial request by its `#0` suffix (`app.go`, `register.go`, `dispatch.go`).
+- **Question:** settled.
 
 ### SG-14: the http:// and https:// prefixes of a hub address
 

@@ -248,8 +248,11 @@ func (a *App) registrationError() error {
 // freezeTypes lists the registered types for the Register, sorted. Called by Start with a.mu
 // held; the handlers do not change afterwards.
 func (a *App) freezeTypes() {
-	a.commandTypes, a.queryTypes, a.sharedQueryTypes = nil, nil, nil
+	a.commandTypes, a.queryTypes, a.sharedQueryTypes, a.subscriptionTypes = nil, nil, nil, nil
 	for name, h := range a.handlers {
+		if h.kind == kindSubscription {
+			a.subscriptionTypes = append(a.subscriptionTypes, name)
+		}
 		switch {
 		case h.kind == kindCommand:
 			a.commandTypes = append(a.commandTypes, name)
@@ -262,4 +265,5 @@ func (a *App) freezeTypes() {
 	slices.Sort(a.commandTypes)
 	slices.Sort(a.queryTypes)
 	slices.Sort(a.sharedQueryTypes)
+	slices.Sort(a.subscriptionTypes)
 }

@@ -6,6 +6,9 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
+
+	"google.golang.org/grpc/codes"
 
 	"github.com/snodra/snodra-messaging-go/internal/fakehub"
 )
@@ -85,4 +88,41 @@ func TestStartReturnsEveryRegistrationError(t *testing.T) {
 		}
 	}
 	hub.NoStreamWithin(t, 200*ms) // not started
+}
+
+// The Register declares the types served by subscription handlers in subscription_query_types,
+// each also in query_types or shared_query_types; the hub serves them in mode SUBSCRIPTION only.
+// Every Register carries the declaration, the empty one of a shutdown clears it with the lists.
+func TestRegisterDeclaresTheSubscriptionTypes(t *testing.T) {
+	hub := fakehub.Start(t)
+	app := newApp(t, Hubs(hub.Addr()))
+	is(t, HandleQuery(app, get), nil)
+	is(t, HandleStream(app, listOrders), nil)
+	_, err := HandleSubscription[WatchOrders, OrderView, OrderUpdate](app, watchOrders)
+	is(t, err, nil)
+	_, err = HandleSubscription[GetStock, Stock, Stock](app, func(context.Context, GetStock) (Stock, error) { return Stock{}, nil }, Shared())
+	is(t, err, nil)
+	is(t, app.Start(context.Background()), nil)
+	s := hub.Next(t)
+	r := s.RecvRegister(t)
+	is(t, strings.Join(r.GetQueryTypes(), ","), "orders.GetOrder,orders.ListOrders,orders.WatchOrders")
+	is(t, strings.Join(r.GetSharedQueryTypes(), ","), "orders.GetStock")
+	is(t, strings.Join(r.GetSubscriptionQueryTypes(), ","), "orders.GetStock,orders.WatchOrders") // sorted
+	s.Recv(t)
+	s.Ack(t, fakehub.Ack("hub-1"))
+	is(t, app.Ready(ctxWithin(t, time.Second)), nil)
+	done := make(chan error, 1)
+	go func() { done <- app.Shutdown(ctxWithin(t, 5*time.Second)) }()
+	empty := s.RecvRegister(t)
+	is(t, len(empty.GetQueryTypes())+len(empty.GetSharedQueryTypes())+len(empty.GetSubscriptionQueryTypes()), 0)
+	s.Ack(t, fakehub.Ack("hub-1"))
+	s.HalfClosed(t, 2*time.Second)
+	s.Close(codes.OK, "")
+	is(t, <-done, nil)
+
+	// Without a subscription handler, nothing is declared.
+	plain := newApp(t, Hubs(hub.Addr()))
+	is(t, HandleQuery(plain, get), nil)
+	is(t, plain.Start(context.Background()), nil)
+	is(t, len(hub.Next(t).RecvRegister(t).GetSubscriptionQueryTypes()), 0)
 }
