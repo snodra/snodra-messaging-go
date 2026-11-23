@@ -748,3 +748,41 @@ func TestAHubIDFreedByADuplicateRevivesTheAddressParkedBehindIt(t *testing.T) { 
 	isAlive(t, sc2)
 	a.NoStreamWithin(t, 300*ms) // a stays parked: hub-y is owned
 }
+
+// nextStatus is the next InstanceStatus on s within d, skipping other frames; nil when none.
+func nextStatus(t *testing.T, s *fakehub.Stream, d time.Duration) *hubpb.InstanceStatus {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		if st := s.Statuses(); len(st) > 0 {
+			return st[len(st)-1]
+		}
+		time.Sleep(5 * ms)
+	}
+	return nil
+}
+
+func TestInstanceStatusWhenTheLiveHubsChange(t *testing.T) {
+	h := [2]*fakehub.Hub{fakehub.Start(t), fakehub.Start(t)}
+	app := startApp(t, Hubs(h[0].Addr(), h[1].Addr())) // the periodic report only every 5 s
+	s1, _ := registered(t, h[0], "hub-1")
+	s2, _ := registered(t, h[1], "hub-2")
+	hubIDsAre(t, app, "hub-1", "hub-2")
+	// Each acknowledgement changed the live hubs: a report went out at once.
+	st := nextStatus(t, s1, time.Second)
+	if st == nil {
+		t.Fatal("no InstanceStatus within 1 s of the live hubs changing")
+	}
+	poll(t, func() bool {
+		last := s1.Statuses()[len(s1.Statuses())-1].GetConnectedHubIds()
+		return len(last) == 2
+	})
+	is(t, nextStatus(t, s2, time.Second) != nil, true)
+	// hub-2's stream ends: hub-1 hears of it at once.
+	before := len(s1.Statuses())
+	s2.Close(codes.Unavailable, "restarting")
+	poll(t, func() bool {
+		all := s1.Statuses()
+		return len(all) > before && slices.Equal(all[len(all)-1].GetConnectedHubIds(), []string{"hub-1"})
+	})
+}

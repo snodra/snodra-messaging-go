@@ -126,8 +126,9 @@ func targetStrings(targets []target) []string {
 }
 
 // StatusInterval is how often every hub with an acknowledged stream gets an InstanceStatus (the
-// hubs it is connected to, its handlers in flight). The default is 5 s, which is what the
-// protocol asks for at most; it must be at least 1 ms.
+// hubs it is connected to, its handlers in flight); one also goes out whenever the set of
+// acknowledged hubs changes. The default is 5 s, which is what the protocol asks for at most; it
+// must be at least 1 ms.
 func StatusInterval(d time.Duration) Option {
 	return func(c *config) error {
 		if d < time.Millisecond {

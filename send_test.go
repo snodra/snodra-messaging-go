@@ -225,7 +225,7 @@ func TestNoAcknowledgedStreamIsNeverSent(t *testing.T) {
 	is(t, errors.Is(err, ErrOutcomeUnknown), false)
 	within(t, time.Since(start), 0, 100*ms) // at once: it waits for no ack
 	s.Nothing(t, 200*ms, "request")
-	is(t, s.Recv(t).GetHeartbeat() != nil, true) // the stream is alive: nothing was written to it
+	is(t, aliveFrame(s.Recv(t)), true) // the stream is alive: nothing was written to it
 }
 
 // blockRequests is a write hook holding the writer before it takes a Request, until release
@@ -358,7 +358,7 @@ func TestContextDeadlineIsTheCallersTimeout(t *testing.T) {
 	is(t, errors.Is(err, context.DeadlineExceeded), true)
 	is(t, errors.Is(err, ErrNeverSent), true)
 	s.Nothing(t, 100*ms, "request")
-	is(t, s.Recv(t).GetHeartbeat() != nil, true) // the stream is alive: nothing was written to it
+	is(t, aliveFrame(s.Recv(t)), true) // the stream is alive: nothing was written to it
 }
 
 func TestATimeoutPerCallWinsOverTheDefault(t *testing.T) { // as in the reference libraries
@@ -402,8 +402,8 @@ func TestCancelledContextBeforeTheWriteIsNeverSent(t *testing.T) {
 	is(t, errors.Is(o.err, context.Canceled), true)
 	is(t, errors.Is(o.err, ErrNeverSent), true)
 	close(release)
-	s.Nothing(t, 200*ms, "request")              // withdrawn from the buffer: never written
-	is(t, s.Recv(t).GetHeartbeat() != nil, true) // and the stream is alive
+	s.Nothing(t, 200*ms, "request")    // withdrawn from the buffer: never written
+	is(t, aliveFrame(s.Recv(t)), true) // and the stream is alive
 }
 
 func TestSendRefusesWhatItCannotSend(t *testing.T) {
@@ -420,7 +420,7 @@ func TestSendRefusesWhatItCannotSend(t *testing.T) {
 	_, err = Send[Empty](ctx, app, PlaceOrder{}, Retry(RetryPolicy{MaxAttempts: 2, Multiplier: 0.5}))
 	is(t, err != nil, true)
 	s.Nothing(t, 100*ms, "request")
-	is(t, s.Recv(t).GetHeartbeat() != nil, true) // the stream is alive: nothing was written to it
+	is(t, aliveFrame(s.Recv(t)), true) // the stream is alive: nothing was written to it
 }
 
 func TestTheOutboundBufferHoldsAtMost256Requests(t *testing.T) {
@@ -509,3 +509,6 @@ func TestASendWaitingForRoomEndsWithShutdown(t *testing.T) {
 	is(t, errors.Is(o.err, ErrOutcomeUnknown), false)
 	await(t, stopped)
 }
+
+// aliveFrame is a heartbeat or an InstanceStatus: what a live stream sends unprompted.
+func aliveFrame(m *hubpb.ClientMessage) bool { return m.GetHeartbeat() != nil || m.GetStatus() != nil }

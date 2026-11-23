@@ -118,7 +118,7 @@ func TestACommandIsNeverRetriedAfterAnUnknownOutcome(t *testing.T) {
 	s2.Recv(t)
 	s2.Ack(t, fakehub.Ack("hub-1"))
 	s2.Nothing(t, 200*ms, "request")
-	is(t, s2.Recv(t).GetHeartbeat() != nil, true) // alive
+	is(t, aliveFrame(s2.Recv(t)), true) // alive
 }
 
 func TestARequestNeverSentIsRetried(t *testing.T) {
@@ -154,7 +154,7 @@ func TestNoRetryWithLessThanTheMinimumLeft(t *testing.T) { // SG-2
 	var e *Error
 	is(t, errors.As(await(t, sent).err, &e) && e.Code == CodeNoHandler, true)
 	s.Nothing(t, 400*ms, "request")
-	is(t, s.Recv(t).GetHeartbeat() != nil, true) // the stream is alive: no retry was written to it
+	is(t, aliveFrame(s.Recv(t)), true) // the stream is alive: no retry was written to it
 }
 
 func TestNoRetryAfterTheLastAttemptOrWithNoRetry(t *testing.T) {
@@ -172,5 +172,5 @@ func TestNoRetryAfterTheLastAttemptOrWithNoRetry(t *testing.T) {
 	s.Send(t, fakehub.HubError(r.GetId(), hubpb.ErrorCode_NO_HANDLER, "nobody"))
 	is(t, await(t, sent).err != nil, true)
 	s.Nothing(t, 200*ms, "request")
-	is(t, s.Recv(t).GetHeartbeat() != nil, true) // the stream is alive: no retry was written to it
+	is(t, aliveFrame(s.Recv(t)), true) // the stream is alive: no retry was written to it
 }

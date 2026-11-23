@@ -43,7 +43,8 @@ const (
 //     connect attempt, itself included. When N shrinks every live stream is topped up to
 //     ceil(MaxConcurrent / N) with one Permits{count, grant}; nothing is ever revoked, and the
 //     local bound stays MaxConcurrent.
-//   - Status. Every statusInterval each live hub gets an InstanceStatus.
+//   - Status. Every statusInterval, and whenever the live hubs change, each live hub gets an
+//     InstanceStatus.
 //   - DNS. A dns:///name:port target is resolved at start and every dnsRefresh: a new address
 //     gets a connection; a vanished one leaves the routing at once, gets a Register with no
 //     types and is closed once idle (at most dnsDrainLimit later). A failed or empty answer
@@ -273,9 +274,11 @@ func (p *pool) initialPermits(c *hubConn) uint32 {
 }
 
 // changed is called when the set of live hubs (or of hubs on their first attempt) may have
-// shrunk: every live stream is topped up to ceil(MaxConcurrent / N). More hubs change nothing:
-// permits are never revoked.
+// changed: every live stream is topped up to ceil(MaxConcurrent / N) (more hubs change nothing:
+// permits are never revoked), and every live hub gets an InstanceStatus at once, as in the
+// reference library.
 func (p *pool) changed() {
+	defer p.reportStatus()
 	share := shareOf(p.app.cfg.maxConcurrent, p.hubCount(nil))
 	for _, h := range p.live() {
 		if perms := h.conn.livePermits(); perms != nil {
@@ -368,7 +371,8 @@ func (p *pool) remove(c *hubConn) {
 	p.startRevived(revived)
 }
 
-// reportStatusEvery sends an InstanceStatus to every live hub every interval, until the hard
+// reportStatusEvery sends an InstanceStatus to every live hub every interval (changed sends one
+// too, whenever the live hubs change), until the hard
 // stop (the shutdown's streams are still reported to until they close).
 func (p *pool) reportStatusEvery(interval time.Duration) {
 	ticker := time.NewTicker(max(interval, time.Millisecond))
