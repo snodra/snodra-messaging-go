@@ -95,7 +95,7 @@ type hubConn struct {
 // String names the connection by its hub, never its credentials.
 func (c *hubConn) String() string { return "hubConn{" + c.address + "}" }
 
-// Format prints String whatever the verb.
+// Format prints String for every verb that reaches a Formatter (not %p or %w: see printRedacted).
 func (c *hubConn) Format(f fmt.State, _ rune) { _, _ = io.WriteString(f, c.String()) }
 
 // LogValue is String, for log/slog.

@@ -31,9 +31,9 @@ import (
 // or a client certificate (tls.go). One kind per instance.
 // See https://snodra.damoreira.com/library-authors/protocol/ (Credentials).
 
-// secret holds a credential behind a closure: fmt prints a func as an address, so no verb
-// shows the value, not even through the struct fields fmt prints raw (unexported ones, or with
-// a verb that does not fit them); its String hides it too.
+// secret holds a credential behind a closure: fmt prints a func as an address, so the value
+// does not show even where fmt prints struct fields raw (unexported ones, or after a verb that
+// does not fit); its String hides it too.
 type secret struct{ get func() string }
 
 // newSecret is v, trimmed, as a secret; nil for a blank v.
@@ -49,15 +49,17 @@ func hide(v string) *secret { return &secret{get: func() string { return v }} }
 
 func (s *secret) String() string { return "***" }
 
-// Format prints "***" whatever the verb.
+// Format prints "***" for every verb that reaches a Formatter (not %p or %w: see printRedacted).
 func (s *secret) Format(f fmt.State, _ rune) { printRedacted(f, s.String()) }
 
 // LogValue is "***", for log/slog.
 func (s *secret) LogValue() slog.Value { return slog.StringValue(s.String()) }
 
-// printRedacted writes text, a value's redacted form, whatever the verb: the types that hold a
-// credential implement fmt.Formatter with it, so no verb (%v, %+v, %#v, %d, %x ...) reaches
-// their fields.
+// printRedacted writes text, a value's redacted form: the types that hold a credential
+// implement fmt.Formatter with it, so the verbs that fit them (%v, %+v, %#v, %s, %q, %d, %x ...)
+// never reach their fields. Not covered: %p and %w, which fmt rejects as bad verbs before
+// calling a Formatter and prints the struct raw (go vet flags both), and encoding/json, which
+// writes the exported fields.
 func printRedacted(f fmt.State, text string) { _, _ = io.WriteString(f, text) }
 
 // reveal is the value, to put on the wire; "" for none.
@@ -100,7 +102,9 @@ func readTokenFile(path string) (string, error) {
 	return strings.TrimSpace(string(b)), nil
 }
 
-// AccessToken is a JWT the instance registers with, and when it expires.
+// AccessToken is a JWT the instance registers with, and when it expires. Printing it with %v,
+// %+v, %#v or %s hides the token; %p and %w print the struct raw, and json.Marshal includes
+// Value.
 type AccessToken struct {
 	// Value is the token, as sent in Register.credentials.jwt.
 	Value string
@@ -116,7 +120,7 @@ func (t AccessToken) String() string {
 	return "AccessToken{Value: ***, Expiry: " + t.Expiry.Format(time.RFC3339) + "}"
 }
 
-// Format prints String whatever the verb.
+// Format prints String for every verb that reaches a Formatter (not %p or %w: see printRedacted).
 func (t AccessToken) Format(f fmt.State, _ rune) { printRedacted(f, t.String()) }
 
 // LogValue is String, for log/slog.
@@ -150,7 +154,8 @@ func JWT(src TokenSource) Option {
 }
 
 // ClientCredentials are the settings of an OAuth2 client-credentials grant
-// (see [NewClientCredentials]).
+// (see [NewClientCredentials]). Printing it with %v, %+v, %#v or %s hides the secret; %p and %w
+// print the struct raw, and json.Marshal includes ClientSecret.
 type ClientCredentials struct {
 	// TokenURL is the token endpoint, http:// or https:// (SNODRA_SERVER_OAUTH2_TOKEN_URI).
 	TokenURL string
@@ -175,7 +180,7 @@ func (c ClientCredentials) String() string {
 		c.TokenURL, c.ClientID, c.ClientSecretFile, c.Scope, c.CAFile)
 }
 
-// Format prints String whatever the verb.
+// Format prints String for every verb that reaches a Formatter (not %p or %w: see printRedacted).
 func (c ClientCredentials) Format(f fmt.State, _ rune) { printRedacted(f, c.String()) }
 
 // LogValue is String, for log/slog.
@@ -218,7 +223,7 @@ type clientCredentials struct {
 // String shows the settings, never the secret.
 func (cc *clientCredentials) String() string { return cc.cfg.String() }
 
-// Format prints String whatever the verb.
+// Format prints String for every verb that reaches a Formatter (not %p or %w: see printRedacted).
 func (cc *clientCredentials) Format(f fmt.State, _ rune) { printRedacted(f, cc.String()) }
 
 // LogValue is String, for log/slog.
@@ -511,7 +516,7 @@ func (t *issuedToken) String() string {
 	return fmt.Sprintf("issuedToken{gen: %d, expiry: %s}", t.gen, t.expiry.Format(time.RFC3339))
 }
 
-// Format prints String whatever the verb.
+// Format prints String for every verb that reaches a Formatter (not %p or %w: see printRedacted).
 func (t *issuedToken) Format(f fmt.State, _ rune) { printRedacted(f, t.String()) }
 
 // LogValue is String, for log/slog.
@@ -572,7 +577,7 @@ func newTokenProvider(src TokenSource, log *slog.Logger, wait time.Duration) *to
 // String names the provider, never a token.
 func (p *tokenProvider) String() string { return "tokenProvider{}" }
 
-// Format prints String whatever the verb.
+// Format prints String for every verb that reaches a Formatter (not %p or %w: see printRedacted).
 func (p *tokenProvider) Format(f fmt.State, _ rune) { printRedacted(f, p.String()) }
 
 // LogValue is String, for log/slog.

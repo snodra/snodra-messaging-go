@@ -147,7 +147,7 @@ func (id *clientIdentity) String() string {
 		id.notAfter.UTC().Format(time.RFC3339))
 }
 
-// Format prints String whatever the verb.
+// Format prints String for every verb that reaches a Formatter (not %p or %w: see printRedacted).
 func (id *clientIdentity) Format(f fmt.State, _ rune) { _, _ = io.WriteString(f, id.String()) }
 
 // LogValue is String, for log/slog.

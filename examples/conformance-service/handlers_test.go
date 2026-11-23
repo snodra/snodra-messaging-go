@@ -138,7 +138,7 @@ func TestTheServiceAnswersAsTheContractSays(t *testing.T) {
 	if m := decode(t, call(t, s, cmd, "conformance.Strict", `{"count":3}`, nil)); m["count"] != float64(3) {
 		t.Fatalf("Strict %v", m)
 	}
-	for _, bad := range []string{`{"count":"not a number"}`, `not json`} {
+	for _, bad := range []string{`{"count":"not a number"}`, `not json`, `{}`, `null`, `{"count":null}`, `[]`, `{"count":1.5}`} {
 		if e := call(t, s, cmd, "conformance.Strict", bad, nil).GetError(); e.GetCode() != hubpb.ErrorCode_INVALID_REQUEST {
 			t.Fatalf("Strict %s: %v", bad, e)
 		}
@@ -395,6 +395,8 @@ func TestGuardedNeedsAnAcceptedCaller(t *testing.T) {
 		{`{"count":2}`, map[string]string{"authorization": "Bearer not-a-token"}, hubpb.ErrorCode_UNAUTHENTICATED},
 		{`{"count":2}`, auth("conformance-refused"), hubpb.ErrorCode_PERMISSION_DENIED},
 		{`{"count":"not a number"}`, auth("alice"), hubpb.ErrorCode_INVALID_REQUEST},
+		{`{}`, auth("alice"), hubpb.ErrorCode_INVALID_REQUEST},
+		{`null`, auth("alice"), hubpb.ErrorCode_INVALID_REQUEST},
 	} {
 		if e := call(t, s, cmd, "conformance.Guarded", c.payload, c.headers).GetError(); e.GetCode() != c.want {
 			t.Fatalf("Guarded %s %v: %v, want %v", c.payload, c.headers, e, c.want)

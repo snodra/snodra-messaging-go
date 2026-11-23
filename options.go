@@ -49,7 +49,8 @@ type config struct {
 	writeHook func(ctx context.Context, m *hubpb.ClientMessage)
 }
 
-// Format prints the instance's identity and hubs whatever the verb, never a credential.
+// Format prints the instance's identity and hubs for every verb that reaches a Formatter
+// (not %p or %w), never a credential.
 func (c config) Format(f fmt.State, _ rune) {
 	_, _ = fmt.Fprintf(f, "config{service: %s, instance: %s, hubs: %v}", c.service, c.instance, c.hubs)
 }

@@ -1,6 +1,9 @@
 package main
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"errors"
+)
 
 // The service's message types (the conformance contract, "The service's types"). Payloads the
 // contract leaves open ("any JSON value") embed json.RawMessage, so they decode whole.
@@ -57,6 +60,14 @@ type Strict struct {
 // MessageType is the contract's type name.
 func (Strict) MessageType() string { return "conformance.Strict" }
 
+// UnmarshalJSON requires an object with an integer count, as the reference service does: Go's
+// decoder alone would take {} and null as count 0.
+func (s *Strict) UnmarshalJSON(b []byte) error {
+	n, err := requiredCount(b)
+	s.Count = n
+	return err
+}
+
 // Guarded is Strict for an authenticated caller only.
 type Guarded struct {
 	Count int64 `json:"count"`
@@ -64,6 +75,28 @@ type Guarded struct {
 
 // MessageType is the contract's type name.
 func (Guarded) MessageType() string { return "conformance.Guarded" }
+
+// UnmarshalJSON is Strict's.
+func (g *Guarded) UnmarshalJSON(b []byte) error {
+	n, err := requiredCount(b)
+	g.Count = n
+	return err
+}
+
+// requiredCount reads {"count": <integer>} and nothing else: a missing or null count, a
+// non-object and a non-integer are errors.
+func requiredCount(b []byte) (int64, error) {
+	var v struct {
+		Count *int64 `json:"count"`
+	}
+	if err := json.Unmarshal(b, &v); err != nil {
+		return 0, err
+	}
+	if v.Count == nil {
+		return 0, errors.New("count is required")
+	}
+	return *v.Count, nil
+}
 
 // View asks the instance for its own view of its connections (query).
 type View struct{ json.RawMessage }
