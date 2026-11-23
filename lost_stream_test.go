@@ -13,9 +13,9 @@ import (
 func TestALostStreamEndsWhatArrivedOnIt(t *testing.T) {
 	hub := fakehub.Start(t)
 	stopped := make(chan error, 1)
-	var updates *Updates[WatchOrders]
+	var updates *Updates[WatchOrders, OrderUpdate]
 	app, s := serving(t, hub, func(app *App) {
-		u, err := HandleSubscription(app, watchOrders)
+		u, err := HandleSubscription[WatchOrders, OrderView, OrderUpdate](app, watchOrders)
 		is(t, err, nil)
 		updates = u
 		is(t, HandleStream(app, func(ctx context.Context, q ListOrders, w *StreamWriter[OrderLine]) error {

@@ -11,8 +11,10 @@ import (
 )
 
 // HandleSubscription registers the subscription query type Q, by Q's MessageType: initial
-// answers a subscription's initial result, and the returned [Updates] pushes the updates to the
-// subscriptions this instance serves, until they complete or fail. Q is registered in
+// answers a subscription's initial result (an I), and the returned [Updates] pushes the updates
+// (each a U) to the subscriptions this instance serves, until they complete or fail. I and U are
+// what a subscriber reads with [Subscribe][I, U]. U cannot be inferred: give the three types,
+// HandleSubscription[Q, I, U](app, initial). Q is registered in
 // Register.query_types (with [Shared], in Register.shared_query_types).
 //
 // The hub subscribes every live instance of every owner of Q: each gets the subscription (a
@@ -27,7 +29,7 @@ import (
 //
 // Registration errors are those of [HandleCommand]; the Updates is nil then.
 // See https://snodra.damoreira.com/library-authors/protocol/ (Subscription).
-func HandleSubscription[Q Message, I any](app *App, initial func(context.Context, Q) (I, error), opts ...HandlerOption) (*Updates[Q], error) {
+func HandleSubscription[Q Message, I, U any](app *App, initial func(context.Context, Q) (I, error), opts ...HandlerOption) (*Updates[Q, U], error) {
 	if app == nil {
 		return nil, errors.New("snodra: registration on a nil App")
 	}
@@ -36,7 +38,7 @@ func HandleSubscription[Q Message, I any](app *App, initial func(context.Context
 	if err := app.addHandler(h, err); err != nil {
 		return nil, err
 	}
-	return &Updates[Q]{app: app, typ: name}, nil
+	return &Updates[Q, U]{app: app, typ: name}, nil
 }
 
 // queryDecoderOf decodes a fresh Q.
@@ -57,8 +59,8 @@ func MaxSubscriptions(n int) Option {
 	}
 }
 
-// Updates pushes the updates of the subscription query type Q to the subscriptions this instance
-// serves ([HandleSubscription]). Each call reaches every open subscription of Q whose query
+// Updates pushes the updates, of type U, of the subscription query type Q to the subscriptions
+// this instance serves ([HandleSubscription]). Each call reaches every open subscription of Q whose query
 // match accepts (a nil match accepts every one), in call order per subscription; a call never
 // waits for a hub stream. It is safe for concurrent use, also from a match.
 //
@@ -66,7 +68,7 @@ func MaxSubscriptions(n int) Option {
 // admission is decided is held, then sent first (or dropped when it is refused). Its query is
 // decoded off the hub stream, so a call waits for the decoding of the queries of the
 // subscriptions read before it, to run match on them.
-type Updates[Q Message] struct {
+type Updates[Q Message, U any] struct {
 	app *App
 	typ string
 }
@@ -74,7 +76,7 @@ type Updates[Q Message] struct {
 // Emit sends update, encoded with the app's codec, as the next part of every open subscription
 // of Q that match accepts, and returns how many it reached. An update that does not encode
 // reaches none (logged); a match that panics skips its subscription (logged).
-func (u *Updates[Q]) Emit(match func(Q) bool, update any) int {
+func (u *Updates[Q, U]) Emit(match func(Q) bool, update U) int {
 	if u == nil {
 		return 0
 	}
@@ -91,7 +93,7 @@ func (u *Updates[Q]) Emit(match func(Q) bool, update any) int {
 // Complete ends every open subscription of Q that match accepts with a clean ReplyEnd; each is
 // removed. At the hub a clean end removes this instance from the subscription; the last owner's
 // clean end completes it for the caller.
-func (u *Updates[Q]) Complete(match func(Q) bool) {
+func (u *Updates[Q, U]) Complete(match func(Q) bool) {
 	if u == nil {
 		return
 	}
@@ -104,7 +106,7 @@ func (u *Updates[Q]) Complete(match func(Q) bool) {
 // message on one line and the details attached with [WithDetails] (always HANDLER_ERROR, also
 // for an error of [Unauthenticated] and the like); each is removed. At the hub it ends the whole
 // subscription with that error for the caller and cancels its other owners.
-func (u *Updates[Q]) Fail(match func(Q) bool, err error) {
+func (u *Updates[Q, U]) Fail(match func(Q) bool, err error) {
 	if u == nil {
 		return
 	}
@@ -119,7 +121,7 @@ func (u *Updates[Q]) Fail(match func(Q) bool, err error) {
 }
 
 // matcher is match on the decoded query of a subscription; nil accepts every one.
-func (u *Updates[Q]) matcher(match func(Q) bool) func(any) bool {
+func (u *Updates[Q, U]) matcher(match func(Q) bool) func(any) bool {
 	return func(query any) bool {
 		q, ok := query.(Q)
 		return ok && (match == nil || match(q))

@@ -471,7 +471,7 @@ func TestALastResortFailsOnlyTheRequest(t *testing.T) {
 	rec := &logRecorder{}
 	app := newApp(t, Hubs("localhost:7000"), Logger(slog.New(rec)))
 	is(t, HandleCommand(app, place), nil)
-	updates, err := HandleSubscription(app, watchOrders)
+	updates, err := HandleSubscription[WatchOrders, OrderView, OrderUpdate](app, watchOrders)
 	is(t, err, nil)
 	ref := newStreamRef(nil)
 	permits := newStreamPermits(ref, 4, time.Hour)
@@ -517,12 +517,12 @@ func TestALastResortFailsOnlyTheRequest(t *testing.T) {
 // only query handlers serve those modes.
 func TestEveryModeAgainstEveryHandler(t *testing.T) {
 	hub := fakehub.Start(t)
-	var updates *Updates[WatchOrders]
+	var updates *Updates[WatchOrders, OrderUpdate]
 	app, s := serving(t, hub, func(app *App) {
 		is(t, HandleCommand(app, place), nil)
 		is(t, HandleQuery(app, get), nil)
 		is(t, HandleStream(app, listOrders), nil)
-		u, err := HandleSubscription(app, watchOrders)
+		u, err := HandleSubscription[WatchOrders, OrderView, OrderUpdate](app, watchOrders)
 		is(t, err, nil)
 		updates = u
 	})

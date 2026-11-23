@@ -178,8 +178,9 @@ if err == nil {
 ```
 
 ```go
-// Serving a subscription: the initial result now, updates whenever you emit them.
-updates, _ := snodra.HandleSubscription(app, func(_ context.Context, q WatchOrder) (OrderStatus, error) {
+// Serving a subscription: the initial result now, updates whenever you emit them. The type
+// arguments are the query, its initial result and its updates, as Subscribe[I, U] reads them.
+updates, _ := snodra.HandleSubscription[WatchOrder, OrderStatus, OrderStatus](app, func(_ context.Context, q WatchOrder) (OrderStatus, error) {
 	return OrderStatus{Status: "placed"}, nil
 })
 updates.Emit(func(q WatchOrder) bool { return q.OrderID == "o-1" }, OrderStatus{Status: "shipped"})

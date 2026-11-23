@@ -61,11 +61,11 @@ func initialRequest(id, t string) *hubpb.ServerMessage {
 
 // watching serves WatchOrders on hub (with opts) and returns its Updates, the app and its first
 // stream, acknowledged.
-func watching(t *testing.T, hub *fakehub.Hub, guard []HandlerOption, opts ...Option) (*Updates[WatchOrders], *App, *fakehub.Stream) {
+func watching(t *testing.T, hub *fakehub.Hub, guard []HandlerOption, opts ...Option) (*Updates[WatchOrders, OrderUpdate], *App, *fakehub.Stream) {
 	t.Helper()
-	var updates *Updates[WatchOrders]
+	var updates *Updates[WatchOrders, OrderUpdate]
 	app, s := serving(t, hub, func(app *App) {
-		u, err := HandleSubscription(app, watchOrders, guard...)
+		u, err := HandleSubscription[WatchOrders, OrderView, OrderUpdate](app, watchOrders, guard...)
 		is(t, err, nil)
 		updates = u
 		is(t, HandleCommand(app, place), nil)
@@ -75,7 +75,7 @@ func watching(t *testing.T, hub *fakehub.Hub, guard []HandlerOption, opts ...Opt
 
 // open opens subscription id on topic t and proves it admitted: an update emitted to it alone
 // arrives as its first part.
-func open(t *testing.T, u *Updates[WatchOrders], s *fakehub.Stream, id, tp string) {
+func open(t *testing.T, u *Updates[WatchOrders, OrderUpdate], s *fakehub.Stream, id, tp string) {
 	t.Helper()
 	s.Send(t, subscriptionRequest(id, tp, nil))
 	poll(t, func() bool { return u.Emit(topic(tp), OrderUpdate{Value: 0}) == 1 }) // once it is read
@@ -227,7 +227,7 @@ func TestFailEndsWithTheError(t *testing.T) {
 func TestAUnaryRequestThatIsNotTheInitialOneIsInvalidRequest(t *testing.T) {
 	hub := fakehub.Start(t)
 	_, s := serving(t, hub, func(app *App) {
-		_, err := HandleSubscription(app, watchOrders)
+		_, err := HandleSubscription[WatchOrders, OrderView, OrderUpdate](app, watchOrders)
 		is(t, err, nil)
 		is(t, HandleQuery(app, get), nil)
 		is(t, HandleStream(app, listOrders), nil)
@@ -413,38 +413,38 @@ func TestConcurrentEmitCancelAndComplete(t *testing.T) {
 func TestHandleSubscriptionRegistersAQueryType(t *testing.T) {
 	hub := fakehub.Start(t)
 	app := newApp(t, Hubs(hub.Addr()))
-	u, err := HandleSubscription(app, watchOrders)
+	u, err := HandleSubscription[WatchOrders, OrderView, OrderUpdate](app, watchOrders)
 	is(t, err, nil)
 	is(t, u != nil, true)
-	_, err = HandleSubscription(app, func(context.Context, GetStock) (Stock, error) { return Stock{}, nil }, Shared())
+	_, err = HandleSubscription[GetStock, Stock, Stock](app, func(context.Context, GetStock) (Stock, error) { return Stock{}, nil }, Shared())
 	is(t, err, nil)
-	if _, err := HandleSubscription(app, watchOrders); err == nil {
+	if _, err := HandleSubscription[WatchOrders, OrderView, OrderUpdate](app, watchOrders); err == nil {
 		t.Fatal("a subscription type registered twice was accepted")
 	}
 	if err := HandleQuery(app, func(context.Context, WatchOrders) (Empty, error) { return Empty{}, nil }); err == nil {
 		t.Fatal("a type registered both as a subscription query and a query was accepted")
 	}
-	if _, err := HandleSubscription[GetOrder, Receipt](app, nil); err == nil {
+	if _, err := HandleSubscription[GetOrder, Receipt, Receipt](app, nil); err == nil {
 		t.Fatal("a nil initial handler was accepted")
 	}
-	if _, err := HandleSubscription[Message, Receipt](app, func(context.Context, Message) (Receipt, error) { return Receipt{}, nil }); err == nil {
+	if _, err := HandleSubscription[Message, Receipt, Receipt](app, func(context.Context, Message) (Receipt, error) { return Receipt{}, nil }); err == nil {
 		t.Fatal("an interface type parameter was accepted")
 	}
-	if _, err := HandleSubscription[GetOrder, Receipt](nil, get); err == nil {
+	if _, err := HandleSubscription[GetOrder, Receipt, Receipt](nil, get); err == nil {
 		t.Fatal("a registration on a nil App was accepted")
 	}
 	is(t, app.Start(context.Background()) != nil, true) // the registration errors are kept
 
 	app2 := newApp(t, Hubs(hub.Addr()))
-	_, err = HandleSubscription(app2, watchOrders)
+	_, err = HandleSubscription[WatchOrders, OrderView, OrderUpdate](app2, watchOrders)
 	is(t, err, nil)
-	_, err = HandleSubscription(app2, func(context.Context, GetStock) (Stock, error) { return Stock{}, nil }, Shared())
+	_, err = HandleSubscription[GetStock, Stock, Stock](app2, func(context.Context, GetStock) (Stock, error) { return Stock{}, nil }, Shared())
 	is(t, err, nil)
 	is(t, app2.Start(context.Background()), nil)
 	r := hub.Next(t).RecvRegister(t)
 	is(t, strings.Join(r.GetQueryTypes(), ","), "orders.WatchOrders")
 	is(t, strings.Join(r.GetSharedQueryTypes(), ","), "orders.GetStock")
-	if _, err := HandleSubscription(app2, func(context.Context, GetOrder) (Receipt, error) { return Receipt{}, nil }); !errors.Is(err, ErrRegistrationClosed) {
+	if _, err := HandleSubscription[GetOrder, Receipt, Receipt](app2, func(context.Context, GetOrder) (Receipt, error) { return Receipt{}, nil }); !errors.Is(err, ErrRegistrationClosed) {
 		t.Fatalf("got %v, want ErrRegistrationClosed", err)
 	}
 }
@@ -487,8 +487,9 @@ func TestAPanickingMatchSkipsItsSubscription(t *testing.T) {
 	p := nextPart(t, s)
 	is(t, p.GetRequestId(), "w2#1")
 	is(t, string(p.GetPayload()), `{"value":2}`)
-	// An update that does not encode reaches nobody.
-	is(t, updates.Emit(nil, func() {}), 0)
+	// An update that does not encode (a U of a type the codec refuses) reaches nobody.
+	unencodable := &Updates[WatchOrders, any]{app: updates.app, typ: updates.typ}
+	is(t, unencodable.Emit(nil, func() {}), 0)
 	s.Nothing(t, 200*ms, "part")
 }
 
@@ -528,11 +529,11 @@ func brittleRequest(id, tp string) *hubpb.ServerMessage {
 
 // brittle serves BrittleWatch (and PlaceOrder) on a fresh hub and returns its Updates, the app
 // and its first stream, acknowledged.
-func brittle(t *testing.T, opts ...Option) (*Updates[BrittleWatch], *App, *fakehub.Stream) {
+func brittle(t *testing.T, opts ...Option) (*Updates[BrittleWatch, OrderUpdate], *App, *fakehub.Stream) {
 	t.Helper()
-	var updates *Updates[BrittleWatch]
+	var updates *Updates[BrittleWatch, OrderUpdate]
 	app, s := serving(t, fakehub.Start(t), func(app *App) {
-		u, err := HandleSubscription(app, func(_ context.Context, q BrittleWatch) (OrderView, error) {
+		u, err := HandleSubscription[BrittleWatch, OrderView, OrderUpdate](app, func(_ context.Context, q BrittleWatch) (OrderView, error) {
 			return OrderView{Topic: q.Topic}, nil
 		})
 		is(t, err, nil)
@@ -601,4 +602,18 @@ func TestASlowSubscriptionQueryDecodingDoesNotHoldTheStream(t *testing.T) {
 // topicOf matches the subscriptions of BrittleWatch on tp.
 func topicOf(tp string) func(BrittleWatch) bool {
 	return func(q BrittleWatch) bool { return q.Topic == tp }
+}
+
+// The updates of a subscription query are of one type, U, as its subscribers read them
+// (Subscribe[I, U]): Emit takes a U.
+func TestUpdatesAreTyped(t *testing.T) {
+	var updates *Updates[WatchOrders, OrderUpdate]
+	_, s := serving(t, fakehub.Start(t), func(app *App) {
+		u, err := HandleSubscription[WatchOrders, OrderView, OrderUpdate](app, watchOrders)
+		is(t, err, nil)
+		updates = u
+	})
+	s.Send(t, subscriptionRequest("w#1", "t", nil))
+	poll(t, func() bool { return updates.Emit(topic("t"), OrderUpdate{Value: 4}) == 1 })
+	is(t, string(nextPart(t, s).GetPayload()), `{"value":4}`)
 }

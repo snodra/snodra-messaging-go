@@ -292,7 +292,7 @@ func TestAGuardNeedsAJWKS(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "JWKS") || !strings.Contains(err.Error(), "orders.PlaceOrder") {
 			t.Fatalf("%s: got %v, want an error naming the type and the JWKS", name, err)
 		}
-		_, err = HandleSubscription(app, watchOrders, guard)
+		_, err = HandleSubscription[WatchOrders, OrderView, OrderUpdate](app, watchOrders, guard)
 		is(t, err != nil, true)
 		is(t, HandleStream(app, listOrders, guard) != nil, true)
 		startErr := app.Start(context.Background())

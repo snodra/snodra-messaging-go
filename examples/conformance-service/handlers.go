@@ -14,15 +14,15 @@ import (
 type service struct {
 	app     *snodra.App
 	env     env
-	ops     *operations            // the asynchronous conformance.Send calls
-	watches *snodra.Updates[Watch] // the conformance.Watch subscriptions served here
+	ops     *operations                         // the asynchronous conformance.Send calls
+	watches *snodra.Updates[Watch, WatchUpdate] // the conformance.Watch subscriptions served here
 }
 
 // registerHandlers registers every type of the conformance contract the service handles so
 // far, as an application would.
 func registerHandlers(app *snodra.App, e env) error {
 	s := &service{app: app, env: e, ops: newOperations()}
-	watches, err := snodra.HandleSubscription(app, func(_ context.Context, m Watch) (WatchInitial, error) {
+	watches, err := snodra.HandleSubscription[Watch, WatchInitial, WatchUpdate](app, func(_ context.Context, m Watch) (WatchInitial, error) {
 		return WatchInitial{Topic: m.Topic, Value: 0, InstanceID: e.instance}, nil
 	})
 	s.watches = watches
