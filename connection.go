@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"math/rand/v2"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -290,13 +291,14 @@ func (c *hubConn) run() {
 			tokenLogged = noToken.msg
 			c.log.Log(context.Background(), level, "could not get an access token for the hub; no stream opened",
 				"reason", noToken.msg, "retry_in", pause)
-		case reached && st.Code() == codes.Unauthenticated && c.app.cfg.clientCert != "":
+		case reached && st.Code() == codes.Unauthenticated && c.app.cfg.clientCert != "" &&
+			strings.Contains(st.Message(), "certificate expired"):
 			// The hub ends a certificate session at the certificate's notAfter ("certificate
-			// expired"): an ordinary reconnect, which reads the files again, not a refusal.
+			// expired"): an ordinary reconnect from the backoff floor, which reads the files
+			// again, not a refusal. Any other UNAUTHENTICATED close is one.
 			// TODO(spec-gap): SG-15 (the exception of the certificate session).
 			c.setState(stateBackoff)
-			pause = backoff.Jitter(wait, c.t.backoffMax, rand.Float64())
-			wait = backoff.Next(wait, c.t.backoffMin, c.t.backoffMax)
+			pause = backoff.Jitter(c.t.backoffMin, c.t.backoffMax, rand.Float64())
 			c.log.Info("the hub ended the certificate session; reconnecting with the certificate in the files",
 				"reason", st.Message(), "retry_in", pause)
 		// TODO(spec-gap): SG-15 (a refusal code counts as a refusal also on an acknowledged stream).

@@ -234,13 +234,13 @@ what the Kotlin library does where it differs, and what this library does. The c
   the hub's answer to a `Register` instead of an ack; it says nothing of a stream closed with one of them after its
   ack (for example access revoked on a live session), apart from the client certificate's expiry, which is an
   ordinary reconnect.
-- **Reference library:** treats such a close as a refusal whether or not the stream was acknowledged (kept as the
-  latest rejection, the next attempt after 80 to 100 % of the backoff cap), except a certificate session's
-  `UNAUTHENTICATED`.
-- **This library:** treats it as a refusal whether or not the stream was acknowledged, except an `UNAUTHENTICATED`
-  close of an acknowledged stream when a client certificate is configured, which is an ordinary reconnect at the
-  normal backoff, reading the certificate files again, as in the reference library (`connection.go`).
-- **Question:** is a refusal code on an acknowledged stream a refusal of the registration?
+- **Settled:** such a close is a refusal whether or not the stream was acknowledged (kept as the latest rejection, the
+  next attempt after 80 to 100 % of the backoff cap), except the hub's close of an acknowledged certificate session
+  at the certificate's end (`UNAUTHENTICATED` "certificate expired"), which reconnects from the backoff floor and
+  reads the certificate files again. This is what the Kotlin library does; the Rust library takes every
+  `UNAUTHENTICATED` close of an acknowledged certificate session as that exception.
+- **This library:** does what the Kotlin library does (`connection.go`); before, it followed the Rust library.
+- **Question:** settled.
 
 ### SG-16: a configured reconnect backoff outside the specified range
 

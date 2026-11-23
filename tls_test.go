@@ -229,6 +229,27 @@ func TestACertificateExpiredCloseIsAnOrdinaryReconnect(t *testing.T) { // SG-15'
 	}
 }
 
+// Only the hub's "certificate expired" close of a certificate session is an ordinary reconnect;
+// another UNAUTHENTICATED close of it is a refusal, as in the reference library.
+func TestAnotherUnauthenticatedCloseOfACertificateSessionIsARefusal(t *testing.T) { // SG-15
+	ca := newTestCA(t, "operator CA")
+	hub := fakehub.Start(t, fakehub.WithTLS(ca.server(t, "hub.test"), ca.pool()))
+	certFile, keyFile := pairFiles(t, t.TempDir(), ca.client(t, "orders-service", time.Time{}))
+	app := startApp(t, Hubs(hub.Addr()), TLS(TLSConfig{CAFile: ca.caFile(t), ServerName: "hub.test"}),
+		ClientCertificate(certFile, keyFile), ReconnectBackoff(50*ms, 1*s))
+	s := hub.Next(t)
+	s.RecvRegister(t)
+	s.Ack(t, fakehub.Ack("hub-1"))
+	is(t, app.Ready(ctxWithin(t, time.Second)), nil)
+	closed := time.Now()
+	s.Close(codes.Unauthenticated, "client certificate revoked")
+	hub.Next(t).RecvRegister(t)
+	within(t, time.Since(closed), 750*ms, 2*time.Second) // 80-100 % of the cap
+	rej, ok := app.Rejection()
+	is(t, ok, true)
+	is(t, rej.Message, "client certificate revoked")
+}
+
 func TestAnUnauthenticatedCloseWithoutACertificateIsARefusal(t *testing.T) {
 	hub := fakehub.Start(t)
 	app := startApp(t, Hubs(hub.Addr()), Token(testToken))
