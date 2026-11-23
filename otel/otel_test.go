@@ -107,7 +107,7 @@ func TestInstrumentNamesAndLabels(t *testing.T) {
 		return s
 	}
 	tokens := counter("snodra.hub.client.token.fetches")
-	is(t, len(tokens.DataPoints), 2)
+	is(t, len(tokens.DataPoints), 5) // the others stay at 0
 	for _, p := range tokens.DataPoints {
 		v, _ := p.Attributes.Value("result")
 		switch v.AsString() {
@@ -115,6 +115,8 @@ func TestInstrumentNamesAndLabels(t *testing.T) {
 			is(t, p.Value, 2)
 		case "oauth_error":
 			is(t, p.Value, 1)
+		case "http_error", "io_error", "bad_response":
+			is(t, p.Value, 0)
 		default:
 			t.Fatalf("result %v", v)
 		}
@@ -186,4 +188,60 @@ func TestTheDefaultsAreTheGlobalProvidersAndCostNothingWithoutAnSDK(t *testing.T
 	ctx, done := i.StartHandling(context.Background(), snodra.Handling{Type: "t", Kind: "query"})
 	done(nil)
 	i.Inject(ctx, map[string]string{})
+}
+
+func TestEveryCounterSeriesExistsAtZeroFromTheStart(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	snodraotel.New(snodraotel.WithMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))))
+	got := collect(t, reader)
+	tokens := got["snodra.hub.client.token.fetches"].Data.(metricdata.Sum[int64])
+	seen := map[string]int64{}
+	for _, p := range tokens.DataPoints {
+		v, _ := p.Attributes.Value("result")
+		seen[v.AsString()] = p.Value
+	}
+	is(t, len(seen), 5)
+	for _, r := range []string{"ok", "http_error", "oauth_error", "io_error", "bad_response"} {
+		v, ok := seen[r]
+		is(t, ok, true)
+		is(t, v, 0)
+	}
+	for _, name := range []string{"snodra.hub.client.certificate.rotations", "snodra.hub.client.credentials.refreshes.sent"} {
+		s := got[name].Data.(metricdata.Sum[int64])
+		is(t, len(s.DataPoints), 1)
+		is(t, s.DataPoints[0].Value, 0)
+	}
+}
+
+func TestEveryDescriptionIsRusts(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	i := snodraotel.New(snodraotel.WithMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))))
+	i.RequestDone("command", "t", "ok", time.Millisecond)
+	i.ObserveGauges(func() snodra.Gauges { return snodra.Gauges{} })
+	got := collect(t, reader)
+	for name, want := range map[string]string{
+		"snodra.hub.client.request.duration":           "Commands and queries sent through the hub, from the call to its result (retries included), per kind, type and outcome",
+		"snodra.hub.client.handlers.in.flight":         "Incoming hub requests being handled or waiting for a handler permit",
+		"snodra.hub.client.connected.hubs":             "Hubs with an acknowledged stream",
+		"snodra.hub.client.token.fetches":              "Access token fetches by result",
+		"snodra.hub.client.certificate.rotations":      "Client certificate pairs adopted from the files",
+		"snodra.hub.client.credentials.refreshes.sent": "ClientMessage.credentials written to the hubs",
+	} {
+		is(t, got[name].Description, want)
+	}
+}
+
+func TestTheGaugeCallbackEndsWithTheApp(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	i := snodraotel.New(snodraotel.WithMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))))
+	reads := 0
+	i.ObserveGauges(func() snodra.Gauges { reads++; return snodra.Gauges{ConnectedHubs: 1} })
+	collect(t, reader)
+	is(t, reads, 1)
+	stopper, ok := i.(snodra.GaugesStopper)
+	is(t, ok, true)
+	stopper.StopObservingGauges()
+	stopper.StopObservingGauges() // twice is harmless
+	collect(t, reader)
+	is(t, reads, 1) // no longer read, no longer holding the app
 }

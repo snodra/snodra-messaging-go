@@ -2,6 +2,7 @@ package otel
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -63,16 +64,28 @@ type instrumentation struct {
 	tracer trace.Tracer
 	prop   propagation.TextMapPropagator // nil: the global one, or W3C trace context when that is none
 
+	propOnce sync.Once
+	resolved propagation.TextMapPropagator // prop, or what it stands for, from the first use on
+
+	mu  sync.Mutex
+	reg metric.Registration // the gauge callback; nil before ObserveGauges and after the app's shutdown
+
 	duration  metric.Float64Histogram
 	tokens    metric.Int64Counter
 	rotations metric.Int64Counter
 	refreshes metric.Int64Counter
 }
 
-// New is the Instrumentation to pass to snodra.Telemetry. By default it uses the global meter
-// provider, tracer provider and propagator, as they are when New runs for the providers and when
-// a request is handled for the propagator; when no propagator is installed it reads and writes
-// the W3C trace context (traceparent and tracestate).
+// New is the Instrumentation to pass to snodra.Telemetry; one Instrumentation serves one App (the
+// gauges it observes are that App's). By default it uses the global meter provider, tracer
+// provider and propagator, as they are when New runs for the providers and when the first request
+// is handled or sent for the propagator. When no propagator is installed (Go's default is one that
+// does nothing) it reads and writes the W3C trace context (traceparent and tracestate); to turn
+// that off, pass WithPropagator(propagation.NewCompositeTextMapPropagator()), which is used as
+// given.
+//
+// Every counter series the library can report exists at 0 from the start, as in the Rust and
+// Kotlin libraries, so a rate or increase sees the first event.
 func New(opts ...Option) snodra.Instrumentation {
 	var o options
 	for _, opt := range opts {
@@ -103,18 +116,28 @@ func New(opts ...Option) snodra.Instrumentation {
 		metric.WithDescription("Client certificate pairs adopted from the files"))
 	i.refreshes, _ = i.meter.Int64Counter(credentialsRefreshes,
 		metric.WithDescription("ClientMessage.credentials written to the hubs"))
+	ctx := context.Background()
+	for _, result := range []string{"ok", "http_error", "oauth_error", "io_error", "bad_response"} {
+		i.tokens.Add(ctx, 0, metric.WithAttributeSet(attribute.NewSet(attribute.String("result", result))))
+	}
+	i.rotations.Add(ctx, 0)
+	i.refreshes.Add(ctx, 0)
 	return i
 }
 
 // propagator is the one to use now.
 func (i *instrumentation) propagator() propagation.TextMapPropagator {
-	if i.prop != nil {
-		return i.prop
-	}
-	if p := otel.GetTextMapPropagator(); len(p.Fields()) > 0 {
-		return p
-	}
-	return propagation.TraceContext{} // none installed: the protocol's own trace context
+	i.propOnce.Do(func() {
+		switch p := otel.GetTextMapPropagator(); {
+		case i.prop != nil:
+			i.resolved = i.prop
+		case len(p.Fields()) > 0:
+			i.resolved = p
+		default:
+			i.resolved = propagation.TraceContext{} // none installed: the protocol's own trace context
+		}
+	})
+	return i.resolved
 }
 
 func (i *instrumentation) RequestDone(kind, msgType, outcome string, took time.Duration) {
@@ -150,7 +173,7 @@ func (i *instrumentation) ObserveGauges(read func() snodra.Gauges) {
 		otel.Handle(err)
 		return
 	}
-	_, err = i.meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
+	reg, err := i.meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
 		g := read()
 		o.ObserveInt64(handlers, g.HandlersInFlight)
 		o.ObserveInt64(hubs, g.ConnectedHubs)
@@ -158,6 +181,28 @@ func (i *instrumentation) ObserveGauges(read func() snodra.Gauges) {
 	}, handlers, hubs)
 	if err != nil {
 		otel.Handle(err)
+		return
+	}
+	i.mu.Lock()
+	old := i.reg
+	i.reg = reg
+	i.mu.Unlock()
+	if old != nil {
+		_ = old.Unregister()
+	}
+}
+
+// StopObservingGauges ends the gauge callback when the App is shut down, so that it no longer
+// holds the App.
+func (i *instrumentation) StopObservingGauges() {
+	i.mu.Lock()
+	reg := i.reg
+	i.reg = nil
+	i.mu.Unlock()
+	if reg != nil {
+		if err := reg.Unregister(); err != nil {
+			otel.Handle(err)
+		}
 	}
 }
 

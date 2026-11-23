@@ -9,7 +9,9 @@
 //
 // New uses the global meter provider, tracer provider and propagator, so install them before
 // New (or pass them with WithMeterProvider, WithTracerProvider and WithPropagator). With none
-// installed the API's no-op providers make every measurement free.
+// installed the API's no-op providers record nothing, which costs a few small allocations per
+// request (the attributes); for none at all, do not pass the instrumentation to the library. One
+// Instrumentation serves one App: its gauges are that App's, and end at its Shutdown.
 //
 // # Metrics
 //
@@ -24,7 +26,8 @@
 //   - snodra.hub.client.handlers.in.flight (gauge): requests from the hubs whose handler runs.
 //   - snodra.hub.client.connected.hubs (gauge): hubs with an acknowledged stream.
 //   - snodra.hub.client.token.fetches (counter; result): OAuth2 access token fetches by result
-//     (ok, http_error, oauth_error, io_error, bad_response).
+//     (ok, http_error, oauth_error, io_error, bad_response). Every counter series exists at 0
+//     from the start.
 //   - snodra.hub.client.certificate.rotations (counter): client certificate pairs presented
 //     after the first.
 //   - snodra.hub.client.credentials.refreshes.sent (counter): credential refreshes written to
