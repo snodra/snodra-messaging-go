@@ -141,6 +141,7 @@ type streaming struct {
 	typ      string
 	tmpl     *hubpb.Request // what a move to another hub writes again
 	chosen   time.Duration  // the timeout the request is written with
+	deadline time.Time      // no move starts after it (hubWait from the open)
 	moves    int            // the moves to another hub of a request never written
 	c        *call
 	ref      *streamRef
@@ -162,7 +163,8 @@ type streaming struct {
 // a hub.
 func (a *App) openStream(ctx context.Context, tmpl *hubpb.Request, chosen time.Duration) (*streaming, error) {
 	c := &call{id: uuid.New(), inbox: newStreamInbox()}
-	ref, guard, _, err := a.write(ctx, tmpl, chosen, c, nil)
+	deadline := hubDeadline(chosen)
+	ref, guard, _, err := a.write(ctx, tmpl, chosen, deadline, c, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -170,22 +172,25 @@ func (a *App) openStream(ctx context.Context, tmpl *hubpb.Request, chosen time.D
 	if tmpl.GetMode() == hubpb.RequestMode_SUBSCRIPTION {
 		what = "subscription"
 	}
-	return &streaming{app: a, typ: tmpl.GetType(), tmpl: tmpl, chosen: chosen, c: c, ref: ref, what: what, guard: guard,
+	return &streaming{app: a, typ: tmpl.GetType(), tmpl: tmpl, chosen: chosen, deadline: deadline, c: c, ref: ref, what: what, guard: guard,
 		refill: max(1, tmpl.GetInitialCredit()/2), first: true}, nil
 }
 
 // move writes the request, never written to its lost stream, to the next hub with the same id:
 // it was never sent (https://snodra.damoreira.com/library-authors/protocol/, Several hubs), at
-// most maxUnwrittenMoves times.
+// most maxUnwrittenMoves times, and none after the deadline of its open (as a unary request).
 // TODO(spec-gap): SG-10 (at most 8 moves).
 func (s *streaming) move(ctx context.Context) error {
 	s.moves++
 	if s.moves > maxUnwrittenMoves {
 		return fmt.Errorf("%w: '%s' not written: %d hub streams lost before it was", ErrNeverSent, s.typ, s.moves)
 	}
+	if !time.Now().Before(s.deadline) {
+		return fmt.Errorf("%w: no hub took '%s' within %v", ErrNeverSent, s.typ, hubWait(s.chosen))
+	}
 	s.app.log.Debug("the hub stream was lost before the "+s.what+" was written; trying the next hub", "type", s.typ, "request", s.c.id)
 	c := &call{id: s.c.id, inbox: newStreamInbox()}
-	ref, guard, _, err := s.app.write(ctx, s.tmpl, s.chosen, c, nil)
+	ref, guard, _, err := s.app.write(ctx, s.tmpl, s.chosen, s.deadline, c, nil)
 	if err != nil {
 		return err
 	}

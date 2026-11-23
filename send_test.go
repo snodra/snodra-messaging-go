@@ -547,3 +547,59 @@ func TestACallWaitsForAHubWithinItsTimeout(t *testing.T) {
 	}
 	within(t, time.Since(start), 350*ms, 2*time.Second)
 }
+
+// A request whose streams keep breaking before they write it moves from hub to hub only while
+// its timeout lasts: one deadline for the whole call, no new hop after it, as in the reference
+// library. Each hop sends the full timeout.
+func TestMovesEndWithTheCallsTimeout(t *testing.T) {
+	t.Run("unary", func(t *testing.T) {
+		movesEnd(t, func(app *App) error {
+			_, err := Send[Empty](context.Background(), app, PlaceOrder{}, Timeout(500*ms))
+			return err
+		})
+	})
+	t.Run("stream", func(t *testing.T) {
+		movesEnd(t, func(app *App) error {
+			for _, err := range Stream[OrderLine](context.Background(), app, ListOrders{}, Timeout(500*ms)) {
+				return err
+			}
+			return nil
+		})
+	})
+}
+
+// movesEnd drives call through streams that break before they write its request, each hub
+// back after a dead interval, and checks that it gives up within its 500 ms timeout.
+func movesEnd(t *testing.T, call func(app *App) error) {
+	held := make(chan *hubpb.Request, 16)
+	hub := fakehub.Start(t)
+	app := startApp(t, Hubs(hub.Addr()), blockRequests(held, nil))
+	s := hub.Next(t)
+	s.RecvRegister(t)
+	s.Recv(t)
+	s.Ack(t, fakehub.Ack("hub-1"))
+	is(t, app.Ready(ctxWithin(t, time.Second)), nil)
+	sent := async(func() (Empty, error) { return Empty{}, call(app) })
+	hops := 0
+	for {
+		select {
+		case r := <-held: // in the buffer: the stream breaks before writing it
+			hops++
+			is(t, r.GetTimeoutMs(), uint32(500))
+			s.Close(codes.Unavailable, "crash loop")
+		case o := <-sent:
+			is(t, errors.Is(o.err, ErrNeverSent), true)
+			if o.elapsed > 1200*ms || hops > 3 {
+				t.Fatalf("gave up after %v and %d hops, want within the 500 ms timeout (plus a hop)", o.elapsed, hops)
+			}
+			return
+		case <-time.After(5 * time.Second):
+			t.Fatal("the call did not return within 5 s")
+		}
+		s = hub.Next(t) // the hub comes back after a dead interval
+		s.RecvRegister(t)
+		s.Recv(t)
+		time.Sleep(250 * ms)
+		s.Ack(t, fakehub.Ack("hub-1"))
+	}
+}

@@ -150,18 +150,17 @@ spot.
 - **Specification:** [protocol.md, Several hubs](https://snodra.damoreira.com/library-authors/protocol/) says a
   request never handed to a stream's transport "goes to the next hub with the same id"; it does not say how often,
   should the next stream be lost too before it writes the request.
-- **Rust library:** moves such a request at most 8 times; the ninth loss fails the call as never sent
-  ("'<type>' not written: 9 hub streams lost before it was"). A request whose stream is gone before it could even be
-  queued goes to the next hub without counting as a move. Unary requests, scatter-gathers, streams and subscriptions
-  move alike.
-- **This library:** does the same (`send.go`, `stream_client.go`), failing with `ErrNeverSent`.
-- **Also:** each move sends the call's chosen timeout again as `Request.timeout_ms` (each hop is guarded by the full
-  bound), and so does the walk over the hubs that answer a unary request `NO_HANDLER`. When no hub can take the
-  request (none acknowledged, or every one failed to take it), the call waits for a hub, as the Kotlin library does,
-  within its chosen timeout, else 5 s, and fails with `ErrNeverSent` when none came; before, it failed at once
-  outside a client certificate rollover.
-- **Question:** should the specification bound the moves, and with which number; and should a moved request send its
-  remaining time or its timeout unchanged?
+- **Settled:** such a request moves at most 8 times; the ninth loss fails the call as never sent ("'<type>' not
+  written: 9 hub streams lost before it was"). A request whose stream is gone before it could even be queued goes to
+  the next hub without counting as a move. Every move sends the call's chosen timeout again as `Request.timeout_ms`
+  (each hop is guarded by the full bound), and so does the walk over the hubs that answer a unary request
+  `NO_HANDLER`. One deadline bounds the call: when no hub can take the request it waits for one, and it starts no new
+  hop, once its chosen timeout (5 s without one) has passed since it began; so a call lasts at most that plus one
+  hop's guard. Unary requests, scatter-gathers, streams and subscriptions move alike. This is what the Kotlin library
+  does; the Rust library changes to it.
+- **This library:** does so (`send.go`, `stream_client.go`), failing with `ErrNeverSent`. Before, it failed at once
+  when no hub was acknowledged (outside a client certificate rollover), and later each move waited for a hub anew.
+- **Question:** settled.
 
 ### SG-11: which refusal a library keeps
 

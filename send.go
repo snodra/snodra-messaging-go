@@ -467,25 +467,28 @@ func (p *pendingCalls) end(e *hubpb.ReplyEnd) {
 // (https://snodra.damoreira.com/library-authors/protocol/, Several hubs): when the stream it
 // was queued on is lost before the request was written, it goes to the next hub, at most
 // maxUnwrittenMoves times; and a unary request a hub answers with NO_HANDLER (never delivered)
-// goes to each other live hub in turn, at most once each, while chosen lasts; when every hub
-// declined, the last answer is the attempt's. Every hop sends chosen unchanged.
+// goes to each other live hub in turn, at most once each; when every hub declined, the last
+// answer is the attempt's. Every hop sends chosen unchanged, and one deadline bounds them all, as
+// in the reference library: chosen (5 s without one) after the attempt began, no hop starts and
+// the wait for a hub ends, so the attempt lasts at most that plus one hop's guard.
 func (a *App) attempt(ctx context.Context, tmpl *hubpb.Request, chosen time.Duration) (answer, error) {
 	typ := tmpl.GetType()
 	id := uuid.New()
 	defer a.calls.remove(id)
 	unary := tmpl.GetMode() == hubpb.RequestMode_UNARY
-	started := time.Now()
+	deadline := hubDeadline(chosen)
 	moves := 0
 	var declined []*hubConn // the hubs that answered NO_HANDLER
 	var noHandler *answer   // the last of those answers
 	for {
-		// A move to another hub sends the request as it was, its timeout unchanged; the walk over
-		// the hubs that answer NO_HANDLER ends with the chosen timeout.
-		if noHandler != nil && chosen > 0 && time.Since(started) >= chosen {
-			return *noHandler, nil
+		if hops := moves + len(declined); hops > 0 && !time.Now().Before(deadline) {
+			if noHandler != nil {
+				return *noHandler, nil
+			}
+			return answer{}, fmt.Errorf("%w: no hub took '%s' within %v", ErrNeverSent, typ, hubWait(chosen))
 		}
 		c := &call{id: id, answer: make(chan answer, 1), gather: tmpl.GetMode() == hubpb.RequestMode_SCATTER_GATHER}
-		ref, guard, conn, err := a.write(ctx, tmpl, chosen, c, declined)
+		ref, guard, conn, err := a.write(ctx, tmpl, chosen, deadline, c, declined)
 		if err != nil {
 			if noHandler != nil && ctx.Err() == nil {
 				return *noHandler, nil // no other hub left to try
@@ -547,12 +550,25 @@ func (a *App) await(ctx context.Context, typ string, c *call, ref *streamRef, gu
 	}
 }
 
+// hubWait is how long a call with the timeout chosen (0: none) waits for a hub to take it, and
+// the latest a hop starts: chosen, else 5 s.
+func hubWait(chosen time.Duration) time.Duration {
+	if chosen > 0 {
+		return chosen
+	}
+	return defaultBudget
+}
+
+// hubDeadline is the deadline of a call with the timeout chosen that starts now (hubWait).
+func hubDeadline(chosen time.Duration) time.Time { return time.Now().Add(hubWait(chosen)) }
+
 // write queues tmpl as the request of c (with c's id and the timeout chosen) for the first hub
 // in the routing order of its key that takes it, skipping the hubs in skip, c recorded as
 // pending, and returns that stream, the request's local guard (the hub's bound plus 1 s) and
 // the hub. A hub whose stream is gone before the request is queued is passed over for the next
-// one (nothing was written). When it fails, nothing was sent and c is not pending.
-func (a *App) write(ctx context.Context, tmpl *hubpb.Request, chosen time.Duration, c *call, skip []*hubConn) (*streamRef, time.Duration, *hubConn, error) {
+// one (nothing was written); when no hub takes it, write waits for one until deadline. When it
+// fails, nothing was sent and c is not pending.
+func (a *App) write(ctx context.Context, tmpl *hubpb.Request, chosen time.Duration, deadline time.Time, c *call, skip []*hubConn) (*streamRef, time.Duration, *hubConn, error) {
 	typ := tmpl.GetType()
 	a.mu.Lock()
 	p := a.pool
@@ -560,7 +576,6 @@ func (a *App) write(ctx context.Context, tmpl *hubpb.Request, chosen time.Durati
 	if p == nil {
 		return nil, 0, nil, fmt.Errorf("%w: the app is not started (sending %s)", ErrNeverSent, typ)
 	}
-	var until time.Time // the end of the wait for a hub
 	for {
 		ref, guard, conn, err := a.writeOnce(ctx, p, tmpl, chosen, c, skip)
 		if err == nil || ctx.Err() != nil || len(skip) > 0 {
@@ -568,15 +583,8 @@ func (a *App) write(ctx context.Context, tmpl *hubpb.Request, chosen time.Durati
 		}
 		// No hub took it (none is acknowledged, the hubs are reconnecting or rolled over to a
 		// renewed client certificate, the streams broke before they took it): wait for a hub, and
-		// try again, within the call's timeout, else 5 s, as the reference library does.
-		if until.IsZero() {
-			limit := defaultBudget
-			if chosen > 0 {
-				limit = chosen
-			}
-			until = time.Now().Add(limit)
-		}
-		left := time.Until(until)
+		// try again, until the call's deadline (hubWait), as the reference library does.
+		left := time.Until(deadline)
 		if left <= 0 {
 			return ref, guard, conn, err
 		}
