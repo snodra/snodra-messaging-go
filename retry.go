@@ -12,9 +12,10 @@ import (
 	"github.com/snodra/snodra-messaging-go/internal/hubpb"
 )
 
-// RetryPolicy is how a failed [Send] or [Query] is sent again: at most MaxAttempts attempts in
-// all (1: no retry), the first wait InitialBackoff, each next one Multiplier times longer, at
-// most MaxBackoff; every wait is jittered by ±20 % (never above MaxBackoff).
+// RetryPolicy is how a failed call is sent again ([Send], [Query], [Gather]; a [Stream] only
+// before its first part, a [Subscribe] only before its initial result): at most MaxAttempts
+// attempts in all (1: no retry), the first wait InitialBackoff, each next one Multiplier times
+// longer, at most MaxBackoff; every wait is jittered by ±20 % (never above MaxBackoff).
 //
 // Only failures where the handler never ran are retried for a command ([ErrNeverSent],
 // NO_HANDLER, RESOURCE_EXHAUSTED); a query is also retried after an unknown outcome

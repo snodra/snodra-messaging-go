@@ -21,7 +21,8 @@ import (
 // Every method runs on a hot path of the library: an implementation must return quickly and
 // never block. A panic in one is recovered and logged once; the library goes on without it.
 // Every label value comes from a bounded set (a kind, a registered type, an outcome), never an
-// id. Embed [NopInstrumentation] to implement only some of the methods.
+// id. Embed [NopInstrumentation] in an implementation: it can then implement only some of the
+// methods, and a method added to this interface later does not break it.
 type Instrumentation interface {
 	// RequestDone records one Send or Query call of msgType, from the call to its result with
 	// every retry included; a call its caller cancels (context.Canceled) is not reported.
@@ -43,7 +44,8 @@ type Instrumentation interface {
 	CredentialsRefreshSent()
 	// ObserveGauges is called once, by [App.Start]: read returns the library's gauges as they
 	// are now, from memory; call it whenever the gauges are collected. It is safe to call from
-	// any goroutine.
+	// any goroutine. ObserveGauges itself must return without calling [App.Shutdown]: a
+	// Shutdown waits for it to return, so it would never end.
 	ObserveGauges(read func() Gauges)
 	// StartHandling starts the handling of a request by a handler of this instance, before
 	// the handler runs. The context it returns is the handler's (a span can live in it, and
@@ -183,7 +185,8 @@ func (t *telemetry) credentialsRefreshSent() {
 // observeGauges hands the implementation read; a read that panics reads zeros. After the
 // app's shutdown it hands nothing: a registration made then would never be ended. The ordering
 // lock is held while the implementation runs, so a Shutdown racing this call waits for it and
-// then ends the registration it made; read does not take that lock.
+// then ends the registration it made; read does not take that lock. An implementation that
+// called Shutdown from ObserveGauges would wait for that lock for ever: its doc forbids it.
 func (t *telemetry) observeGauges(read func() Gauges) {
 	if !t.enabled() {
 		return

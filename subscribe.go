@@ -122,8 +122,8 @@ func Subscribe[I, U any](ctx context.Context, app *App, q Message, opts ...SendO
 // ctx's error (with [ErrOutcomeUnknown], yielded once: by the range under way when ctx ends, else
 // by the next range), or an update that does not decode. Breaking out of the loop cancels the
 // subscription at the hub, as [Subscription.Close] does; a Close during the range (also from the
-// loop body) ends it without an error once the loop body returns, the buffered updates not
-// yielded.
+// loop body) ends it without an error once the loop body returns; the buffered updates may not
+// be yielded (one that arrives with the Close can still be yielded once).
 func (sub *Subscription[I, U]) Updates() iter.Seq2[U, error] {
 	return func(yield func(U, error) bool) {
 		var zero U

@@ -21,8 +21,6 @@ A complete service, which owns one command and one query. It is
 [`examples/quickstart/main.go`](examples/quickstart/main.go), and a test runs it against a scripted hub.
 
 ```go
-// quickstart:begin
-
 package main
 
 import (
@@ -104,8 +102,6 @@ func run(ctx context.Context, opts ...snodra.Option) error {
 	// Run connects to every hub, serves until ctx ends, then shuts down in order.
 	return app.Run(ctx)
 }
-
-// quickstart:end
 ```
 
 Run it against a hub with `SNODRA_SERVER_ADDRESS=localhost:7000 go run ./examples/quickstart` (the hub is the
@@ -275,16 +271,19 @@ app, err := snodra.New(
 - **Errors on the wire.** A handler's error is HANDLER_ERROR unless it was made with `snodra.Unauthenticated`,
   `snodra.PermissionDenied` or `snodra.InvalidRequest`; `snodra.WithDetails` attaches machine-readable details, which only
   a HANDLER_ERROR carries.
-- **Not yet specified.** Where the specification is silent or the other libraries differ from it, this library follows the
-  Rust library and records the question in [SPEC-GAPS.md](SPEC-GAPS.md).
+- **Not yet specified.** Where the specification is silent or the other libraries differ from it, this library does what
+  the Rust library does, except in SG-19, SG-22 and SG-23, where it departs from it (SG-22 and SG-23 as the Kotlin
+  library does). [SPEC-GAPS.md](SPEC-GAPS.md) records each case with what the Rust library, the Kotlin library and this
+  one do, and the question for the specification.
 
 ## Telemetry
 
 The core only defines an interface (`snodra.Instrumentation`, installed with `snodra.Telemetry`) and costs nothing
 without one. The separate module `github.com/snodra/snodra-messaging-go/otel` implements it on the OpenTelemetry API, with the
 metric names and labels of the other libraries (request duration, connected hubs, handlers in flight, token fetches,
-certificate rotations, credential refreshes), and a span for every request a handler serves. A call its caller cancels
-records no metric.
+certificate rotations, credential refreshes). It also creates a span for every request a handler serves, which neither
+the Rust nor the Kotlin library does, and names its instrumentation scope after this module (see SG-24 in
+[SPEC-GAPS.md](SPEC-GAPS.md)). A call its caller cancels records no metric.
 
 ```go
 app, err := snodra.New(
@@ -311,7 +310,8 @@ scripts/conformance.sh --only L1-RETRY       # one check
 SNODRA_HUB_PORT=17000 scripts/conformance.sh # when port 7000 is taken (the second hub is 100 above)
 ```
 
-The script builds the service, downloads the pinned runner release into `bin/` (or uses `SNODRA_CONFORMANCE_BIN`), starts the
+The script builds the service, downloads the pinned runner release into `bin/` and checks it against the sha256 pinned in
+[`scripts/conformance-runner.sha256`](scripts/conformance-runner.sha256) (or uses `SNODRA_CONFORMANCE_BIN`), starts the
 hub (`SNODRA_SERVER_VERSION` picks the image tag) and removes it afterwards. CI runs the same script with the pinned
 runner and fails when a check fails or is skipped, and keeps the runner's report as a build artifact.
 

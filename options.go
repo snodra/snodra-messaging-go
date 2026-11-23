@@ -194,9 +194,10 @@ func Codec(c PayloadCodec) Option {
 	}
 }
 
-// DefaultTimeout is the timeout of every [Send] and [Query] that sets none with [Timeout]
-// (sent as Request.timeout_ms). The default is none (0): the hub applies its per-type override or
-// its default request timeout, which is what the protocol asks for.
+// DefaultTimeout is the timeout of every call ([Send], [Query], [Gather], [Stream], [Subscribe])
+// that sets none with [Timeout] (sent as Request.timeout_ms; for a [Stream], the longest wait for
+// its next part). The default is none (0): the hub applies its per-type override or its default
+// request timeout, which is what the protocol asks for.
 func DefaultTimeout(d time.Duration) Option {
 	return func(c *config) error {
 		if d < 0 {
@@ -207,8 +208,9 @@ func DefaultTimeout(d time.Duration) Option {
 	}
 }
 
-// DefaultRetry is the retry policy of every [Send] and [Query] that sets none with [Retry] or
-// [NoRetry]. The default is no retry; [RetryNeverRan] is the usual policy.
+// DefaultRetry is the retry policy of every call ([Send], [Query], [Gather], [Stream],
+// [Subscribe]) that sets none with [Retry] or [NoRetry]. The default is no retry; [RetryNeverRan]
+// is the usual policy.
 func DefaultRetry(p RetryPolicy) Option {
 	return func(c *config) error {
 		if err := p.validate(); err != nil {

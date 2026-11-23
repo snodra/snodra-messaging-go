@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"log/slog"
 	"math/big"
 	"net/url"
 	"path/filepath"
@@ -294,4 +295,64 @@ func TestAClientCertificatePairIsChecked(t *testing.T) {
 func keyBody(keyPEM []byte) string {
 	lines := strings.Split(string(keyPEM), "\n")
 	return lines[1][10:30]
+}
+
+func TestACredentialOverPlainTextIsWarnedOnce(t *testing.T) {
+	const warning = "the instance's credential goes to hubs reached without TLS: it travels unencrypted"
+	var buf lockedBuffer
+	rec := &logRecorder{}
+	hub := fakehub.Start(t)
+	app := startApp(t, Hubs(hub.Addr()), Token(testToken),
+		Logger(slog.New(teeHandler{rec, slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})})))
+	s := hub.Next(t)
+	is(t, s.RecvRegister(t).GetCredentials().GetToken(), testToken) // the wire is unchanged
+	s.Ack(t, fakehub.Ack("hub-1"))
+	is(t, app.Ready(ctxWithin(t, time.Second)), nil)
+	s.Close(codes.Unavailable, "restart") // a reconnect warns nothing more
+	hub.Next(t).RecvRegister(t)
+	is(t, rec.count(slog.LevelWarn, warning), 1)
+	rec.mu.Lock()
+	for _, r := range rec.records {
+		if r.Message == warning {
+			var attrs []string
+			r.Attrs(func(a slog.Attr) bool { attrs = append(attrs, a.String()); return true })
+			if !strings.Contains(strings.Join(attrs, " "), hub.Addr()) {
+				t.Errorf("the warning does not name the hub: %v", attrs)
+			}
+		}
+	}
+	rec.mu.Unlock()
+	if strings.Contains(buf.String(), testToken) {
+		t.Fatalf("the log shows the token: %s", buf.String())
+	}
+
+	// Nothing to warn about: TLS, an https:// hub, or no credential.
+	ca := newTestCA(t, "operator CA")
+	tlsHub := fakehub.Start(t, fakehub.WithTLS(ca.server(t, "hub.test"), nil))
+	for name, opts := range map[string][]Option{
+		"TLS":           {Hubs(tlsHub.Addr()), Token(testToken), TLS(TLSConfig{CAFile: ca.caFile(t), ServerName: "hub.test"})},
+		"https://":      {Hubs("https://" + tlsHub.Addr()), JWT(staticSource{})},
+		"no credential": {Hubs(fakehub.Start(t).Addr())},
+	} {
+		quiet := &logRecorder{}
+		startApp(t, append(opts, Logger(slog.New(quiet)))...)
+		if n := quiet.count(slog.LevelWarn, warning); n != 0 {
+			t.Fatalf("%s: warned %d times", name, n)
+		}
+	}
+}
+
+// teeHandler hands every record to both handlers.
+type teeHandler struct{ a, b slog.Handler }
+
+func (h teeHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h teeHandler) Handle(ctx context.Context, r slog.Record) error {
+	_ = h.a.Handle(ctx, r.Clone())
+	return h.b.Handle(ctx, r)
+}
+func (h teeHandler) WithAttrs(as []slog.Attr) slog.Handler {
+	return teeHandler{h.a.WithAttrs(as), h.b.WithAttrs(as)}
+}
+func (h teeHandler) WithGroup(g string) slog.Handler {
+	return teeHandler{h.a.WithGroup(g), h.b.WithGroup(g)}
 }

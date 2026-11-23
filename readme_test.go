@@ -45,15 +45,19 @@ func TestReadmeLinksArePublic(t *testing.T) {
 }
 
 // The first Go block of the README is the quick start: the service code between the markers of
-// examples/quickstart/main.go (the markers themselves are part of the block).
+// examples/quickstart/main.go, the markers themselves left out.
 func TestReadmeQuickstartIsTheCompiledOne(t *testing.T) {
+	const beginMarker, endMarker = "// quickstart:begin", "// quickstart:end"
 	src := readText(t, "examples/quickstart/main.go")
-	begin := strings.Index(src, "// quickstart:begin")
-	end := strings.Index(src, "// quickstart:end")
-	if begin < 0 || end < begin {
+	begin := strings.Index(src, beginMarker)
+	end := strings.Index(src, endMarker)
+	if begin < 0 || end < begin+len(beginMarker) {
 		t.Fatal("examples/quickstart/main.go lacks its quickstart markers")
 	}
-	want := strings.TrimSpace(src[begin : end+len("// quickstart:end")])
+	want := strings.TrimSpace(src[begin+len(beginMarker) : end])
+	if !strings.HasPrefix(want, "package main") || strings.Contains(want, "quickstart:") {
+		t.Fatalf("the quick start between the markers is not the whole program:\n%s", want)
+	}
 	blocks := goBlocks(readText(t, "README.md"))
 	if len(blocks) == 0 || strings.TrimSpace(blocks[0]) != want {
 		t.Fatal("the README's first Go block differs from examples/quickstart/main.go between its markers")

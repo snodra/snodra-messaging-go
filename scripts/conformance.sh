@@ -4,7 +4,8 @@
 #   scripts/conformance.sh [--hubs 1|2] [--report text|json] [runner args...]
 #
 # Builds bin/conformance-service, fetches the runner (snodra-conformance v0.2.0) into bin/
-# unless SNODRA_CONFORMANCE_BIN names one, starts snodra/snodra-server:${SNODRA_SERVER_VERSION}
+# unless SNODRA_CONFORMANCE_BIN names one (the download is checked against the sha256 pinned in
+# scripts/conformance-runner.sha256, as in CI), starts snodra/snodra-server:${SNODRA_SERVER_VERSION}
 # (default 0.5.4) on 127.0.0.1:7000 (and 127.0.0.1:7100 with --hubs 2), runs the runner with the
 # remaining arguments (for example --only L1-REGISTER-FIRST) and removes the hubs on exit.
 #
@@ -92,6 +93,23 @@ if [[ -z "$runner" ]]; then
     tmp="$(mktemp -d)"
     curl -fsSL -o "$tmp/$archive" \
       "https://github.com/snodra/snodra-conformance/releases/download/$runner_version/$archive"
+    sums=scripts/conformance-runner.sha256
+    want="$(awk -v a="$archive" '$2 == a { print $1 }' "$sums")"
+    if [[ -z "$want" ]]; then
+      echo "no sha256 pinned for $archive in $sums" >&2
+      rm -rf "$tmp"
+      exit 2
+    fi
+    if command -v sha256sum >/dev/null 2>&1; then
+      got="$(sha256sum "$tmp/$archive" | cut -d' ' -f1)"
+    else
+      got="$(shasum -a 256 "$tmp/$archive" | cut -d' ' -f1)"
+    fi
+    if [[ "$got" != "$want" ]]; then
+      echo "$archive has sha256 $got, not the $want pinned in $sums" >&2
+      rm -rf "$tmp"
+      exit 1
+    fi
     tar -xzf "$tmp/$archive" -C "$tmp"
     found="$(find "$tmp" -type f -name snodra-conformance | head -n 1)"
     if [[ -z "$found" ]]; then

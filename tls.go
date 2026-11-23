@@ -118,6 +118,35 @@ func (c *hubConn) transport(id *clientIdentity) (credentials.TransportCredential
 	return credentials.NewTLS(cfg), nil
 }
 
+// warnPlainTextCredential warns, once, at the app's start, when its own credential (a token, a
+// token file, an access token) goes to hubs reached without TLS: it travels unencrypted. It
+// names those hubs and the kind of credential, never the credential. Nothing changes on the
+// wire: the reference libraries send the credential the same way, without a warning.
+func (a *App) warnPlainTextCredential() {
+	var kind string
+	switch {
+	case a.cfg.tls != nil:
+		return // every hub is reached over TLS
+	case a.cfg.tokenSource != nil:
+		kind = "access token"
+	case a.cfg.tokenFile != "", a.cfg.token != nil:
+		kind = "token"
+	default:
+		return
+	}
+	targets, _ := parseTargets(a.cfg.hubs) // checked by the options already
+	var plain []string
+	for _, t := range targets {
+		if !t.https {
+			plain = append(plain, t.String())
+		}
+	}
+	if len(plain) > 0 {
+		a.log.Warn("the instance's credential goes to hubs reached without TLS: it travels unencrypted",
+			"credential", kind, "hubs", plain, "fix", "configure TLS (TLS, SNODRA_SERVER_TLS=true) or use https:// addresses")
+	}
+}
+
 // tlsServerName is the name the hub's certificate is checked against: the configured one; else,
 // for a resolved address, its DNS name, not its IP; else "" (the dialled host).
 func (c *hubConn) tlsServerName() string {

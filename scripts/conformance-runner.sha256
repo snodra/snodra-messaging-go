@@ -1,0 +1,7 @@
+# sha256 of the snodra-conformance release archives this repository pins, one per platform, in the
+# format of `sha256sum`. scripts/conformance.sh and the CI conformance job check every download
+# against it: change the runner version there and these lines here together.
+4d8402f21c84f4e39a504f9c98eabce6c1818464d7ffb5995df760dbee9f154a  snodra-conformance-v0.2.0-x86_64-unknown-linux-musl.tar.gz
+324fda8156fa086973142e862ba94bff97300e2d5792c6cc3addbbc184c0e163  snodra-conformance-v0.2.0-aarch64-unknown-linux-musl.tar.gz
+bfeb40752b892f06b72451047bcd1d5258e00ecaba50987060744760f306826f  snodra-conformance-v0.2.0-x86_64-apple-darwin.tar.gz
+9373769d33e2b7684a9854110693bd566a754c7541012b1bfdb20e4bc953af53  snodra-conformance-v0.2.0-aarch64-apple-darwin.tar.gz

@@ -13,6 +13,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@v5
         with:
           go-version: 1.27.x
@@ -27,6 +29,8 @@ jobs:
         go-version: [1.26.x, 1.27.x]
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ matrix.go-version }}
@@ -42,6 +46,8 @@ jobs:
         working-directory: otel
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ matrix.go-version }}
@@ -56,8 +62,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/checkout@v4
         with:
+          persist-credentials: false
           repository: snodra/snodra-server
           ref: ${{ vars.SNODRA_SERVER_REF || 'main' }}
           path: snodra-server
@@ -70,6 +79,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@v5
         with:
           go-version: 1.27.x
@@ -85,12 +96,12 @@ jobs:
     timeout-minutes: 30
     env:
       SNODRA_CONFORMANCE_VERSION: v0.2.0
-      # sha256 of the runner's release archive, computed with `shasum -a 256` when it was pinned
-      SNODRA_CONFORMANCE_SHA256: 4d8402f21c84f4e39a504f9c98eabce6c1818464d7ffb5995df760dbee9f154a
       SNODRA_SERVER_VERSION: ${{ vars.SNODRA_SERVER_VERSION || '0.5.4' }}
       SNODRA_CONFORMANCE_REPORT_DIR: ${{ github.workspace }}/conformance-reports
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@v5
         with:
           go-version: 1.27.x
@@ -101,7 +112,10 @@ jobs:
           mkdir -p "$RUNNER_TEMP/runner"
           curl -fsSL -o "$RUNNER_TEMP/$archive" \
             "https://github.com/snodra/snodra-conformance/releases/download/${SNODRA_CONFORMANCE_VERSION}/${archive}"
-          echo "${SNODRA_CONFORMANCE_SHA256}  $RUNNER_TEMP/$archive" | sha256sum --check -
+          # The sha256 pinned for every platform, shared with scripts/conformance.sh.
+          sha256="$(awk -v a="$archive" '$2 == a { print $1 }' scripts/conformance-runner.sha256)"
+          test -n "$sha256"
+          echo "${sha256}  $RUNNER_TEMP/$archive" | sha256sum --check -
           tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP/runner"
           test -x "$RUNNER_TEMP/runner/snodra-conformance"
           "$RUNNER_TEMP/runner/snodra-conformance" --version
@@ -117,6 +131,7 @@ jobs:
             scripts/conformance.sh --report json
           # Exit 0 is not enough: a check the runner skipped does not fail it.
           jq -e '.passed == true and .complete == true and .level_reached == 1
+                 and ([.checks[]] | length >= 33)
                  and ([.checks[] | select(.status != "PASS")] | length == 0)
                  and ([.checks[] | select(.status == "SKIPPED")] | length == 0)' \
             "$SNODRA_CONFORMANCE_REPORT_DIR/level-1.json" >/dev/null \

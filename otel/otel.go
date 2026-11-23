@@ -15,8 +15,9 @@ import (
 	snodra "github.com/snodra/snodra-messaging-go"
 )
 
-// ScopeName is the instrumentation scope of the library's instruments and spans.
 // TODO(spec-gap): SG-24 (the telemetry's names are not specified).
+
+// ScopeName is the instrumentation scope of the library's instruments and spans.
 const ScopeName = "github.com/snodra/snodra-messaging-go"
 
 // The instrument names of the library, the Rust and Kotlin libraries' ones.

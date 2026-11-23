@@ -1,7 +1,10 @@
 # Specification gaps
 
 Places where the [library specification](https://snodra.damoreira.com/library-authors/) is silent, or where the
-reference library departs from it. In each case this library follows the reference library, and the code carries a
+reference library (the Rust library) departs from it. This library does on the wire what the reference library does,
+unless the entry says otherwise: SG-19, SG-22 and SG-23 depart from it (SG-22 and SG-23 as the Kotlin library does), and
+SG-24 records the telemetry names, scope and span that differ from it. Each entry says what the Rust library does,
+what the Kotlin library does where it differs, and what this library does. The code carries a
 `// TODO(spec-gap): SG-<n>` comment at the spot.
 
 ## Format of an entry
@@ -9,7 +12,7 @@ reference library departs from it. In each case this library follows the referen
 ### SG-<n>: short title
 
 - **Specification:** what the specification says (or that it is silent).
-- **Reference library:** what the Rust library does.
+- **Reference library:** what the Rust library does (and the Kotlin library, where it differs).
 - **This library:** what the Go code does.
 - **Question:** the open question for the specification owner.
 

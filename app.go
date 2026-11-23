@@ -138,6 +138,10 @@ func New(opts ...Option) (*App, error) {
 // reconnects on its own until [App.Shutdown]. Handlers can no longer be registered after it.
 // [App.Ready] waits for the first acknowledged hub. When a registration failed, Start returns
 // every registration error, joined, and starts nothing.
+//
+// ctx is only checked on entry (Start returns its error when it is already done): it does not
+// bound the app, and cancelling it later stops nothing. [App.Shutdown] stops the app; [App.Run]
+// serves until its own context ends.
 func (a *App) Start(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -164,6 +168,7 @@ func (a *App) start() error {
 	}
 	a.freezeTypes()
 	a.started = true
+	a.warnPlainTextCredential()
 	a.pool = newPool(a)
 	a.pool.start(a)
 	return nil

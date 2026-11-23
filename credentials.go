@@ -120,7 +120,9 @@ func (t AccessToken) String() string {
 	return "AccessToken{Value: ***, Expiry: " + t.Expiry.Format(time.RFC3339) + "}"
 }
 
-// Format prints String for every verb that reaches a Formatter (not %p or %w: see printRedacted).
+// Format prints String for every verb that reaches a Formatter. %p and %w never reach it (fmt
+// prints the struct raw for them, and go vet flags both), nor does encoding/json, which writes
+// the exported fields.
 func (t AccessToken) Format(f fmt.State, _ rune) { printRedacted(f, t.String()) }
 
 // LogValue is String, for log/slog.
@@ -180,7 +182,9 @@ func (c ClientCredentials) String() string {
 		c.TokenURL, c.ClientID, c.ClientSecretFile, c.Scope, c.CAFile)
 }
 
-// Format prints String for every verb that reaches a Formatter (not %p or %w: see printRedacted).
+// Format prints String for every verb that reaches a Formatter. %p and %w never reach it (fmt
+// prints the struct raw for them, and go vet flags both), nor does encoding/json, which writes
+// the exported fields.
 func (c ClientCredentials) Format(f fmt.State, _ rune) { printRedacted(f, c.String()) }
 
 // LogValue is String, for log/slog.
