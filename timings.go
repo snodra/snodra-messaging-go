@@ -136,7 +136,7 @@ func defaultTimings() timings {
 		backoffMin:         500 * time.Millisecond,
 		backoffMax:         5 * time.Second,
 		deregisterWait:     1 * time.Second,
-		handlerDrain:       10 * time.Second,
+		handlerDrain:       5 * time.Second,
 		subscriptionEnd:    2 * time.Second,
 		closeWait:          2 * time.Second,
 		permitFlushAfter:   50 * time.Millisecond,

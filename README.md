@@ -270,7 +270,7 @@ app, err := snodra.New(
 ## Behaviour worth knowing
 
 - **Shutdown.** `App.Shutdown(ctx)` leaves the hubs in order (an empty registration so requests route elsewhere, then
-  handlers in flight for at most 10 s, then subscriptions, then the stream half-close) and returns by `ctx`'s deadline.
+  then every subscription it serves ends, then the handlers in flight for at most 5 s, then the stream half-close) and returns by `ctx`'s deadline.
   `App.Run` shuts down within 15 s. A handler that ignores its context outlives `Shutdown`: the library cannot stop a
   goroutine, so it stops waiting for it.
 - **Cancelled requests.** When the hub cancels a request (the caller gave up, the request timed out), the handler's

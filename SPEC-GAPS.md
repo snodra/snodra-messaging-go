@@ -138,10 +138,12 @@ what the Kotlin library does where it differs, and what this library does. The c
 - **Specification:** [protocol.md, Shutting down](https://snodra.damoreira.com/library-authors/protocol/) fixes one
   bound, 1 s for the acks of the empty `Register`; the handler drain and the wait for the hub to finish its side after
   the half-close are "bounded" without a value.
-- **Reference library:** waits at most 1 s for the acks, then 10 s for the handlers in flight, then 2 s for the
-  served subscriptions' ends, then 2 s for the hub to finish each stream after the half-close.
-- **This library:** applies the same bounds, each also bounded by the context given to `Shutdown` (when it ends first
-  the streams are dropped and `Shutdown` returns the context's error) (`app.go`).
+- **Reference library:** the Kotlin library waits at most 1 s for the acks, then ends every subscription it serves,
+  then waits at most 5 s for the handlers in flight, then half-closes each stream and waits at most 2 s for the hub
+  to finish it. The Rust library drains the handlers for 10 s first and ends the subscriptions after.
+- **This library:** does what the Kotlin library does, each wait also bounded by the context given to `Shutdown`
+  (when it ends first the streams are dropped and `Shutdown` returns the context's error), and the subscriptions' ends
+  waited for at most 2 s more after the drain (`app.go`); before, it followed the Rust library.
 - **Question:** should the specification name these values, or leave them to each library?
 
 ### SG-10: how often an unwritten request moves to another hub

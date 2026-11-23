@@ -15,7 +15,7 @@ func TestDefaultTimings(t *testing.T) {
 	is(t, d.backoffMin, 500*ms)
 	is(t, d.backoffMax, 5*s)
 	is(t, d.deregisterWait, 1*s)
-	is(t, d.handlerDrain, 10*s)
+	is(t, d.handlerDrain, 5*s)
 	is(t, d.subscriptionEnd, 2*s)
 	is(t, d.closeWait, 2*s)
 	is(t, d.permitFlushAfter, 50*ms)

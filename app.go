@@ -243,9 +243,10 @@ func (a *App) Run(ctx context.Context) error {
 }
 
 // Shutdown leaves the hubs in order: a Register with no types to every acknowledged hub (so
-// it routes elsewhere at once), waiting at most 1 s for its acks; then the handlers in flight
-// finish (at most 10 s); then every subscription served here completes with a ReplyEnd (written
-// within 2 s); then each stream is half-closed and the hub gets at most 2 s to finish its side.
+// it routes elsewhere at once), waiting at most 1 s for its acks; then every subscription served
+// here completes with a ReplyEnd; then the handlers in flight finish (at most 5 s), the ends
+// written meanwhile (waited for at most 2 s more); then each stream is half-closed and the hub
+// gets at most 2 s to finish its side.
 // Every wait is also bounded by ctx: when ctx ends first, the streams are dropped and ctx's
 // error is returned, at most 50 ms after ctx's deadline (the time given to the dropped streams'
 // goroutines to end). A second call waits for the first and returns its result.
@@ -307,6 +308,9 @@ func (a *App) leave(ctx context.Context, conns []*hubConn) error {
 	if err := waitAll(ctx, a.cfg.timings.deregisterWait, deregistered(conns)); err != nil {
 		return err
 	}
+	// Every served subscription completes at once, as in the reference library: its subscribers
+	// are told now, not after a slow handler, and its end is written before the half-close.
+	refs := a.subs.endAll()
 	// The handlers in flight finish; their replies still go out. Requests the hubs forward
 	// meanwhile are served too, also those arriving until each stream's half-close (which waits
 	// for them until the same deadline).
@@ -318,8 +322,7 @@ func (a *App) leave(ctx context.Context, conns []*hubConn) error {
 		a.log.Warn("handlers still running after the drain; closing the hub streams anyway",
 			"handlers", n, "waited", a.cfg.timings.handlerDrain)
 	}
-	// Then every served subscription completes, its end written before the half-close.
-	if refs := a.subs.endAll(); len(refs) > 0 {
+	if len(refs) > 0 {
 		flushed := make([]<-chan struct{}, len(refs))
 		for i, ref := range refs {
 			flushed[i] = ref.flushed()

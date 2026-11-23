@@ -645,3 +645,35 @@ func TestTheLimitIsDecidedFirst(t *testing.T) {
 	is(t, end.GetRequestId(), "w2#1")
 	is(t, end.GetError().GetCode(), hubpb.ErrorCode_RESOURCE_EXHAUSTED)
 }
+
+// The subscribers are told at once: the served subscriptions end before the handlers in flight
+// are waited for, as in the reference library.
+func TestShutdownEndsTheSubscriptionsBeforeTheHandlerDrain(t *testing.T) {
+	release := make(chan struct{})
+	started := make(chan struct{})
+	var updates *Updates[WatchOrders, OrderUpdate]
+	app, s := serving(t, fakehub.Start(t), func(app *App) {
+		u, err := HandleSubscription[WatchOrders, OrderView, OrderUpdate](app, watchOrders)
+		is(t, err, nil)
+		updates = u
+		is(t, HandleCommand(app, func(context.Context, PlaceOrder) (Empty, error) {
+			close(started)
+			<-release
+			return Empty{}, nil
+		}), nil)
+	})
+	open(t, updates, s, "w#1", "t")
+	s.Send(t, command("c-1", "orders.PlaceOrder", `{}`))
+	<-started
+	done := make(chan error, 1)
+	go func() { done <- app.Shutdown(ctxWithin(t, 5*time.Second)) }()
+	is(t, len(s.RecvRegister(t).GetQueryTypes()), 0)
+	s.Ack(t, fakehub.Ack("hub-1"))
+	end := nextEnd(t, s) // while the handler still runs
+	is(t, end.GetRequestId(), "w#1")
+	close(release)
+	is(t, nextReply(t, s).GetRequestId(), "c-1")
+	s.HalfClosed(t, time.Second)
+	s.Close(codes.OK, "")
+	is(t, <-done, nil)
+}
