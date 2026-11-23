@@ -269,7 +269,7 @@ reference library departs from it. In each case this library follows the referen
 - **Reference library:** checks the token of every request first, before it looks the handler up: a token that fails
   is answered `UNAUTHENTICATED` whatever the handler (also instead of `NO_HANDLER`); a request without a token is an
   anonymous caller and runs. The Kotlin library does the same.
-- **This library:** does the same (`dispatch.go`, `identity.go`).
+- **This library:** does the same (`dispatch.go`, `subscription_handler.go`, `identity.go`).
 - **Question:** is a failing token `UNAUTHENTICATED` for every handler, or only for a handler that requires an
   authenticated caller (the others running as if the request carried no token)?
 
@@ -350,7 +350,8 @@ reference library departs from it. In each case this library follows the referen
   serves; the rolled hub's new `Register` therefore offers `ceil(max / (N - 1))` (5 of 5 with two hubs and a
   capacity of 5) and the other hubs are topped up meanwhile.
 - **This library:** keeps counting the rolled hub, as the Kotlin library does: its new `Register` offers
-  `ceil(max / N)` (3 of 5); the other hubs are topped up once its old stream has ended, as in both libraries.
+  `ceil(max / N)` (3 of 5); the other hubs are topped up once its old stream has ended, as in both libraries
+  (`pool.go`).
 - **Question:** is a rolled hub a hub that "returns" (`ceil(max / N)`), or does it get the share of the hubs that
   stayed?
 
@@ -365,7 +366,7 @@ reference library departs from it. In each case this library follows the referen
   a span for a request its handlers serve (the Kotlin library only writes the current trace context into the requests it
   sends).
 - **This library:** emits the same instrument names, units, attributes, bucket boundaries and descriptions (the
-  `otel` module). Differences visible to a dashboard: the instrumentation scope is the Go import path
+  `otel` module, `otel/otel.go`). Differences visible to a dashboard: the instrumentation scope is the Go import path
   `github.com/snodra/snodra-messaging-go`; a handled request gets a server span named after its message type, a child of its
   valid `traceparent`; the three counters are synchronous instead of observable, exported as the same monotonic sums with
   every series at 0 from the start; a call ended by the caller's own deadline (`context.DeadlineExceeded`) is `timeout`.

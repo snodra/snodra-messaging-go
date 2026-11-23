@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 # Runs the Snodra conformance runner against examples/conformance-service.
 #
-#   scripts/conformance.sh [--hubs 1|2] [runner args...]
+#   scripts/conformance.sh [--hubs 1|2] [--report text|json] [runner args...]
 #
 # Builds bin/conformance-service, fetches the runner (snodra-conformance v0.2.0) into bin/
 # unless SNODRA_CONFORMANCE_BIN names one, starts snodra/snodra-server:${SNODRA_SERVER_VERSION}
 # (default 0.5.4) on 127.0.0.1:7000 (and 127.0.0.1:7100 with --hubs 2), runs the runner with the
 # remaining arguments (for example --only L1-REGISTER-FIRST) and removes the hubs on exit.
+#
+# --report json prints the runner's JSON report instead of the text one (CI uses it). With
+# SNODRA_CONFORMANCE_REPORT=<file> the runner's report is also written to that file; the exit
+# code is the runner's either way.
 #
 # SNODRA_HUB_PORT moves the hubs to other local ports (the second hub is 100 above): on macOS
 # the AirPlay Receiver holds port 7000, so run there with, say, SNODRA_HUB_PORT=17000.
@@ -35,6 +39,33 @@ case "$hubs" in
   1 | 2) ;;
   *)
     echo "--hubs takes 1 or 2" >&2
+    exit 2
+    ;;
+esac
+
+# The runner takes --report once: pull it out of the arguments, text by default.
+report=text
+args=()
+while (($# > 0)); do
+  case "$1" in
+    --report)
+      report="${2:-}"
+      shift 2 || shift
+      ;;
+    --report=*)
+      report="${1#--report=}"
+      shift
+      ;;
+    *)
+      args+=("$1")
+      shift
+      ;;
+  esac
+done
+case "$report" in
+  text | json) ;;
+  *)
+    echo "--report takes text or json" >&2
     exit 2
     ;;
 esac
@@ -107,9 +138,19 @@ for i in $(seq 1 "$hubs"); do
   fi
 done
 
-"$runner" run \
-  --service-cmd "'$PWD/bin/conformance-service'" \
-  --service conformance-go \
-  "${hub_args[@]}" \
-  --report text \
-  "$@"
+run_runner() {
+  "$runner" run \
+    --service-cmd "'$PWD/bin/conformance-service'" \
+    --service conformance-go \
+    "${hub_args[@]}" \
+    --report "$report" \
+    ${args[@]+"${args[@]}"}
+}
+
+if [[ -n "${SNODRA_CONFORMANCE_REPORT:-}" ]]; then
+  status=0
+  run_runner >"$SNODRA_CONFORMANCE_REPORT" || status=$?
+  cat "$SNODRA_CONFORMANCE_REPORT"
+  exit "$status"
+fi
+run_runner
