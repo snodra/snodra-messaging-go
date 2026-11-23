@@ -261,16 +261,20 @@ what the Kotlin library does where it differs, and what this library does. The c
 - **Specification:** [protocol.md, Replies and errors](https://snodra.damoreira.com/library-authors/protocol/) says a
   library must "keep `Error.message` for the codes a handler produces" (`HANDLER_ERROR`, `UNAUTHENTICATED`,
   `PERMISSION_DENIED`, `INVALID_REQUEST`); it says nothing of the message of the other codes.
-- **Reference library:** keeps the hub's message for an unknown code (read as `HANDLER_ERROR`); keeps it for
-  `CANCELLED` too, prefixed with the type ("'<type>': <hub's message>"); and replaces it with its own text naming the
-  type for `NO_HANDLER` ("No handler registered for '<type>'"), `TIMEOUT` ("Timed out waiting for reply to
-  '<type>'"), `HANDLER_DISCONNECTED` ("Handler for '<type>' disconnected") and `RESOURCE_EXHAUSTED` ("Handler for
-  '<type>' is busy"). The Kotlin library does the same for these four codes (for a unary request), except that its
-  `RESOURCE_EXHAUSTED` text has a suffix: "Handler for '<type>' is busy: its hub queue or session buffer is full".
-- **This library:** does what the Rust library does: `Error.Message` holds those texts for those four codes, the
-  prefixed message for `CANCELLED`, the hub's message otherwise (`errors.go`).
-- **Question:** should a library keep the hub's message for every code (it is safe to log), or is it free to replace
-  it for the codes no handler produces?
+- **Settled:** the caller reads the Kotlin library's texts: "No handler registered for '<type>'" (`NO_HANDLER`),
+  "Timed out waiting for reply to '<type>'" (`TIMEOUT`), "Handler for '<type>' disconnected"
+  (`HANDLER_DISCONNECTED`), "Handler for '<type>' is busy: its hub queue or session buffer is full"
+  (`RESOURCE_EXHAUSTED`; for a subscription the hub's own reason after the colon, a subscriber buffer overflow or an
+  instance's subscription limit), the hub's message for `CANCELLED` ("cancelled by the hub" when it gave none), and
+  the hub's message for an unknown code (read as `HANDLER_ERROR`). A handler side answers a type it does not serve
+  with `NO_HANDLER` "no handler for type <type>". The Rust library prefixes `CANCELLED` with the type and has no
+  suffix for `RESOURCE_EXHAUSTED`.
+- **This library:** does what the Kotlin library does (`errors.go`, `dispatch.go`); before, it followed the Rust
+  library. The reasons of the `Cancel` it writes are the Kotlin library's too ("collector cancelled", "subscriber
+  cancelled", "no part within the local guard", "no initial result within the local guard", "<stream or
+  subscription> <type> lost <n> part(s)", "collector failed: ...", "initial result unusable: ..."), and a streaming
+  handler starved of credit ends with `TIMEOUT` "no credit within <ms> ms".
+- **Question:** settled.
 
 ### SG-18: a forwarded token that fails, for a handler without a guard
 

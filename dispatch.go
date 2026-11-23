@@ -328,7 +328,7 @@ func (a *App) lookup(req *hubpb.Request, streaming bool) (*handler, hubpb.ErrorC
 	if streaming {
 		switch {
 		case h == nil || h.kind == kindCommand:
-			return nil, hubpb.ErrorCode_NO_HANDLER, noHandlerText(typ)
+			return nil, hubpb.ErrorCode_NO_HANDLER, noHandlerWireText(typ)
 		case h.kind != kindStream:
 			return nil, hubpb.ErrorCode_INVALID_REQUEST, typ + " is not a streaming query handler (it answers mode " + h.mode() + ")"
 		}
@@ -337,7 +337,7 @@ func (a *App) lookup(req *hubpb.Request, streaming bool) (*handler, hubpb.ErrorC
 	switch req.GetKind() {
 	case hubpb.RequestKind_COMMAND:
 		if h == nil || h.kind != kindCommand {
-			return nil, hubpb.ErrorCode_NO_HANDLER, noHandlerText(typ)
+			return nil, hubpb.ErrorCode_NO_HANDLER, noHandlerWireText(typ)
 		}
 		return h, 0, ""
 	case hubpb.RequestKind_QUERY:
@@ -346,7 +346,7 @@ func (a *App) lookup(req *hubpb.Request, streaming bool) (*handler, hubpb.ErrorC
 	}
 	switch {
 	case h == nil || h.kind == kindCommand:
-		return nil, hubpb.ErrorCode_NO_HANDLER, noHandlerText(typ)
+		return nil, hubpb.ErrorCode_NO_HANDLER, noHandlerWireText(typ)
 	case h.kind == kindSubscription:
 		// A subscription's initial result is the unary request <id>#0, answered by the
 		// subscription's initial handler; any other unary request used the wrong call.

@@ -6,6 +6,7 @@ import (
 	"iter"
 	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -112,7 +113,7 @@ func TestBreakingTheLoopCancelsAndLeaksNothing(t *testing.T) {
 	}
 	c := s.RecvCancel(t)
 	is(t, c.GetRequestId(), r.GetId())
-	is(t, c.GetReason(), "dropped by the sender") // the reference library's reason
+	is(t, c.GetReason(), "collector cancelled") // the reference library's reason
 	o := await(t, read)
 	is(t, o.err, nil)
 	is(t, len(o.value), 2)
@@ -147,7 +148,7 @@ func TestAGapOrAShortEndIsLostParts(t *testing.T) {
 	is(t, o.err.Error(), "snodra: parts of the answer were lost: stream orders.ListOrders lost 1 part(s)")
 	c := s.RecvCancel(t)
 	is(t, c.GetRequestId(), r.GetId())
-	is(t, c.GetReason(), "lost parts")
+	is(t, c.GetReason(), "stream orders.ListOrders lost 1 part(s)")
 
 	read = async(func() ([]OrderLine, error) {
 		return collect(Stream[OrderLine](context.Background(), app, ListOrders{}))
@@ -213,7 +214,7 @@ func TestTheEndsErrorReachesTheCaller(t *testing.T) {
 	o = await(t, read)
 	is(t, o.err != nil, true)
 	is(t, errors.As(o.err, &e), false) // a local failure
-	is(t, s.RecvCancel(t).GetReason(), "undecodable part")
+	is(t, strings.HasPrefix(s.RecvCancel(t).GetReason(), "collector failed: snodra: cannot decode a part of orders.ListOrders"), true)
 	is(t, waiting(app), 0)
 }
 
@@ -258,7 +259,7 @@ func TestAStreamCancelledByItsContext(t *testing.T) {
 	is(t, errors.Is(o.err, ErrOutcomeUnknown), true) // as for Send: it was written
 	c := s.RecvCancel(t)
 	is(t, c.GetRequestId(), r.GetId())
-	is(t, c.GetReason(), "dropped by the sender")
+	is(t, c.GetReason(), "collector cancelled")
 	is(t, waiting(app), 0)
 }
 
@@ -280,7 +281,7 @@ func TestTheStreamsLocalGuard(t *testing.T) { // SG-3
 	within(t, o.elapsed, 1350*ms, 2500*ms)
 	c := s.RecvCancel(t)
 	is(t, c.GetRequestId(), r.GetId())
-	is(t, c.GetReason(), "local guard timeout")
+	is(t, c.GetReason(), "no part within the local guard")
 
 	// Between parts: the bound plus 1 s.
 	read = async(func() ([]OrderLine, error) {
@@ -297,7 +298,7 @@ func TestTheStreamsLocalGuard(t *testing.T) { // SG-3
 	is(t, e.Code, CodeTimeout)
 	is(t, len(o.value), 1)
 	within(t, idle, 1150*ms, 1700*ms)
-	is(t, s.RecvCancel(t).GetReason(), "local guard timeout")
+	is(t, s.RecvCancel(t).GetReason(), "no part within the local guard")
 	is(t, waiting(app), 0)
 }
 
@@ -382,7 +383,7 @@ func TestACancelledContextWinsOverBufferedParts(t *testing.T) {
 	is(t, errors.Is(o.err, ErrOutcomeUnknown), true)
 	c := s.RecvCancel(t)
 	is(t, c.GetRequestId(), r.GetId())
-	is(t, c.GetReason(), "dropped by the sender")
+	is(t, c.GetReason(), "collector cancelled")
 	is(t, waiting(app), 0)
 }
 
@@ -402,7 +403,7 @@ func TestAPanicInTheLoopBodyCancelsTheStream(t *testing.T) {
 	is(t, receive(t, recovered), any("loop body defect"))
 	c := s.RecvCancel(t)
 	is(t, c.GetRequestId(), r.GetId())
-	is(t, c.GetReason(), "dropped by the sender")
+	is(t, c.GetReason(), "collector cancelled")
 	is(t, waiting(app), 0)
 }
 

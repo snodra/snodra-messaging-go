@@ -285,8 +285,8 @@ func TestEveryErrorCodeReachesTheCaller(t *testing.T) { // SG-17 for the message
 		CodeNoHandler:           "No handler registered for 'orders.PlaceOrder'",
 		CodeTimeout:             "Timed out waiting for reply to 'orders.PlaceOrder'",
 		CodeHandlerDisconnected: "Handler for 'orders.PlaceOrder' disconnected",
-		CodeResourceExhausted:   "Handler for 'orders.PlaceOrder' is busy",
-		CodeCancelled:           "'orders.PlaceOrder': hub says 9", // the hub's message, prefixed with the type
+		CodeResourceExhausted:   "Handler for 'orders.PlaceOrder' is busy: its hub queue or session buffer is full",
+		CodeCancelled:           "hub says 9", // the hub's message
 	}
 	for _, c := range []struct {
 		wire int32

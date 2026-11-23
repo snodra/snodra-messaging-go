@@ -5,6 +5,7 @@ import (
 	"errors"
 	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -89,7 +90,7 @@ func TestSubscribeDetectsLostParts(t *testing.T) {
 	is(t, err.Error(), "snodra: parts of the answer were lost: subscription orders.WatchOrders lost 1 part(s)")
 	c := s.RecvCancel(t)
 	is(t, c.GetRequestId(), r.GetId())
-	is(t, c.GetReason(), "lost parts")
+	is(t, c.GetReason(), "subscription orders.WatchOrders lost 1 part(s)")
 
 	sub, r = opened(t, app, s, InitialCredit(10))
 	s.Send(t, update(r.GetId(), 2))
@@ -134,7 +135,7 @@ func TestAFailedInitialResultFailsSubscribe(t *testing.T) {
 	o = await(t, sub)
 	is(t, o.err != nil, true)
 	is(t, errors.As(o.err, &e), false) // a local failure
-	is(t, s.RecvCancel(t).GetReason(), "undecodable part")
+	is(t, strings.HasPrefix(s.RecvCancel(t).GetReason(), "initial result unusable: snodra: cannot decode the initial result"), true)
 	is(t, waiting(app), 0)
 }
 
@@ -145,9 +146,9 @@ func TestCloseWithoutRangingCancels(t *testing.T) {
 	sub.Close()
 	c := s.RecvCancel(t)
 	is(t, c.GetRequestId(), r.GetId())
-	is(t, c.GetReason(), "dropped by the sender") // the reference library's reason
-	sub.Close()                                   // again: nothing more
-	got, err := collect(sub.Updates())            // ranged after Close: nothing
+	is(t, c.GetReason(), "subscriber cancelled") // the reference library's reason
+	sub.Close()                                  // again: nothing more
+	got, err := collect(sub.Updates())           // ranged after Close: nothing
 	is(t, len(got), 0)
 	is(t, err, nil)
 	s.Send(t, update(r.GetId(), 2)) // late frames find nothing
@@ -173,7 +174,7 @@ func TestBreakingTheUpdatesLoopCancels(t *testing.T) {
 	is(t, len(got), 2)
 	c := s.RecvCancel(t)
 	is(t, c.GetRequestId(), r.GetId())
-	is(t, c.GetReason(), "dropped by the sender")
+	is(t, c.GetReason(), "subscriber cancelled")
 	again, err := collect(sub.Updates()) // over: a later range yields nothing
 	is(t, len(again), 0)
 	is(t, err, nil)
@@ -217,7 +218,7 @@ func TestSubscribeEndsWithItsContext(t *testing.T) {
 	cancel() // never ranged: the subscription is cancelled all the same
 	c := s.RecvCancel(t)
 	is(t, c.GetRequestId(), r.GetId())
-	is(t, c.GetReason(), "dropped by the sender")
+	is(t, c.GetReason(), "subscriber cancelled")
 	_, err := collect(o.value.Updates())
 	is(t, errors.Is(err, context.Canceled), true)
 	is(t, errors.Is(err, ErrOutcomeUnknown), true)
@@ -248,7 +249,7 @@ func TestTheSubscriptionsLocalGuardCoversItsInitialResult(t *testing.T) { // SG-
 	within(t, o.elapsed, 1150*ms, 2000*ms) // the hub's bound (200 ms) plus 1 s
 	c := s.RecvCancel(t)
 	is(t, c.GetRequestId(), r.GetId())
-	is(t, c.GetReason(), "local guard timeout")
+	is(t, c.GetReason(), "no initial result within the local guard")
 
 	// After it, a quiet subscription is not a broken one: no guard.
 	opened2, r2 := opened(t, app, s)
@@ -359,7 +360,7 @@ func TestCloseDuringTheLoopBodyCancelsAtOnce(t *testing.T) {
 	sub.Close()          // from another goroutine
 	c := s.RecvCancel(t) // while the loop body still runs
 	is(t, c.GetRequestId(), r.GetId())
-	is(t, c.GetReason(), "dropped by the sender")
+	is(t, c.GetReason(), "subscriber cancelled")
 	close(release)
 	got := await(t, read)
 	is(t, got.err, nil)

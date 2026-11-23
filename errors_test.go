@@ -13,8 +13,8 @@ func TestEveryCodeReadsAsItself(t *testing.T) { // SG-17 for the messages
 		1: "No handler registered for 'orders.PlaceOrder'",
 		2: "Timed out waiting for reply to 'orders.PlaceOrder'",
 		3: "Handler for 'orders.PlaceOrder' disconnected",
-		8: "Handler for 'orders.PlaceOrder' is busy",
-		9: "'orders.PlaceOrder': m", // the hub's message, prefixed with the type
+		8: "Handler for 'orders.PlaceOrder' is busy: its hub queue or session buffer is full",
+		9: "m", // the hub's message
 	}
 	for c := int32(1); c <= 9; c++ {
 		e := errorFromWire("orders.PlaceOrder", &hubpb.Error{Code: hubpb.ErrorCode(c), Message: "m", Details: []byte(`{"a":1}`)})
@@ -91,4 +91,15 @@ func TestErrorToWireOfNilIsAHandlerError(t *testing.T) {
 	is(t, w.GetCode(), hubpb.ErrorCode_HANDLER_ERROR)
 	is(t, w.GetRequestId(), "r-1")
 	is(t, w.GetMessage() != "", true)
+}
+
+func TestTheMessagesOfTheCodesNoHandlerProduces(t *testing.T) { // SG-17
+	// A subscription's RESOURCE_EXHAUSTED says why; a CANCELLED without a message says who.
+	is(t, subscriptionErrorFromWire("orders.WatchOrders", &hubpb.Error{Code: hubpb.ErrorCode_RESOURCE_EXHAUSTED, Message: "subscription limit (2) reached"}).Message,
+		"Handler for 'orders.WatchOrders' is busy: subscription limit (2) reached")
+	is(t, subscriptionErrorFromWire("orders.WatchOrders", &hubpb.Error{Code: hubpb.ErrorCode_RESOURCE_EXHAUSTED}).Message,
+		"Handler for 'orders.WatchOrders' is busy: its hub queue or session buffer is full")
+	is(t, errorFromWire("orders.GetOrder", &hubpb.Error{Code: hubpb.ErrorCode_RESOURCE_EXHAUSTED, Message: "queue full"}).Message,
+		"Handler for 'orders.GetOrder' is busy: its hub queue or session buffer is full")
+	is(t, errorFromWire("orders.ListOrders", &hubpb.Error{Code: hubpb.ErrorCode_CANCELLED}).Message, "cancelled by the hub")
 }

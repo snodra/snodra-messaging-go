@@ -109,9 +109,16 @@ func WithDetails(err error, details any) error {
 // handler's e: its code (an unknown one, and ERROR_CODE_UNSPECIFIED, read as HANDLER_ERROR), the
 // details for HANDLER_ERROR only, and the message, except for NO_HANDLER, TIMEOUT,
 // HANDLER_DISCONNECTED and RESOURCE_EXHAUSTED, whose message is the library's own, naming typ, and
-// CANCELLED, whose message is prefixed with "'<typ>': ", as in the reference library.
+// an empty CANCELLED, which reads "cancelled by the hub", as in the reference library.
 // TODO(spec-gap): SG-17 (the message of the codes no handler produces).
-func errorFromWire(typ string, e *hubpb.Error) *Error {
+func errorFromWire(typ string, e *hubpb.Error) *Error { return fromWire(typ, e, false) }
+
+// subscriptionErrorFromWire is errorFromWire for the answers of a subscription, whose
+// RESOURCE_EXHAUSTED says why (a subscriber buffer overflow, an instance's subscription limit):
+// its message follows the library's text.
+func subscriptionErrorFromWire(typ string, e *hubpb.Error) *Error { return fromWire(typ, e, true) }
+
+func fromWire(typ string, e *hubpb.Error, subscription bool) *Error {
 	code := Code(e.GetCode())
 	if code < CodeNoHandler || code > CodeCancelled {
 		code = CodeHandlerError
@@ -125,9 +132,15 @@ func errorFromWire(typ string, e *hubpb.Error) *Error {
 	case CodeHandlerDisconnected:
 		msg = "Handler for '" + typ + "' disconnected"
 	case CodeResourceExhausted:
-		msg = "Handler for '" + typ + "' is busy"
+		why := "its hub queue or session buffer is full"
+		if subscription && msg != "" {
+			why = msg
+		}
+		msg = "Handler for '" + typ + "' is busy: " + why
 	case CodeCancelled:
-		msg = "'" + typ + "': " + msg
+		if msg == "" {
+			msg = "cancelled by the hub"
+		}
 	}
 	out := &Error{Code: code, Message: msg}
 	if code == CodeHandlerError && len(e.GetDetails()) > 0 {
@@ -136,8 +149,12 @@ func errorFromWire(typ string, e *hubpb.Error) *Error {
 	return out
 }
 
-// noHandlerText is the message of NO_HANDLER for typ, the reference library's.
+// noHandlerText is the message of NO_HANDLER for typ the caller reads, the reference library's.
 func noHandlerText(typ string) string { return "No handler registered for '" + typ + "'" }
+
+// noHandlerWireText is the message of the NO_HANDLER a handler side answers for typ, the
+// reference library's.
+func noHandlerWireText(typ string) string { return "no handler for type " + typ }
 
 // timeoutText is the message of TIMEOUT for typ, the reference library's.
 func timeoutText(typ string) string { return "Timed out waiting for reply to '" + typ + "'" }

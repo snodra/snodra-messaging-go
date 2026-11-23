@@ -57,7 +57,7 @@ func Stream[T any](ctx context.Context, app *App, q Message, opts ...SendOption)
 		var s *streaming
 		defer func() {
 			if s != nil {
-				s.cancel("dropped by the sender")
+				s.cancel(s.callerGone())
 			}
 		}()
 		// TODO(spec-gap): SG-21 (retried until the first item, each attempt sending the chosen idle timeout).
@@ -76,9 +76,10 @@ func Stream[T any](ctx context.Context, app *App, q Message, opts ...SendOption)
 		for part := first; part != nil; {
 			v, err := decodeAnswer[T](app.cfg.codec, part.GetPayload())
 			if err != nil {
-				s.cancel("undecodable part")
-				yield(zero, fmt.Errorf("snodra: cannot decode a part of %s from %s/%s: %w",
-					out.typ, part.GetResponderService(), part.GetResponderInstance(), err))
+				err = fmt.Errorf("snodra: cannot decode a part of %s from %s/%s: %w",
+					out.typ, part.GetResponderService(), part.GetResponderInstance(), err)
+				s.cancel(collectorFailed(err))
+				yield(zero, err)
 				return
 			}
 			s.consumed()
@@ -272,7 +273,7 @@ func (s *streaming) next(ctx context.Context) (*hubpb.ReplyPart, error) {
 		case <-expired:
 			// The hub ends an idle stream itself; the guard covers a hub that never does (told to
 			// cancel, so that the handler stops holding its permit).
-			s.cancel("local guard timeout")
+			s.cancel(s.guardFired())
 			return nil, &Error{Code: CodeTimeout, Message: timeoutText(s.typ)}
 		case <-ctx.Done():
 			return nil, s.dropped(ctx)
@@ -314,7 +315,7 @@ func (s *streaming) guardNow() (time.Duration, bool) {
 // dropped cancels the stream of a caller whose ctx ended and is its error: ctx's error, with
 // ErrOutcomeUnknown once the request was written, else with ErrNeverSent.
 func (s *streaming) dropped(ctx context.Context) error {
-	if !s.cancel("dropped by the sender") {
+	if !s.cancel(s.callerGone()) {
 		return fmt.Errorf("%w: %w", ErrNeverSent, ctx.Err())
 	}
 	return fmt.Errorf("%w: %w", ErrOutcomeUnknown, ctx.Err())
@@ -330,18 +331,19 @@ func (s *streaming) handle(e streamEvent) (*hubpb.ReplyPart, error) {
 		expected := s.received + 1
 		switch seq := e.part.GetSeq(); {
 		case seq > expected:
-			s.cancel("lost parts")
+			s.cancel(fmt.Sprintf("%s %s lost %d part(s)", s.what, s.typ, seq-expected))
 			return nil, s.lost(seq - expected)
 		case seq < expected:
-			s.cancel("part out of order")
-			return nil, fmt.Errorf("snodra: %s %s part %d out of order (expected %d)", s.what, s.typ, seq, expected)
+			reason := fmt.Sprintf("%s %s part seq %d out of order (expected %d)", s.what, s.typ, seq, expected)
+			s.cancel(reason)
+			return nil, errors.New("snodra: " + reason)
 		}
 		s.received, s.first = expected, false
 		return e.part, nil
 	case e.end != nil:
 		s.finish()
 		if werr := e.end.GetError(); werr != nil {
-			return nil, errorFromWire(s.typ, werr)
+			return nil, s.fromWire(werr)
 		}
 		// ReplyEnd.parts counts what the hub sent: a clean end with more lost its last parts.
 		if n := uint64(e.end.GetParts()); n > s.received {
@@ -350,9 +352,38 @@ func (s *streaming) handle(e streamEvent) (*hubpb.ReplyPart, error) {
 		return nil, nil
 	default:
 		s.finish()
-		return nil, errorFromWire(s.typ, e.failure)
+		return nil, s.fromWire(e.failure)
 	}
 }
+
+// fromWire is the caller's error for the hub's or the handler's werr ending the stream.
+func (s *streaming) fromWire(werr *hubpb.Error) *Error {
+	if s.what == "subscription" {
+		return subscriptionErrorFromWire(s.typ, werr)
+	}
+	return errorFromWire(s.typ, werr)
+}
+
+// The reasons of the Cancel a sender writes, the reference library's.
+
+// callerGone is the reason when the caller stopped reading or its context ended.
+func (s *streaming) callerGone() string {
+	if s.what == "subscription" {
+		return "subscriber cancelled"
+	}
+	return "collector cancelled"
+}
+
+// guardFired is the reason when the local guard fired.
+func (s *streaming) guardFired() string {
+	if s.what == "subscription" {
+		return "no initial result within the local guard"
+	}
+	return "no part within the local guard"
+}
+
+// collectorFailed is the reason when what was read could not be used.
+func collectorFailed(err error) string { return "collector failed: " + err.Error() }
 
 // lost is the error of n parts the hub sent (or counted) that never arrived, with the reference
 // library's text.

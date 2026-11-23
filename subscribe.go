@@ -98,9 +98,10 @@ func Subscribe[I, U any](ctx context.Context, app *App, q Message, opts ...SendO
 	}
 	initial, err := decodeAnswer[I](app.cfg.codec, first.GetPayload())
 	if err != nil {
-		s.cancel("undecodable part")
-		return nil, fmt.Errorf("snodra: cannot decode the initial result of %s from %s/%s: %w",
+		err = fmt.Errorf("snodra: cannot decode the initial result of %s from %s/%s: %w",
 			out.typ, first.GetResponderService(), first.GetResponderInstance(), err)
+		s.cancel("initial result unusable: " + err.Error())
+		return nil, err
 	}
 	s.consumed() // the initial part took one credit
 	sub := &Subscription[I, U]{Initial: initial, ctx: ctx, s: s, closed: make(chan struct{})}
@@ -153,8 +154,8 @@ func (sub *Subscription[I, U]) Updates() iter.Seq2[U, error] {
 		defer func() {
 			sub.mu.Lock()
 			sub.ranging = false
-			sub.ctxErr = nil                      // yielded by this range, or it ended otherwise first
-			sub.s.cancel("dropped by the sender") // a break or a panic in the loop body
+			sub.ctxErr = nil                 // yielded by this range, or it ended otherwise first
+			sub.s.cancel(sub.s.callerGone()) // a break or a panic in the loop body
 			if sub.stop != nil {
 				sub.stop() // over: ctx has nothing more to end
 			}
@@ -180,9 +181,10 @@ func (sub *Subscription[I, U]) Updates() iter.Seq2[U, error] {
 			}
 			v, err := decodeAnswer[U](sub.s.app.cfg.codec, part.GetPayload())
 			if err != nil {
-				sub.s.cancel("undecodable part")
-				yield(zero, fmt.Errorf("snodra: cannot decode an update of %s from %s/%s: %w",
-					sub.s.typ, part.GetResponderService(), part.GetResponderInstance(), err))
+				err = fmt.Errorf("snodra: cannot decode an update of %s from %s/%s: %w",
+					sub.s.typ, part.GetResponderService(), part.GetResponderInstance(), err)
+				sub.s.cancel(collectorFailed(err))
+				yield(zero, err)
 				return
 			}
 			sub.s.consumed()
@@ -213,7 +215,7 @@ func (sub *Subscription[I, U]) Close() {
 	}
 	// The one Cancel, whoever ends the subscription first (this Close, or a range that saw ctx's
 	// end itself and yields its error).
-	if ended, _ := sub.s.cancelOnce("dropped by the sender"); ended && ctxErr != nil {
+	if ended, _ := sub.s.cancelOnce(sub.s.callerGone()); ended && ctxErr != nil {
 		sub.ctxErr = fmt.Errorf("%w: %w", ErrOutcomeUnknown, ctxErr)
 	}
 }

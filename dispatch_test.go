@@ -553,7 +553,7 @@ func TestEveryModeAgainstEveryHandler(t *testing.T) {
 		{"u-4", qry, "orders.WatchOrders", unary, reply, hubpb.ErrorCode_INVALID_REQUEST,
 			"orders.WatchOrders is a subscription query: send it with Subscribe (mode SUBSCRIPTION)"},
 		{"u-5#0", qry, "orders.WatchOrders", unary, reply, ok, ""}, // a subscription's initial request
-		{"u-6", qry, "orders.Missing", unary, reply, hubpb.ErrorCode_NO_HANDLER, ""},
+		{"u-6", qry, "orders.Missing", unary, reply, hubpb.ErrorCode_NO_HANDLER, "no handler for type orders.Missing"},
 		{"u-7", cmd, "orders.Missing", unary, reply, hubpb.ErrorCode_NO_HANDLER, ""},
 		{"u-8", qry, "orders.PlaceOrder", unary, reply, hubpb.ErrorCode_NO_HANDLER, ""}, // a command type asked as a query
 		{"u-9", cmd, "orders.GetOrder", unary, reply, hubpb.ErrorCode_NO_HANDLER, ""},   // a query type sent as a command
@@ -564,7 +564,7 @@ func TestEveryModeAgainstEveryHandler(t *testing.T) {
 		{"s-3#1", qry, "orders.ListOrders", strm, end, ok, ""},
 		{"s-4#1", qry, "orders.WatchOrders", strm, end, hubpb.ErrorCode_INVALID_REQUEST,
 			"orders.WatchOrders is not a streaming query handler (it answers mode SUBSCRIPTION)"},
-		{"s-5#1", qry, "orders.Missing", strm, end, hubpb.ErrorCode_NO_HANDLER, ""},
+		{"s-5#1", qry, "orders.Missing", strm, end, hubpb.ErrorCode_NO_HANDLER, "no handler for type orders.Missing"},
 		{"s-6#1", cmd, "orders.ListOrders", strm, end, ok, ""}, // the kind is not looked at
 		// Subscription requests: a ReplyEnd when refused, nothing when admitted.
 		{"w-1#1", qry, "orders.PlaceOrder", sub, end, hubpb.ErrorCode_INVALID_REQUEST,

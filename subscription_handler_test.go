@@ -617,3 +617,31 @@ func TestUpdatesAreTyped(t *testing.T) {
 	poll(t, func() bool { return updates.Emit(topic("t"), OrderUpdate{Value: 4}) == 1 })
 	is(t, string(nextPart(t, s).GetPayload()), `{"value":4}`)
 }
+
+// A subscription request with the id of one open here is refused, the open one kept, as in the
+// reference library.
+func TestASecondSubscriptionWithAnOpenIDIsRefused(t *testing.T) {
+	updates, app, s := watching(t, fakehub.Start(t), nil)
+	open(t, updates, s, "w#1", "t")
+	s.Send(t, subscriptionRequest("w#1", "t", nil))
+	end := nextEnd(t, s)
+	is(t, end.GetRequestId(), "w#1")
+	is(t, end.GetError().GetCode(), hubpb.ErrorCode_INVALID_REQUEST)
+	is(t, end.GetError().GetMessage(), "subscription w#1 is already open")
+	is(t, app.SubscriptionsServed(), 1)
+	is(t, updates.Emit(topic("t"), OrderUpdate{Value: 5}), 1) // the open one goes on
+	p := nextPart(t, s)
+	is(t, p.GetRequestId(), "w#1")
+	is(t, p.GetSeq(), uint64(2))
+}
+
+// The limit is decided when the request is read, before its token, its handler or its query.
+func TestTheLimitIsDecidedFirst(t *testing.T) {
+	updates, _, s := watching(t, fakehub.Start(t), nil, MaxSubscriptions(1))
+	open(t, updates, s, "w#1", "t")
+	s.Send(t, fakehub.Forward(&hubpb.Request{Id: "w2#1", Kind: hubpb.RequestKind_QUERY, Type: "orders.WatchOrders",
+		Mode: hubpb.RequestMode_SUBSCRIPTION, Payload: []byte(`{"topic":7}`), Headers: map[string]string{"authorization": "Bearer abc"}}))
+	end := nextEnd(t, s)
+	is(t, end.GetRequestId(), "w2#1")
+	is(t, end.GetError().GetCode(), hubpb.ErrorCode_RESOURCE_EXHAUSTED)
+}

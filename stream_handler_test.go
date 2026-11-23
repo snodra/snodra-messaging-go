@@ -149,7 +149,7 @@ func TestNoCreditWithinTheBoundEndsWithTimeout(t *testing.T) {
 	within(t, time.Since(start), 250*ms, 1500*ms)
 	is(t, end.GetRequestId(), "s#1")
 	is(t, end.GetError().GetCode(), hubpb.ErrorCode_TIMEOUT)
-	is(t, end.GetError().GetMessage(), "no credit within 300ms") // the reference library's text
+	is(t, end.GetError().GetMessage(), "no credit within 300 ms") // the reference library's text
 	if err := receive(t, sent); err == nil {
 		t.Fatal("Send returned no error at the credit timeout")
 	}
@@ -318,22 +318,6 @@ func TestHandleStreamRegistersAQueryType(t *testing.T) {
 	r := hub.Next(t).RecvRegister(t)
 	is(t, strings.Join(r.GetQueryTypes(), ","), "orders.GetOrder,orders.ListOrders")
 	is(t, strings.Join(r.GetSharedQueryTypes(), ","), "orders.GetStock")
-}
-
-func TestRustDuration(t *testing.T) { // the reference library's Debug of a Duration
-	for d, want := range map[time.Duration]string{
-		300 * ms:                   "300ms",
-		2 * s:                      "2s",
-		10 * time.Minute:           "600s",
-		1500 * ms:                  "1.5s",
-		1*s + 250*time.Microsecond: "1.00025s",
-		1500 * time.Microsecond:    "1.5ms",
-		7 * time.Microsecond:       "7µs",
-		12:                         "12ns",
-		0:                          "0ns",
-	} {
-		is(t, rustDuration(d), want)
-	}
 }
 
 func TestASendWaitingBehindAnotherHonoursItsContext(t *testing.T) {

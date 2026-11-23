@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -65,7 +63,7 @@ func (w *StreamWriter[T]) Send(ctx context.Context, item T) error {
 }
 
 // StreamCreditTimeout bounds how long a streaming handler's [StreamWriter.Send] waits for the
-// caller's credit: then the stream ends with TIMEOUT "no credit within <d>" and the handler's
+// caller's credit: then the stream ends with TIMEOUT "no credit within <ms> ms" and the handler's
 // context is cancelled, so that a hub that forgot the stream (a lost Flow or Cancel) cannot hold
 // the handler and its permit forever. The default is 10 minutes, the hub's default maximum
 // stream duration; d must be at least 1 ms.
@@ -212,7 +210,7 @@ func (o *streamOut) part(ctx context.Context, payload []byte) error {
 	}
 	switch err := o.run.credit.take(ctx, o.creditWait, o.ended, o.run.cancelled, o.ref.gone); {
 	case errors.Is(err, errNoCredit):
-		msg := "no credit within " + rustDuration(o.creditWait)
+		msg := fmt.Sprintf("no credit within %d ms", o.creditWait.Milliseconds())
 		if o.end(&hubpb.Error{RequestId: o.id, Code: hubpb.ErrorCode_TIMEOUT, Message: msg}) {
 			o.run.cancel() // the handler need not go on
 		}
@@ -288,33 +286,4 @@ func (a *App) runStream(ctx context.Context, h *handler, req *hubpb.Request, sco
 		return handlerFailure(req.GetId(), err)
 	}
 	return nil
-}
-
-// rustDuration writes d as the reference library writes a duration in its messages (Rust's
-// Debug of a Duration): whole and fractional seconds from 1 s ("600s", "1.5s"), else
-// milliseconds, microseconds or nanoseconds ("300ms", "1.5ms", "7µs", "12ns").
-func rustDuration(d time.Duration) string {
-	if d < 0 {
-		d = 0
-	}
-	unit := func(n, per int64, suffix string) string {
-		whole, frac := n/per, n%per
-		s := strconv.FormatInt(whole, 10)
-		if frac != 0 {
-			digits := len(strconv.FormatInt(per, 10)) - 1
-			f := strconv.FormatInt(frac, 10)
-			s += "." + strings.TrimRight(strings.Repeat("0", digits-len(f))+f, "0")
-		}
-		return s + suffix
-	}
-	n := int64(d)
-	switch {
-	case d >= time.Second:
-		return unit(n, int64(time.Second), "s")
-	case d >= time.Millisecond:
-		return unit(n, int64(time.Millisecond), "ms")
-	case d >= time.Microsecond:
-		return unit(n, int64(time.Microsecond), "µs")
-	}
-	return strconv.FormatInt(n, 10) + "ns"
 }
