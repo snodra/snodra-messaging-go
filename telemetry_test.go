@@ -146,8 +146,7 @@ func TestOneRequestRecordPerCall(t *testing.T) {
 	_, err := Send[Empty](context.Background(), app, PlaceOrder{}, Header("traceparent", "x"))
 	is(t, errors.Is(err, ErrReservedHeader), true)
 	reqs, _ = rec.snapshot()
-	is(t, len(reqs), 3) // a refused call is a call
-	is(t, reqs[2].outcome, "invalid_request")
+	is(t, len(reqs), 2) // a call its options refused is no call
 }
 
 func TestAnUndecodableReplyIsInvalidRequest(t *testing.T) {
@@ -502,18 +501,17 @@ func TestACallersCancellationRecordsNothing(t *testing.T) {
 	is(t, reqs[0].outcome, "cancelled")
 }
 
-func TestALocalRefusalIsInvalidRequest(t *testing.T) {
+// A call its options refuse is no call: nothing is recorded, as in the reference library,
+// whose options refuse themselves before any call.
+func TestALocalRefusalRecordsNothing(t *testing.T) {
 	rec := &recorder{}
 	app, _, _ := sending(t, fakehub.Ack("hub-1"), Telemetry(rec))
-	for _, c := range []SendOption{Header("traceparent", "x"), Timeout(-time.Second)} {
+	for _, c := range []SendOption{Header("traceparent", "x"), Timeout(-time.Second), Retry(RetryPolicy{})} {
 		_, err := Send[Empty](context.Background(), app, PlaceOrder{}, c)
 		is(t, err != nil, true)
 	}
 	reqs, _ := rec.snapshot()
-	is(t, len(reqs), 2)
-	for _, r := range reqs {
-		is(t, r.outcome, "invalid_request")
-	}
+	is(t, len(reqs), 0)
 }
 
 // panickingCodec panics decoding.

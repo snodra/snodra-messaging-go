@@ -391,6 +391,7 @@ what the Kotlin library does where it differs, and what this library does. The c
   `github.com/snodra/snodra-messaging-go`; a handled request gets a server span named after its message type, a child of its
   valid `traceparent`; the three counters are synchronous instead of observable, exported as the same monotonic sums with
   every series at 0 from the start; a call ended by the caller's own deadline (`context.DeadlineExceeded`) is `timeout`.
-  A call the caller cancels records nothing, as in both libraries.
+  A call the caller cancels records nothing, as in both libraries; nor does a call its options refuse (a reserved
+  header, an invalid option) or one answered in-process, as in the Kotlin library.
 - **Question:** should the specification name the instruments and their labels as part of the library contract, and should
   every library name its scope after its package and create the handler span?

@@ -24,11 +24,12 @@ import (
 // id. Embed [NopInstrumentation] in an implementation: it can then implement only some of the
 // methods, and a method added to this interface later does not break it.
 type Instrumentation interface {
-	// RequestDone records one Send or Query call of msgType, from the call to its result with
-	// every retry included; a call its caller cancels (context.Canceled) is not reported.
+	// RequestDone records one Send or Query call of msgType through the hubs, from the call to
+	// its result with every retry included; a call its caller cancels (context.Canceled), one its
+	// options refuse and one answered in-process are not reported.
 	// kind is "command" or "query"; outcome is "ok", "no_handler", "timeout",
 	// "handler_disconnected", "resource_exhausted", "handler_error", "denied",
-	// "invalid_request" (also an answer that does not decode, and a call refused locally),
+	// "invalid_request" (also an answer that does not decode),
 	// "cancelled" (the hub's CANCELLED), "unavailable" (no hub took the request, or its
 	// stream broke before the answer) or "error".
 	RequestDone(kind, msgType, outcome string, took time.Duration)
@@ -151,8 +152,8 @@ func (t *telemetry) now() time.Time {
 
 // requestDone reports a Send or Query of typ that began at started (from now) and ended with err.
 func (t *telemetry) requestDone(kind, typ string, started time.Time, err error) {
-	if !t.enabled() || started.IsZero() || errors.Is(err, context.Canceled) {
-		return // the caller's own cancellation is not a result: nothing is recorded
+	if !t.enabled() || started.IsZero() || err != nil && refusedOrCancelled(err) {
+		return
 	}
 	defer t.guard("RequestDone")
 	t.i.RequestDone(kind, typ, requestOutcome(err), time.Since(started))
@@ -283,11 +284,18 @@ func (t *telemetry) inject(ctx context.Context, headers map[string]string) {
 
 const tracestateHeader = "tracestate"
 
+// refusedOrCancelled is true for an error that records no call: the caller's own cancellation,
+// and a call its options refused (a reserved header, an invalid option), as in the reference
+// library.
+func refusedOrCancelled(err error) bool {
+	var refused *localRefusal
+	return errors.Is(err, context.Canceled) || errors.As(err, &refused)
+}
+
 // requestOutcome is the outcome label of a call that ended with err (nil: "ok"). It is the
 // hub's outcome names for an [*Error], "unavailable" when no hub took the request or its stream
-// broke before the answer, "invalid_request" for an answer that does not decode and for a call
-// refused locally (a reserved header, an invalid option), "timeout" for the caller's own
-// deadline, and "error" for anything else. The caller's own cancellation is not an outcome: a
+// broke before the answer, "invalid_request" for an answer that does not decode, "timeout" for
+// the caller's own deadline, and "error" for anything else. The caller's own cancellation is not an outcome: a
 // call it ends records nothing (see requestDone).
 func requestOutcome(err error) string {
 	if err == nil {
