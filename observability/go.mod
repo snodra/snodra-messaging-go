@@ -1,4 +1,4 @@
-module github.com/snodra/snodra-messaging-go/otel
+module github.com/snodra/snodra-messaging-go/observability
 
 go 1.26.0
 

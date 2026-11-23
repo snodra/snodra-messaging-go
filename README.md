@@ -294,10 +294,10 @@ app, err := snodra.New(
 ## Telemetry
 
 The core only defines an interface (`snodra.Instrumentation`, installed with `snodra.Telemetry`) and costs nothing
-without one. The separate module `github.com/snodra/snodra-messaging-go/otel` implements it on the OpenTelemetry API, with the
+without one. The separate module `github.com/snodra/snodra-messaging-go/observability` implements it on the OpenTelemetry API, with the
 metric names and labels of the other libraries (request duration, connected hubs, handlers in flight, token fetches,
 certificate rotations, credential refreshes). It also creates a span for every request a handler serves, which neither
-the Rust nor the Kotlin library does, and names its instrumentation scope after this module (see SG-24 in
+the Rust nor the Kotlin library does, and names its instrumentation scope after the module's import path, `github.com/snodra/snodra-messaging-go/observability` (see SG-24 in
 [SPEC-GAPS.md](SPEC-GAPS.md)). A call its caller cancels, one its options refuse and one answered in-process record no
 metric.
 
@@ -305,7 +305,7 @@ metric.
 app, err := snodra.New(
 	snodra.Service("orders-service"),
 	snodra.Hubs("snodra-server:7000"),
-	snodra.Telemetry(otel.New()), // uses the global OpenTelemetry providers
+	snodra.Telemetry(observability.New()), // uses the global OpenTelemetry providers
 )
 ```
 
@@ -331,7 +331,7 @@ The script builds the service, downloads the pinned runner release into `bin/` a
 hub (`SNODRA_SERVER_VERSION` picks the image tag) and removes it afterwards. CI runs the same script with the pinned
 runner and fails when a check fails or is skipped, and keeps the runner's report as a build artifact.
 
-Unit tests need no Docker (`go test -race ./...`, in this module and in `otel/`); they run against an in-process scripted
+Unit tests need no Docker (`go test -race ./...`, in this module and in `observability/`); they run against an in-process scripted
 hub.
 
 ## Licence

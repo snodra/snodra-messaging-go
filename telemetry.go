@@ -15,7 +15,7 @@ import (
 
 // Instrumentation is where the library reports what it does: request timings, token fetches,
 // certificate rotations, credential refreshes, two gauges and the handling of a request, for
-// metrics and traces. The default is [NopInstrumentation]; the otel module of this repository
+// metrics and traces. The default is [NopInstrumentation]; the observability module of this repository
 // implements it on OpenTelemetry (see [Telemetry]).
 //
 // Every method runs on a hot path of the library: an implementation must return quickly and
@@ -101,7 +101,7 @@ func (NopInstrumentation) StartHandling(ctx context.Context, _ Handling) (contex
 }
 func (NopInstrumentation) Inject(context.Context, map[string]string) {}
 
-// Telemetry reports what the library does to i, for example the one of the otel module of this
+// Telemetry reports what the library does to i, for example the one of the observability module of this
 // repository. See [Instrumentation]. A nil i is the default, [NopInstrumentation].
 func Telemetry(i Instrumentation) Option {
 	return func(c *config) error {

@@ -384,8 +384,9 @@ spot.
   a span for a request its handlers serve (the Kotlin library only writes the current trace context into the requests it
   sends).
 - **This library:** emits the same instrument names, units, attributes, bucket boundaries and descriptions (the
-  `otel` module, `otel/otel.go`). Differences visible to a dashboard: the instrumentation scope is the Go import path
-  `github.com/snodra/snodra-messaging-go`; a handled request gets a server span named after its message type, a child of its
+  `observability` module, `observability/observability.go`). Differences visible to a dashboard: the instrumentation scope is the
+  Go import path of that module, `github.com/snodra/snodra-messaging-go/observability` (by Go convention the scope is the
+  instrumenting package's import path); a handled request gets a server span named after its message type, a child of its
   valid `traceparent`; the three counters are synchronous instead of observable, exported as the same monotonic sums with
   every series at 0 from the start; a call ended by the caller's own deadline (`context.DeadlineExceeded`) is `timeout`.
   A call the caller cancels records nothing, as in both libraries; nor does a call its options refuse (a reserved

@@ -1,10 +1,10 @@
-// Package otel reports what snodra-messaging-go does to OpenTelemetry: the library's metrics
+// Package observability reports what snodra-messaging-go does to OpenTelemetry: the library's metrics
 // and the traces of the requests its handlers serve. It implements snodra.Instrumentation on
 // the OpenTelemetry API only; the application installs the SDK and its exporters.
 //
 //	app, err := snodra.New(
 //		snodra.Service("orders-service"),
-//		snodra.Telemetry(otel.New()),
+//		snodra.Telemetry(observability.New()),
 //	)
 //
 // New uses the global meter provider, tracer provider and propagator, so install them before
@@ -44,4 +44,4 @@
 // is sent with.
 //
 // See https://snodra.damoreira.com/library-authors/messages/ (Trace context).
-package otel
+package observability

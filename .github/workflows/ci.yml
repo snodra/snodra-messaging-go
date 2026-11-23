@@ -36,14 +36,14 @@ jobs:
           go-version: ${{ matrix.go-version }}
       - run: go test -race ./...
 
-  otel:
+  observability:
     runs-on: ubuntu-latest
     strategy:
       matrix:
         go-version: [1.26.x, 1.27.x]
     defaults:
       run:
-        working-directory: otel
+        working-directory: observability
     steps:
       - uses: actions/checkout@v4
         with:
@@ -55,7 +55,7 @@ jobs:
         if: matrix.go-version == '1.27.x'
         with:
           version: v2.15.0
-          working-directory: otel
+          working-directory: observability
       - run: go test -race ./...
 
   proto-sync:

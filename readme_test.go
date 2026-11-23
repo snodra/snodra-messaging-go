@@ -87,10 +87,10 @@ func snippets(t *testing.T, path string) []string {
 	return out
 }
 
-// Every other Go block of the README is a region of example_test.go (or otel/example_test.go),
+// Every other Go block of the README is a region of example_test.go (or observability/example_test.go),
 // which the compiler checks, and every such region is in the README.
 func TestEveryReadmeSnippetIsCompiled(t *testing.T) {
-	compiled := append(snippets(t, "example_test.go"), snippets(t, "otel/example_test.go")...)
+	compiled := append(snippets(t, "example_test.go"), snippets(t, "observability/example_test.go")...)
 	blocks := goBlocks(readText(t, "README.md"))
 	if len(blocks) < 2 {
 		t.Fatal("the README has no snippets after the quick start")

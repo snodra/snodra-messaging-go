@@ -1,4 +1,4 @@
-package otel_test
+package observability_test
 
 import (
 	"context"
@@ -15,7 +15,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	snodra "github.com/snodra/snodra-messaging-go"
-	snodraotel "github.com/snodra/snodra-messaging-go/otel"
+	"github.com/snodra/snodra-messaging-go/observability"
 )
 
 func is[T comparable](t testing.TB, got, want T) {
@@ -33,7 +33,7 @@ func collect(t *testing.T, r *sdkmetric.ManualReader) map[string]metricdata.Metr
 	}
 	out := map[string]metricdata.Metrics{}
 	for _, sm := range rm.ScopeMetrics {
-		is(t, sm.Scope.Name, snodraotel.ScopeName)
+		is(t, sm.Scope.Name, observability.ScopeName)
 		for _, m := range sm.Metrics {
 			out[m.Name] = m
 		}
@@ -52,7 +52,7 @@ func attrs(kv ...string) attribute.Set {
 func TestInstrumentNamesAndLabels(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-	i := snodraotel.New(snodraotel.WithMeterProvider(mp))
+	i := observability.New(observability.WithMeterProvider(mp))
 	i.RequestDone("command", "orders.PlaceOrder", "ok", 30*time.Millisecond)
 	i.RequestDone("query", "orders.GetOrder", "timeout", 2*time.Second)
 	i.TokenFetched("ok")
@@ -130,8 +130,8 @@ func TestTheHandlerSpanIsAChildOfTheIncomingTraceparent(t *testing.T) {
 	const traceID, parentID = "4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7"
 	rec := tracetest.NewSpanRecorder()
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
-	i := snodraotel.New(snodraotel.WithTracerProvider(tp), snodraotel.WithMeterProvider(sdkmetric.NewMeterProvider()),
-		snodraotel.WithPropagator(propagation.TraceContext{}))
+	i := observability.New(observability.WithTracerProvider(tp), observability.WithMeterProvider(sdkmetric.NewMeterProvider()),
+		observability.WithPropagator(propagation.TraceContext{}))
 
 	ctx, done := i.StartHandling(context.Background(), snodra.Handling{
 		Type: "orders.PlaceOrder", Kind: "command", Traceparent: "00-" + traceID + "-" + parentID + "-01", Tracestate: "v=1"})
@@ -155,7 +155,7 @@ func TestTheHandlerSpanIsAChildOfTheIncomingTraceparent(t *testing.T) {
 func TestAFailedHandlingMarksItsSpan(t *testing.T) {
 	rec := tracetest.NewSpanRecorder()
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
-	i := snodraotel.New(snodraotel.WithTracerProvider(tp), snodraotel.WithMeterProvider(sdkmetric.NewMeterProvider()))
+	i := observability.New(observability.WithTracerProvider(tp), observability.WithMeterProvider(sdkmetric.NewMeterProvider()))
 	_, done := i.StartHandling(context.Background(), snodra.Handling{Type: "orders.GetOrder", Kind: "query"})
 	done(context.DeadlineExceeded)
 	span := rec.Ended()[0]
@@ -168,7 +168,7 @@ func TestWithoutAPropagatorTheTraceContextIsStillUsed(t *testing.T) {
 	// No global propagator is installed in this test binary.
 	rec := tracetest.NewSpanRecorder()
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
-	i := snodraotel.New(snodraotel.WithTracerProvider(tp), snodraotel.WithMeterProvider(sdkmetric.NewMeterProvider()))
+	i := observability.New(observability.WithTracerProvider(tp), observability.WithMeterProvider(sdkmetric.NewMeterProvider()))
 	ctx, done := i.StartHandling(context.Background(), snodra.Handling{
 		Type: "orders.PlaceOrder", Kind: "command", Traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"})
 	h := map[string]string{}
@@ -179,7 +179,7 @@ func TestWithoutAPropagatorTheTraceContextIsStillUsed(t *testing.T) {
 }
 
 func TestWithoutAnSDKEveryCallIsSafeAndRecordsNothing(t *testing.T) {
-	i := snodraotel.New() // no SDK installed: the API's no-op providers
+	i := observability.New() // no SDK installed: the API's no-op providers
 	i.RequestDone("command", "t", "ok", time.Millisecond)
 	i.TokenFetched("ok")
 	i.CertificateRotated()
@@ -192,7 +192,7 @@ func TestWithoutAnSDKEveryCallIsSafeAndRecordsNothing(t *testing.T) {
 
 func TestEveryCounterSeriesExistsAtZeroFromTheStart(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
-	snodraotel.New(snodraotel.WithMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))))
+	observability.New(observability.WithMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))))
 	got := collect(t, reader)
 	tokens := got["snodra.hub.client.token.fetches"].Data.(metricdata.Sum[int64])
 	seen := map[string]int64{}
@@ -215,7 +215,7 @@ func TestEveryCounterSeriesExistsAtZeroFromTheStart(t *testing.T) {
 
 func TestEveryDescriptionIsRusts(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
-	i := snodraotel.New(snodraotel.WithMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))))
+	i := observability.New(observability.WithMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))))
 	i.RequestDone("command", "t", "ok", time.Millisecond)
 	i.ObserveGauges(func() snodra.Gauges { return snodra.Gauges{} })
 	got := collect(t, reader)
@@ -233,7 +233,7 @@ func TestEveryDescriptionIsRusts(t *testing.T) {
 
 func TestTheGaugeCallbackEndsWithTheApp(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
-	i := snodraotel.New(snodraotel.WithMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))))
+	i := observability.New(observability.WithMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))))
 	reads := 0
 	i.ObserveGauges(func() snodra.Gauges { reads++; return snodra.Gauges{ConnectedHubs: 1} })
 	collect(t, reader)

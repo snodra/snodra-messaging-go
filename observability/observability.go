@@ -1,4 +1,4 @@
-package otel
+package observability
 
 import (
 	"context"
@@ -18,7 +18,7 @@ import (
 // TODO(spec-gap): SG-24 (the telemetry's names are not specified).
 
 // ScopeName is the instrumentation scope of the library's instruments and spans.
-const ScopeName = "github.com/snodra/snodra-messaging-go"
+const ScopeName = "github.com/snodra/snodra-messaging-go/observability"
 
 // The instrument names of the library, the Rust and Kotlin libraries' ones.
 const (
