@@ -5,12 +5,14 @@ handlers for commands, queries, streaming queries and subscriptions, and sends m
 Snodra hub: the library keeps the hub streams, permits, retries and timeouts, you write functions.
 
 **Status: pre-1.0, feature level 1.** The library implements level 1 of the protocol (see
-[Feature level 1](#feature-level-1-and-how-it-is-proved)) and passes the 33 checks of the conformance runner. The API
-may still change before 1.0, and no version has been released yet. It needs Go 1.26 or later; the core module depends
-only on gRPC and protobuf.
+[Feature level 1](#feature-level-1-and-how-it-is-proved)) and passes the 33 checks of the conformance runner. The
+versions are listed on the [releases page](https://github.com/snodra/snodra-messaging-go/releases); all are pre-1.0, so
+the API may still change between minor versions (see [Releases](#releases)). It needs Go 1.26 or later; the core module
+depends only on gRPC and protobuf.
 
 ```sh
-go get github.com/snodra/snodra-messaging-go
+go get github.com/snodra/snodra-messaging-go                # the latest version
+go get github.com/snodra/snodra-messaging-go/observability  # optional: OpenTelemetry, see Telemetry
 ```
 
 The package is named `snodra`; the examples import it as `snodra "github.com/snodra/snodra-messaging-go"`.
@@ -332,7 +334,43 @@ hub (`SNODRA_SERVER_VERSION` picks the image tag) and removes it afterwards. CI 
 runner and fails when a check fails or is skipped, and keeps the runner's report as a build artifact.
 
 Unit tests need no Docker (`go test -race ./...`, in this module and in `observability/`); they run against an in-process scripted
-hub.
+hub. The two modules form a workspace ([`go.work`](go.work)), so `observability/` builds and tests against the root module
+next to it; consumers never read that file. `go mod tidy` ignores the workspace: in `observability/` it resolves the root
+module at the released version its `go.mod` requires.
+
+## Releases
+
+Versions are cut by CI from the commit types; nobody pushes tags. When the checks pass on a push to `main`, the subjects
+since the last `v*` tag decide: any `feat` is the next minor, otherwise any `fix` or `perf` the next patch, and anything
+else (`docs`, `test`, `chore`, `ci`, `refactor`, `build`, `style`) releases nothing. CI then commits `release: X.Y.Z` and
+tags that one commit twice, because each module has its own tag:
+
+- `vX.Y.Z` for `github.com/snodra/snodra-messaging-go`, and
+- `observability/vX.Y.Z` for `github.com/snodra/snodra-messaging-go/observability`.
+
+The release commit writes `X.Y.Z` into `Version` (`version.go`, the client version sent to the hub), makes
+`observability/go.mod` require the root module at `vX.Y.Z` with the root module's hashes in `observability/go.sum`, and
+moves the `go.work` replacement to that version. Before anything is pushed, both modules are built, vetted and tested as
+a consumer gets them (the workspace off, the root module fetched from the new tag), and the commit and both tags are then
+pushed together or not at all. The release workflow has the Go proxy and the checksum database fetch both versions,
+checks that an empty module resolves and builds them, and creates the GitHub release. Pull before you push: `main` then
+carries that commit.
+
+- Below 1.0.0 any `type!:` subject and any line starting `BREAKING CHANGE:` in a message count as a minor, never a
+  major: 1.0.0 is declared by hand.
+- A revert (`Revert "feat: ..."`, `revert:`) is not a release reason: the reverted change stays in the last published
+  version until the next `feat`, `fix` or `perf`.
+- Only tags shaped `vN.N.N` count; the highest one reachable from `main` is the last release. The first release, with
+  no tag before it, is 0.1.0.
+- The Go proxy keeps a version forever: a tag is never moved or deleted. A wrong release is fixed by the next one.
+- `scripts/next-version.sh` holds the rule; `for t in scripts/*.test.sh; do sh "$t"; done` tests it and the other
+  release scripts.
+
+If a release fails after the push (the tags exist, the GitHub release does not), use **Re-run failed jobs** on that
+run: every step is safe to repeat. Or run the `release` workflow by hand with the existing `vX.Y.Z` tag. **Re-run all
+jobs** on a run that released does nothing, because `main` has moved to its release commit. If it fails before the push,
+nothing was pushed: once the cause is fixed, re-run the failed jobs (while `main` has not moved), or push the fix, whose
+run releases.
 
 ## Licence
 

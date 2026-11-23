@@ -1,0 +1,193 @@
+name: release
+
+# CI calls this after it pushes the tags of a release (ci.yml, job `release`): a tag pushed with
+# GITHUB_TOKEN starts no workflow by itself. Run it by hand only to finish an existing release
+# again; nobody pushes tags.
+#
+# A Go module is published by its tag, so there is nothing to upload. This workflow checks the
+# tagged tree, has the Go proxy and the checksum database fetch both modules, proves that an empty
+# module resolves and builds them from there, and then creates the GitHub release.
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: The root module's tag to release, for example v0.2.0
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: An existing root module tag to release again, for example v0.2.0
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  TAG: ${{ inputs.tag }}
+  MODULE: github.com/snodra/snodra-messaging-go
+
+concurrency:
+  group: release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # Every other job needs this one: the tag must be a release that already exists, with its
+  # observability/ tag on the same commit and the version recorded in the tree, so a mistyped tag
+  # publishes nothing and creates no tag.
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.tag.outputs.version }}
+      latest: ${{ steps.tag.outputs.latest }}
+    steps:
+      - name: the tag is vN.N.N
+        run: |
+          if ! [[ $TAG =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::the tag input is not a release tag vN.N.N"
+            exit 1
+          fi
+      # The current scripts and every tag (the tag's own tree may predate scripts/).
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: both tags exist on one commit, whose tree records the version
+        id: tag
+        run: |
+          version=${TAG#v}
+          commit=$(git rev-parse -q --verify "refs/tags/$TAG^{commit}") \
+            || { echo "::error::the release tag does not exist"; exit 1; }
+          second=$(git rev-parse -q --verify "refs/tags/observability/$TAG^{commit}") \
+            || { echo "::error::the observability/ tag of this release does not exist"; exit 1; }
+          if [ "$commit" != "$second" ]; then
+            echo "::error::the two tags of this release name different commits"
+            exit 1
+          fi
+          recorded=$(git show "$commit:version.go" | awk -F'"' '/^const Version = "/ { print $2 }')
+          if [ "$recorded" != "$version" ]; then
+            echo "::error::Version in the tagged version.go is not the tag's version"
+            exit 1
+          fi
+          # observability/go.mod requires the root module at this tag and replaces nothing: a
+          # consumer ignores replace directives, so the requirement is what it resolves.
+          if ! git show "$commit:observability/go.mod" | awk -v m="$MODULE" -v t="$TAG" '
+              $1 == "replace" { replaced = 1 }
+              /^\)/ { block = 0 }
+              (block && $1 == m && $2 == t) || ($1 == "require" && $2 == m && $3 == t) { required = 1 }
+              /^require \($/ { block = 1 }
+              END { exit !(required && !replaced) }'; then
+            echo "::error::the tagged observability/go.mod does not require the root module at the tag, or has a replace"
+            exit 1
+          fi
+          highest=$(git tag --list 'v*' | scripts/last-tag.sh)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "latest=$([ "$TAG" = "$highest" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          echo "$TAG and observability/$TAG at $commit; highest release tag: $highest"
+
+  # The proxy fetches a version the first time someone asks for it, and the checksum database
+  # records its hashes then. Ask for both modules, then resolve them as a consumer does.
+  modules:
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: 1.27.x
+          cache: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: refs/tags/${{ env.TAG }}
+          persist-credentials: false
+          path: tagged
+
+      - name: the Go proxy serves both modules
+        run: |
+          cd "$RUNNER_TEMP"
+          for m in "$MODULE" "$MODULE/observability"; do
+            for attempt in 1 2 3 4 5 6; do
+              if GOWORK=off GOFLAGS=-mod=mod GOPROXY=https://proxy.golang.org go list -m -json "$m@$TAG"; then
+                break
+              fi
+              if [ "$attempt" -eq 6 ]; then
+                echo "::error::the Go proxy did not serve a module of this release"
+                exit 1
+              fi
+              sleep $((attempt * 20))
+            done
+          done
+
+      - name: an empty module resolves and builds both, through the proxy and the checksum database
+        env:
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          export GOWORK=off GOFLAGS=-mod=mod GOPROXY=https://proxy.golang.org GOSUMDB=sum.golang.org
+          export GOPRIVATE= GONOPROXY= GONOSUMDB=
+          consumer=$(mktemp -d)
+          cd "$consumer"
+          go mod init example.com/consumer
+          cat > main.go <<'EOF'
+          package main
+
+          import (
+              "fmt"
+
+              snodra "github.com/snodra/snodra-messaging-go"
+              "github.com/snodra/snodra-messaging-go/observability"
+          )
+
+          // New only checks the options: nothing connects before Start.
+          func main() {
+              _, err := snodra.New(snodra.Service("consumer"), snodra.Hubs("localhost:7000"),
+                  snodra.Telemetry(observability.New()))
+              if err != nil {
+                  panic(err)
+              }
+              fmt.Println(snodra.Version)
+          }
+          EOF
+          go get "$MODULE@$TAG" "$MODULE/observability@$TAG"
+          go build -o consumer .
+          if [ "$(./consumer)" != "$VERSION" ]; then
+            echo "::error::the released root module does not report the release's version"
+            exit 1
+          fi
+          # The hashes the checksum database gave the consumer are the ones the release commit
+          # recorded in observability/go.sum.
+          pick() { grep -F -e "$MODULE $TAG h1:" -e "$MODULE $TAG/go.mod h1:" "$1" | sort; }
+          pick go.sum > consumer.sums
+          pick "$GITHUB_WORKSPACE/tagged/observability/go.sum" > tagged.sums
+          cat consumer.sums
+          if [ "$(wc -l < consumer.sums)" -ne 2 ] || ! cmp -s consumer.sums tagged.sums; then
+            echo "::error::the checksum database's hashes of the root module differ from the tagged observability/go.sum"
+            diff tagged.sums consumer.sums || true
+            exit 1
+          fi
+
+  github-release:
+    needs: [check, modules]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: create the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LATEST: ${{ needs.check.outputs.latest }}
+        run: |
+          NOTES="Two Go modules, tagged on the same commit:
+          - \`$MODULE\` $TAG: \`go get $MODULE@$TAG\`
+          - \`$MODULE/observability\` $TAG (tag \`observability/$TAG\`): \`go get $MODULE/observability@$TAG\`"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --title "${GITHUB_REPOSITORY#*/} $TAG" --notes "$NOTES"
+          else
+            # --verify-tag: never create a tag here.
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --latest="$LATEST" \
+              --title "${GITHUB_REPOSITORY#*/} $TAG" --generate-notes --notes "$NOTES"
+          fi

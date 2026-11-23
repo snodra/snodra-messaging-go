@@ -44,6 +44,28 @@ func TestReadmeLinksArePublic(t *testing.T) {
 	}
 }
 
+// The install lines name no version, so `go get` takes the latest release and a release never
+// has to edit the README (scripts/bump-version.sh does not touch it). Both modules are named.
+func TestReadmeInstallLinesNameNoVersion(t *testing.T) {
+	modules := map[string]bool{}
+	for _, line := range strings.Split(readText(t, "README.md"), "\n") {
+		if !strings.HasPrefix(line, "go get ") {
+			continue
+		}
+		f := strings.Fields(line)
+		if len(f) < 3 || strings.Contains(f[2], "@") {
+			t.Errorf("an install line names a version: %s", line)
+			continue
+		}
+		modules[f[2]] = true
+	}
+	for _, m := range []string{"github.com/snodra/snodra-messaging-go", "github.com/snodra/snodra-messaging-go/observability"} {
+		if !modules[m] {
+			t.Errorf("the README has no install line for %s", m)
+		}
+	}
+}
+
 // The first Go block of the README is the quick start: the service code between the markers of
 // examples/quickstart/main.go, the markers themselves left out.
 func TestReadmeQuickstartIsTheCompiledOne(t *testing.T) {

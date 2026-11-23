@@ -8,17 +8,30 @@ on:
 permissions:
   contents: read
 
+# A branch keeps only its newest run. On main the runs queue instead: a run that is releasing must
+# finish, and the next one then starts from the tags it pushed.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+# bash -eo pipefail: a failing command inside a pipe fails the step.
+defaults:
+  run:
+    shell: bash
+
+# The two modules build as one workspace (go.work): observability/ against the root module of the
+# same commit, never against a release. Only the release check below turns the workspace off.
 jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: 1.27.x
-      - uses: golangci/golangci-lint-action@v8
+      - uses: golangci/golangci-lint-action@4afd733a84b1f43292c63897423277bb7f4313a9 # v8.0.0
         with:
           version: v2.15.0
 
@@ -28,10 +41,10 @@ jobs:
       matrix:
         go-version: [1.26.x, 1.27.x]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: ${{ matrix.go-version }}
       - run: go test -race ./...
@@ -43,15 +56,16 @@ jobs:
         go-version: [1.26.x, 1.27.x]
     defaults:
       run:
+        shell: bash
         working-directory: observability
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: ${{ matrix.go-version }}
-      - uses: golangci/golangci-lint-action@v8
+      - uses: golangci/golangci-lint-action@4afd733a84b1f43292c63897423277bb7f4313a9 # v8.0.0
         if: matrix.go-version == '1.27.x'
         with:
           version: v2.15.0
@@ -61,10 +75,10 @@ jobs:
   proto-sync:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
           repository: snodra/snodra-server
@@ -78,13 +92,13 @@ jobs:
   generated:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: 1.27.x
-      - uses: arduino/setup-protoc@v3
+      - uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
         with:
           version: "33.4"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
@@ -99,10 +113,10 @@ jobs:
       SNODRA_SERVER_VERSION: ${{ vars.SNODRA_SERVER_VERSION || '0.5.4' }}
       SNODRA_CONFORMANCE_REPORT_DIR: ${{ github.workspace }}/conformance-reports
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: 1.27.x
 
@@ -153,8 +167,173 @@ jobs:
 
       - name: Keep the runner's reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: conformance-reports
           path: conformance-reports/
           if-no-files-found: warn
+
+  scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      # scripts/local-modules.test.sh runs the go command (no network).
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: 1.27.x
+          cache: false
+      - run: for t in scripts/*.test.sh; do sh "$t" || exit 1; done
+
+  # Versions are cut here, from the Conventional Commit subjects since the last tag
+  # (scripts/next-version.sh): feat -> minor, fix/perf -> patch, anything else -> no release.
+  # Below 1.0.0 nothing computes a major; 1.0.0 is declared by hand. A release is one commit with
+  # two tags: vX.Y.Z for the root module and observability/vX.Y.Z for the module in observability/.
+  version:
+    needs: [lint, test, observability, proto-sync, generated, conformance, scripts]
+    # Pushes to main of this repository only: never a fork or a pull request, and never the
+    # release commit itself (a GITHUB_TOKEN push starts no workflow anyway).
+    if: >-
+      github.event_name == 'push' && github.ref == 'refs/heads/main'
+      && github.repository_owner == 'snodra'
+      && !startsWith(github.event.head_commit.message, 'release:')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.push.outputs.tag }}
+    steps:
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: 1.27.x
+          cache: false
+      # The checkout keeps no credentials: the release check runs the modules' tests, and with them
+      # code of their dependencies. Only the push step sees the token.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: next version
+        id: next
+        run: |
+          main=$(git ls-remote --exit-code origin refs/heads/main | cut -f1)
+          if [ "$main" != "$GITHUB_SHA" ]; then
+            echo "::notice::main is at $main, not $GITHUB_SHA: a newer push releases it, or this is a re-run of a run that released. Nothing to do. To finish a failed release, re-run its failed jobs or run the release workflow with the tag."
+            exit 0
+          fi
+          last=$(git tag --merged HEAD --list 'v*' | scripts/last-tag.sh)
+          range=${last:+$last..}HEAD
+          version=$(
+            { git log --format=%s "$range"
+              git log -E --grep='^BREAKING[ -]CHANGE:' --format='BREAKING CHANGE: %h' "$range"
+            } | scripts/next-version.sh "$last"
+          )
+          echo "last tag: ${last:-none}; next version: ${version:-none, no release}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: commit and tag
+        if: steps.next.outputs.version != ''
+        env:
+          VERSION: ${{ steps.next.outputs.version }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          scripts/bump-version.sh "$VERSION"
+          git commit -qam "release: $VERSION"
+          # observability/go.sum must hold the root module's hashes at the new tag, which exist only
+          # once the tag does: tag this commit for a moment, let go mod tidy fetch the root module
+          # from it as a consumer's go command fetches it from GitHub, then amend. The root module
+          # holds no file of observability/ (a nested module), so the amended commit's root module,
+          # and its hashes, are this commit's. The next step checks that from the final tags.
+          git tag "v$VERSION"
+          (cd observability && ../scripts/local-modules.sh go mod tidy)
+          git tag -d "v$VERSION"
+          git commit -qa --amend --no-edit
+          git tag -a "v$VERSION" -m "${GITHUB_REPOSITORY#*/} v$VERSION"
+          git tag -a "observability/v$VERSION" -m "${GITHUB_REPOSITORY#*/}/observability v$VERSION"
+          git show --stat --format='%H %s' HEAD
+
+      # The packaging check: the tagged tree must be what a consumer can use before anything is
+      # pushed, because the Go proxy keeps a published tag forever.
+      - name: the release commit packages
+        if: steps.next.outputs.version != ''
+        env:
+          VERSION: ${{ steps.next.outputs.version }}
+        run: |
+          for t in "v$VERSION" "observability/v$VERSION"; do
+            [ "$(git rev-parse "refs/tags/$t^{commit}")" = "$(git rev-parse HEAD)" ]
+          done
+          # The root module as tagged, with no workspace: it builds, is tidy, and carries the version.
+          GOWORK=off go build ./...
+          GOWORK=off go vet ./...
+          GOWORK=off go mod tidy -diff
+          SNODRA_RELEASE_VERSION="$VERSION" GOWORK=off go test -count=1 -run '^TestVersion$' .
+          # observability/go.mod requires the root at this release and replaces nothing.
+          (cd observability && go mod edit -json) > "$RUNNER_TEMP/observability-mod.json"
+          jq -e --arg v "v$VERSION" '(.Replace // []) == []
+            and ([.Require[] | select(.Path == "github.com/snodra/snodra-messaging-go") | .Version] == [$v])' \
+            "$RUNNER_TEMP/observability-mod.json"
+          # observability/ as a consumer gets it: both modules fetched from the new tags into an
+          # empty module cache. A root hash other than observability/go.sum's is a checksum error.
+          scripts/local-modules.sh sh -c '
+            set -e
+            root=$PWD
+            cd "$RUNNER_TEMP"
+            go mod download -json "github.com/snodra/snodra-messaging-go@v$VERSION" > root-module.json
+            go mod download -json "github.com/snodra/snodra-messaging-go/observability@v$VERSION" > /dev/null
+            cd "$root/observability"
+            go mod tidy -diff
+            go build ./...
+            go vet ./...
+            go test -count=1 ./...
+          '
+          # And the hashes observability/go.sum records are the ones computed from the tag.
+          sum=$(jq -r .Sum "$RUNNER_TEMP/root-module.json")
+          modsum=$(jq -r .GoModSum "$RUNNER_TEMP/root-module.json")
+          grep -Fx "github.com/snodra/snodra-messaging-go v$VERSION $sum" observability/go.sum
+          grep -Fx "github.com/snodra/snodra-messaging-go v$VERSION/go.mod $modsum" observability/go.sum
+
+      - name: push
+        id: push
+        if: steps.next.outputs.version != ''
+        env:
+          VERSION: ${{ steps.next.outputs.version }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          auth=$(printf 'x-access-token:%s' "$TOKEN" | base64 | tr -d '\n')
+          echo "::add-mask::$auth"
+          remote() { git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" "$@"; }
+          tags=("refs/tags/v$VERSION" "refs/tags/observability/v$VERSION")
+          # The commit and both tags, or none of them, and only as a fast-forward of the commit this
+          # run tested.
+          if ! remote push --atomic origin HEAD:refs/heads/main "${tags[@]}"; then
+            main=$(remote ls-remote --exit-code origin refs/heads/main | cut -f1)
+            if [ "$main" = "$(git rev-parse HEAD)" ]; then
+              # The push landed and only the client saw an error: release it.
+              for t in "${tags[@]}"; do
+                remote ls-remote --exit-code origin "$t" >/dev/null \
+                  || { echo "::error::main has the release commit but not both of its tags"; exit 1; }
+              done
+              echo "::warning::git reported an error, but the release commit and both tags are on the remote"
+            elif [ "$main" != "$GITHUB_SHA" ]; then
+              echo "::notice::main moved during the release; the run for the newer commit releases"
+              exit 0
+            else
+              echo "::error::the push to main was refused: check that github-actions may push to main and create tags"
+              exit 1
+            fi
+          fi
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+  # A tag pushed with GITHUB_TOKEN starts no workflow, so the release runs here.
+  release:
+    needs: version
+    if: needs.version.outputs.tag != ''
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.version.outputs.tag }}
