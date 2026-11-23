@@ -35,15 +35,15 @@ func RequireAuthenticated() HandlerOption {
 }
 
 // RequireRole lets only a caller with role run the handler: an anonymous caller is answered
-// UNAUTHENTICATED, a caller without the role PERMISSION_DENIED, decided before the payload is
-// decoded. The roles come from the token's verified claims (see [RolesClaim]); it needs [JWKS].
+// UNAUTHENTICATED before the payload is decoded, a caller without the role PERMISSION_DENIED once
+// it decoded (a payload that does not decode is INVALID_REQUEST for any caller with a token). The roles come from the token's verified claims (see [RolesClaim]); it needs [JWKS].
 func RequireRole(role string) HandlerOption {
 	return RequireCaller(func(c Caller) bool { return c.HasRole(role) })
 }
 
 // RequireCaller lets only a caller allow accepts run the handler: an anonymous caller is
-// answered UNAUTHENTICATED, a caller allow refuses PERMISSION_DENIED, decided before the
-// payload is decoded. When a handler has several of these options, every one must accept. The
+// answered UNAUTHENTICATED before the payload is decoded, a caller allow refuses
+// PERMISSION_DENIED once it decoded, as in the reference library. When a handler has several of these options, every one must accept. The
 // Caller is read from the token's verified claims; it needs [JWKS].
 func RequireCaller(allow func(Caller) bool) HandlerOption {
 	return func(c *handlerConfig) {
@@ -206,15 +206,22 @@ func (rc rolesClaim) of(claims map[string]any) []string {
 	return roles
 }
 
-// guardRefusal is the code and message a request of type typ from caller is refused with by the
-// guards of cfg; refused is false when every guard accepts (or there is none). A guard that panics
-// refuses the caller, and the panic is logged.
-func (a *App) guardRefusal(cfg handlerConfig, typ string, caller *Caller) (code Code, msg string, refused bool) {
-	if len(cfg.guards) == 0 {
+// anonymousRefusal is the code and message an anonymous caller (nil) of a handler with the
+// guards of cfg is refused with, before the payload is decoded; refused is false for a caller,
+// and for a handler without a guard.
+func anonymousRefusal(cfg handlerConfig, caller *Caller) (code Code, msg string, refused bool) {
+	if len(cfg.guards) == 0 || caller != nil {
 		return 0, "", false
 	}
-	if caller == nil {
-		return CodeUnauthenticated, "handler requires authentication", true
+	return CodeUnauthenticated, "handler requires authentication", true
+}
+
+// callerRefusal is the code and message a request of type typ from caller is refused with by
+// the guards of cfg, after its payload was decoded; refused is false when every guard accepts
+// (or there is none). A guard that panics refuses the caller, and the panic is logged.
+func (a *App) callerRefusal(cfg handlerConfig, typ string, caller *Caller) (code Code, msg string, refused bool) {
+	if code, msg, refused := anonymousRefusal(cfg, caller); refused || len(cfg.guards) == 0 {
+		return code, msg, refused
 	}
 	for _, allow := range cfg.guards {
 		if !a.accepts(allow, typ, *caller) {
@@ -222,6 +229,20 @@ func (a *App) guardRefusal(cfg handlerConfig, typ string, caller *Caller) (code 
 		}
 	}
 	return 0, "", false
+}
+
+// callerCheck is the admit of an invoker for the guards of cfg: the error a caller they refuse
+// is answered with (PERMISSION_DENIED); nil without a guard.
+func (a *App) callerCheck(cfg handlerConfig, typ string, caller *Caller) func() error {
+	if len(cfg.guards) == 0 {
+		return nil
+	}
+	return func() error {
+		if code, msg, refused := a.callerRefusal(cfg, typ, caller); refused {
+			return &handlerError{msg: msg, code: code}
+		}
+		return nil
+	}
 }
 
 func (a *App) accepts(allow func(Caller) bool, typ string, c Caller) (ok bool) {

@@ -58,13 +58,14 @@ func (h *handler) mode() string {
 	return "UNARY"
 }
 
-// invoker runs a handler on a payload: decoded with the codec, encoded back. A payload that
-// does not decode is a *decodeError.
-type invoker func(ctx context.Context, codec PayloadCodec, payload []byte) ([]byte, error)
+// invoker runs a handler on a payload: decoded with the codec, then admit (when not nil) decides
+// whether the handler runs (its error is the answer), then the handler's answer is encoded. A
+// payload that does not decode is a *decodeError.
+type invoker func(ctx context.Context, codec PayloadCodec, payload []byte, admit func() error) ([]byte, error)
 
-// streamInvoker runs a streaming handler on a payload, its items written to out. A payload that
-// does not decode is a *decodeError.
-type streamInvoker func(ctx context.Context, codec PayloadCodec, payload []byte, out *streamOut) error
+// streamInvoker runs a streaming handler on a payload, its items written to out, after admit as
+// for an invoker. A payload that does not decode is a *decodeError.
+type streamInvoker func(ctx context.Context, codec PayloadCodec, payload []byte, admit func() error, out *streamOut) error
 
 // queryDecoder decodes a subscription query's payload into the registered type, for the
 // matches of [Updates]. A payload that does not decode is a *decodeError.
@@ -156,10 +157,15 @@ func messageTypeOf[M Message]() (name string, err error) {
 
 // invokerOf adapts h to the dispatcher: decode a fresh M, run h, encode its answer.
 func invokerOf[M Message, R any](h func(context.Context, M) (R, error)) invoker {
-	return func(ctx context.Context, codec PayloadCodec, payload []byte) ([]byte, error) {
+	return func(ctx context.Context, codec PayloadCodec, payload []byte, admit func() error) ([]byte, error) {
 		msg, err := decodeMessage[M](codec, payload)
 		if err != nil {
 			return nil, err
+		}
+		if admit != nil {
+			if err := admit(); err != nil {
+				return nil, err
+			}
 		}
 		result, err := h(ctx, msg)
 		if err != nil {

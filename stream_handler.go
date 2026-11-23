@@ -34,10 +34,15 @@ func HandleStream[Q Message, T any](app *App, h func(context.Context, Q, *Stream
 
 // streamInvokerOf adapts h to the dispatcher: decode a fresh Q, run h with a writer on out.
 func streamInvokerOf[Q Message, T any](h func(context.Context, Q, *StreamWriter[T]) error) streamInvoker {
-	return func(ctx context.Context, codec PayloadCodec, payload []byte, out *streamOut) error {
+	return func(ctx context.Context, codec PayloadCodec, payload []byte, admit func() error, out *streamOut) error {
 		msg, err := decodeMessage[Q](codec, payload)
 		if err != nil {
 			return err
+		}
+		if admit != nil {
+			if err := admit(); err != nil {
+				return err
+			}
 		}
 		return h(ctx, msg, &StreamWriter[T]{out: out, codec: codec})
 	}
@@ -282,7 +287,7 @@ func (a *App) runStream(ctx context.Context, h *handler, req *hubpb.Request, sco
 	}()
 	defer a.recoverHandler(req, &werr)
 	ctx, done = a.tel.startHandling(ctx, handlingOf(req, scope))
-	if err := h.stream(withHandling(ctx, scope), a.cfg.codec, req.GetPayload(), out); err != nil {
+	if err := h.stream(withHandling(ctx, scope), a.cfg.codec, req.GetPayload(), a.callerCheck(h.cfg, req.GetType(), scope.caller), out); err != nil {
 		return handlerFailure(req.GetId(), err)
 	}
 	return nil

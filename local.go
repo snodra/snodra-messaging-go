@@ -101,7 +101,7 @@ func (a *App) serveLocally(ctx context.Context, h *handler, kind hubpb.RequestKi
 	if parent != nil { // the caller of the request being handled calls on
 		scope.authorization, scope.traceparent, scope.caller = parent.authorization, parent.traceparent, parent.caller
 	}
-	if code, msg, refused := a.guardRefusal(h.cfg, typ, scope.caller); refused {
+	if code, msg, refused := anonymousRefusal(h.cfg, scope.caller); refused {
 		return nil, fail(hubpb.ErrorCode(code), msg)
 	}
 	req := &hubpb.Request{Id: id, Kind: kind, Type: typ, Payload: payload, Headers: maps.Clone(headers)}

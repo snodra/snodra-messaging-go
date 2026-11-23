@@ -606,7 +606,7 @@ func TestNoOpTelemetryAddsNoAllocationToRequestAndRun(t *testing.T) {
 		req := &hubpb.Request{Id: "r-1", Type: "orders.PlaceOrder", Kind: hubpb.RequestKind_COMMAND, Payload: []byte(`{}`)}
 		scope := &handling{info: MessageInfo{ID: "r-1", Type: "orders.PlaceOrder"}}
 		ctx := context.Background()
-		base := minAllocs(func() { _, _ = h.invoke(withHandling(ctx, scope), app.cfg.codec, req.GetPayload()) })
+		base := minAllocs(func() { _, _ = h.invoke(withHandling(ctx, scope), app.cfg.codec, req.GetPayload(), nil) })
 		run := minAllocs(func() { _, _ = app.run(ctx, h, req, scope) })
 		if run > base {
 			t.Errorf("%s: run allocates %v, the bare handler call %v", name, run, base)

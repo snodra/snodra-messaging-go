@@ -401,9 +401,9 @@ func (a *App) subscribe(req *hubpb.Request, ref *streamRef) {
 
 // admitSubscription decodes the query of the registered subscription sub (h's, when it has a
 // handler) and decides its admission, in the reference library's order: the caller's token,
-// then a type not served here, then the guards (before the decoding's verdict: an anonymous
-// caller cannot probe the query's shape), then the decoding (a decoding that panics is
-// HANDLER_ERROR "handler panicked", as for a unary handler). Admitted, what was emitted
+// then a type not served here, then an anonymous caller of a guarded handler (before the
+// decoding's verdict: it cannot probe the query's shape), then the decoding (a decoding that
+// panics is HANDLER_ERROR "handler panicked", as for a unary handler), then the guards. Admitted, what was emitted
 // meanwhile goes out; refused, the refusal is its one ReplyEnd (none when the hub cancelled it
 // meanwhile).
 func (a *App) admitSubscription(req *hubpb.Request, ref *streamRef, h *handler, sub *servedSubscription, unserved *hubpb.Error) {
@@ -424,10 +424,14 @@ func (a *App) admitSubscription(req *hubpb.Request, ref *streamRef, h *handler, 
 		werr = &hubpb.Error{RequestId: id, Code: hubpb.ErrorCode_UNAUTHENTICATED, Message: lineBreaks.Replace(err.Error())}
 	case werr != nil:
 	default:
-		if code, msg, refused := a.guardRefusal(h.cfg, req.GetType(), caller); refused {
+		// An anonymous caller before the decoding's verdict, the guards after it, as for a
+		// request.
+		if code, msg, refused := anonymousRefusal(h.cfg, caller); refused {
 			werr = &hubpb.Error{RequestId: id, Code: hubpb.ErrorCode(code), Message: lineBreaks.Replace(msg)}
-		} else {
-			werr = flaw
+		} else if werr = flaw; werr == nil {
+			if code, msg, refused := a.callerRefusal(h.cfg, req.GetType(), caller); refused {
+				werr = &hubpb.Error{RequestId: id, Code: hubpb.ErrorCode(code), Message: lineBreaks.Replace(msg)}
+			}
 		}
 	}
 	if werr == nil {

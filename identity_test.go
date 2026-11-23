@@ -341,3 +341,29 @@ func TestIdentitySettings(t *testing.T) {
 	app = newApp(t, Hubs("127.0.0.1:7000"))
 	is(t, HandleCommand(app, func(context.Context, PlaceOrder) (Empty, error) { return Empty{}, nil }, RequireCaller(nil)) != nil, true)
 }
+
+// An anonymous caller is refused before the payload is decoded; a caller a guard refuses after
+// it, as in the reference library (whose guard may look at the message): a payload that does not
+// decode is INVALID_REQUEST for an authenticated caller, whoever it is.
+func TestTheGuardsRunAfterTheDecoding(t *testing.T) {
+	key, _ := testKeys(t)
+	srv, _ := testJWKS(t)
+	s, _ := guarded(t, []Option{JWKS(srv.URL, testIssuer)}, RequireRole("orders-admin"))
+	bearer := "Bearer " + mint(t, key, "k1", userClaims("u-1", time.Minute, nil)) // without the role
+	code, _ := placeOrder(t, s, bearer, "not json")
+	is(t, code, hubpb.ErrorCode_INVALID_REQUEST)
+	code, msg := placeOrder(t, s, bearer, `{}`)
+	is(t, code, hubpb.ErrorCode_PERMISSION_DENIED)
+	is(t, msg, "access denied")
+	code, _ = placeOrder(t, s, "", "not json")
+	is(t, code, hubpb.ErrorCode_UNAUTHENTICATED)
+
+	// A subscription: the same order.
+	updates, _, ws := watching(t, fakehub.Start(t), []HandlerOption{RequireRole("orders-admin")}, JWKS(srv.URL, testIssuer))
+	_ = updates
+	ws.Send(t, fakehub.Forward(&hubpb.Request{Id: "w#1", Kind: hubpb.RequestKind_QUERY, Type: "orders.WatchOrders",
+		Mode: hubpb.RequestMode_SUBSCRIPTION, Payload: []byte(`{"topic":7}`), Headers: map[string]string{"authorization": bearer}}))
+	is(t, nextEnd(t, ws).GetError().GetCode(), hubpb.ErrorCode_INVALID_REQUEST)
+	ws.Send(t, subscriptionRequest("w#2", "t", map[string]string{"authorization": bearer}))
+	is(t, nextEnd(t, ws).GetError().GetCode(), hubpb.ErrorCode_PERMISSION_DENIED)
+}

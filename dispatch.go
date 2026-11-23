@@ -282,8 +282,9 @@ func (a *App) admit(run *runningRequest, req *hubpb.Request, streaming bool) (*h
 	if h == nil {
 		return nil, nil, fail(code, msg)
 	}
-	// Before decoding: an anonymous caller cannot probe the payload's shape.
-	if code, msg, refused := a.guardRefusal(h.cfg, req.GetType(), caller); refused {
+	// Before decoding: an anonymous caller cannot probe the payload's shape. The guards
+	// themselves run after the decoding (callerCheck), as in the reference library.
+	if code, msg, refused := anonymousRefusal(h.cfg, caller); refused {
 		return nil, nil, fail(hubpb.ErrorCode(code), msg)
 	}
 	select {
@@ -387,7 +388,7 @@ func (a *App) run(ctx context.Context, h *handler, req *hubpb.Request, scope *ha
 // invoke runs h on req under recover, as run does, without the telemetry.
 func (a *App) invoke(ctx context.Context, h *handler, req *hubpb.Request, scope *handling) (payload []byte, werr *hubpb.Error) {
 	defer a.recoverHandler(req, &werr)
-	payload, err := h.invoke(withHandling(ctx, scope), a.cfg.codec, req.GetPayload())
+	payload, err := h.invoke(withHandling(ctx, scope), a.cfg.codec, req.GetPayload(), a.callerCheck(h.cfg, req.GetType(), scope.caller))
 	if err != nil {
 		return nil, handlerFailure(req.GetId(), err)
 	}
