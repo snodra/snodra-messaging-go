@@ -82,20 +82,37 @@ func MaxResults(n uint32) SendOption { return func(c *sendConfig) { c.maxResults
 // its authorization header (see [ForwardJWT]) and its valid traceparent; outside any handling it
 // carries a new correlation id. See
 // https://snodra.damoreira.com/library-authors/protocol/ (Requests).
+//
+// A command of a type this instance handles itself is answered in-process, unless
+// [AlwaysThroughHub] is on: its handler runs on the caller's goroutine under ctx, with no hub, no
+// permit and no handler slot ([MaxConcurrent] does not count it), also before [App.Start] and
+// after [App.Shutdown]. The handler sees a request with a fresh id, the call's [Header]s and the
+// correlation id (that of the request ctx is handling, else a new one); it acts for the caller of
+// the request ctx is handling, anonymous outside a handler, whose token and trace go on with the
+// requests it sends; its guards apply. [RoutingKey], [Timeout], [Priority] and retries do not apply,
+// and the telemetry records nothing. Its error is the [*Error] the hub would have relayed (a panic
+// is HANDLER_ERROR "handler panicked"); when ctx ended and the handler failed, ctx's error.
 func Send[R any](ctx context.Context, app *App, cmd Message, opts ...SendOption) (R, error) {
 	return request[R](ctx, app, hubpb.RequestKind_COMMAND, cmd, opts)
 }
 
 // Query sends the query q through a hub to an instance that handles its type and returns the
 // answer decoded as R. It fails as [Send] does; a query is also retried after an unknown outcome.
+// A query of a type this instance handles itself, not [Shared], is answered in-process as [Send]
+// says; a shared one goes through a hub, which spreads it over every owner, this instance
+// included.
 func Query[R any](ctx context.Context, app *App, q Message, opts ...SendOption) (R, error) {
 	return request[R](ctx, app, hubpb.RequestKind_QUERY, q, opts)
 }
 
-// request is a call: its settings, the attempts under the retry policy, the answer decoded. One
-// record goes to the telemetry per call, retries included, unless the caller's own cancellation
+// request is a call: answered in-process when this instance handles it (see local), else its
+// settings, the attempts under the retry policy, the answer decoded. One record goes to the
+// telemetry per call through the hubs, retries included, unless the caller's own cancellation
 // ended it or the call panicked.
 func request[R any](ctx context.Context, app *App, kind hubpb.RequestKind, m Message, opts []SendOption) (R, error) {
+	if h, typ := app.localHandler(kind, m); h != nil {
+		return local[R](ctx, app, h, kind, typ, m, opts)
+	}
 	var tel *telemetry // nil for a nil app: prepare fails
 	if app != nil {
 		tel = app.tel
@@ -182,27 +199,9 @@ func prepare(ctx context.Context, app *App, kind hubpb.RequestKind, mode hubpb.R
 
 // prepareTyped is prepare for a message named typ.
 func prepareTyped(ctx context.Context, app *App, typ string, kind hubpb.RequestKind, mode hubpb.RequestMode, m Message, opts []SendOption) (*outgoing, error) {
-	var cfg sendConfig
-	for _, o := range opts {
-		if o != nil {
-			o(&cfg)
-		}
-	}
-	if err := checkHeaders(cfg.headers, typ); err != nil {
-		return nil, &localRefusal{err}
-	}
-	if cfg.timeout < 0 {
-		return nil, &localRefusal{fmt.Errorf("snodra: the Timeout of %s must not be negative, got %v", typ, cfg.timeout)}
-	}
-	policy := noRetry
-	switch {
-	case cfg.retry != nil:
-		policy = *cfg.retry
-	case app.cfg.retry != nil:
-		policy = *app.cfg.retry
-	}
-	if err := policy.validate(); err != nil {
-		return nil, &localRefusal{fmt.Errorf("%w (sending %s)", err, typ)}
+	cfg, policy, err := sendSettings(app, typ, opts)
+	if err != nil {
+		return nil, err
 	}
 	payload, err := app.cfg.codec.Marshal(m)
 	if err != nil {
@@ -260,6 +259,34 @@ func prepareTyped(ctx context.Context, app *App, typ string, kind hubpb.RequestK
 		out.budget = retryBudget(app.ackFor(tmpl.GetRoutingKey()), typ, chosen)
 	}
 	return out, nil
+}
+
+// sendSettings are what opts set for a call of typ, and its retry policy, or why the call is
+// refused before anything is sent (a reserved header, a negative timeout, an invalid policy).
+func sendSettings(app *App, typ string, opts []SendOption) (sendConfig, RetryPolicy, error) {
+	var cfg sendConfig
+	for _, o := range opts {
+		if o != nil {
+			o(&cfg)
+		}
+	}
+	if err := checkHeaders(cfg.headers, typ); err != nil {
+		return cfg, noRetry, &localRefusal{err}
+	}
+	if cfg.timeout < 0 {
+		return cfg, noRetry, &localRefusal{fmt.Errorf("snodra: the Timeout of %s must not be negative, got %v", typ, cfg.timeout)}
+	}
+	policy := noRetry
+	switch {
+	case cfg.retry != nil:
+		policy = *cfg.retry
+	case app.cfg.retry != nil:
+		policy = *app.cfg.retry
+	}
+	if err := policy.validate(); err != nil {
+		return cfg, noRetry, &localRefusal{fmt.Errorf("%w (sending %s)", err, typ)}
+	}
+	return cfg, policy, nil
 }
 
 // messageName is m's wire name, or why m cannot be sent.

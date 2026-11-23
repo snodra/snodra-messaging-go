@@ -354,25 +354,39 @@ func (a *App) lookup(req *hubpb.Request, streaming bool) (*handler, hubpb.ErrorC
 		if strings.HasSuffix(req.GetId(), "#0") {
 			return h, 0, ""
 		}
-		return nil, hubpb.ErrorCode_INVALID_REQUEST, typ + " is a subscription query: send it with Subscribe (mode SUBSCRIPTION)"
+		return nil, hubpb.ErrorCode_INVALID_REQUEST, subscriptionQueryText(typ)
 	case h.kind == kindStream:
-		return nil, hubpb.ErrorCode_INVALID_REQUEST, typ + " is a streaming query: send it with Stream (mode STREAMING)"
+		return nil, hubpb.ErrorCode_INVALID_REQUEST, streamingQueryText(typ)
 	}
 	return h, 0, ""
+}
+
+// streamingQueryText is the INVALID_REQUEST message of a unary request of the streaming query typ.
+func streamingQueryText(typ string) string {
+	return typ + " is a streaming query: send it with Stream (mode STREAMING)"
+}
+
+// subscriptionQueryText is the INVALID_REQUEST message of a unary request of the subscription
+// query typ that is not a subscription's initial request.
+func subscriptionQueryText(typ string) string {
+	return typ + " is a subscription query: send it with Subscribe (mode SUBSCRIPTION)"
 }
 
 // run runs h on req under recover: the answer's payload, or the error to answer. A panic, of
 // the handler or of its error, is HANDLER_ERROR "handler panicked", the reference library's
 // text: the panic value and the stack go to the log only.
 func (a *App) run(ctx context.Context, h *handler, req *hubpb.Request, scope *handling) (payload []byte, werr *hubpb.Error) {
-	var done func(error)
-	defer func() { // after recoverHandler: werr is a panic's too
-		if done != nil {
-			done(handlingErr(werr))
-		}
-	}()
+	ctx, done := a.tel.startHandling(ctx, handlingOf(req, scope))
+	payload, werr = a.invoke(ctx, h, req, scope)
+	if done != nil {
+		done(handlingErr(werr))
+	}
+	return payload, werr
+}
+
+// invoke runs h on req under recover, as run does, without the telemetry.
+func (a *App) invoke(ctx context.Context, h *handler, req *hubpb.Request, scope *handling) (payload []byte, werr *hubpb.Error) {
 	defer a.recoverHandler(req, &werr)
-	ctx, done = a.tel.startHandling(ctx, handlingOf(req, scope))
 	payload, err := h.invoke(withHandling(ctx, scope), a.cfg.codec, req.GetPayload())
 	if err != nil {
 		return nil, handlerFailure(req.GetId(), err)

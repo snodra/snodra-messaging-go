@@ -141,6 +141,13 @@ order, err := snodra.Query[Receipt](ctx, app, GetOrder{OrderID: receipt.OrderID}
   `snodra.Priority` sets the request's priority.
 - A request sent while a handler runs carries that request's correlation id, its caller's token (see `snodra.ForwardJWT`)
   and its trace context.
+- A command, or a query that is not shared, of a type this instance handles itself is answered in-process: its handler
+  runs on the caller's goroutine with no hub, no permit and no handler slot, also before `Start` and after `Shutdown`.
+  It sees a fresh request id, the caller's `snodra.Header`s and the correlation id, and acts for the caller of the
+  request being handled (anonymous outside a handler); routing key, timeout, priority and retry do not apply (the
+  caller's context bounds it), nothing goes to the telemetry, and its errors are those a hub would have relayed.
+  `snodra.AlwaysThroughHub(true)` (`SNODRA_ALWAYS_THROUGH_HUB=true`) sends every request through a hub. Streams,
+  scatter-gathers and subscriptions always go through a hub.
 
 ## Streams, scatter-gather and subscriptions
 
@@ -230,6 +237,7 @@ defaults, is in the documentation of `FromEnv` (`go doc snodra.FromEnv`) and at
 | `SNODRA_SERVER_TLS`, `SNODRA_SERVER_TLS_CA`, `SNODRA_SERVER_TLS_SERVER_NAME` | `TLS` | false |
 | `SNODRA_SERVER_TLS_CLIENT_CERT`, `SNODRA_SERVER_TLS_CLIENT_KEY` | `ClientCertificate` | none (implies TLS) |
 | `SNODRA_JWKS_URL`, `SNODRA_ISSUER` | `JWKS` | none |
+| `SNODRA_ALWAYS_THROUGH_HUB` | `AlwaysThroughHub` | false (own types answered in-process) |
 
 - An instance opens one stream to every hub it is given and registers the same types on each. A second address that
   answers a hub id already served is parked, and takes over if the first goes away. An `https://` hub address implies

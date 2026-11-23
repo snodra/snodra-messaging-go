@@ -32,6 +32,9 @@ type config struct {
 	defaultTimeout time.Duration    // the sends' timeout when a call chooses none; 0: none
 	retry          *RetryPolicy     // the sends' retry policy; nil: no retry
 	priorities     map[string]int32 // Request.priority by type when a call chooses none
+	// alwaysThroughHub sends every request through a hub, also those of a type this instance
+	// handles itself ([AlwaysThroughHub]).
+	alwaysThroughHub bool
 
 	jwksURL, issuer string // the callers' tokens are verified against them; "": read unverified
 	rolesClaim      string // where a token's roles are; "": roles
@@ -226,6 +229,19 @@ func DefaultRetry(p RetryPolicy) Option {
 func Priorities(p map[string]int32) Option {
 	return func(c *config) error {
 		c.priorities = maps.Clone(p)
+		return nil
+	}
+}
+
+// AlwaysThroughHub, when on, sends every [Send] and [Query] through a hub, also those of a type
+// this instance handles itself. Off, the default, a command, or a query that is not [Shared], of
+// a type registered here is answered in-process: its handler runs on the caller's goroutine,
+// without a hub, a permit or a handler slot (see [Send]). Turn it on where every request must be
+// seen by the hubs (a conformance or an interoperability test, say). [Gather], [Stream] and
+// [Subscribe] always go through a hub.
+func AlwaysThroughHub(on bool) Option {
+	return func(c *config) error {
+		c.alwaysThroughHub = on
 		return nil
 	}
 }

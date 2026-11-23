@@ -671,3 +671,28 @@ func TestSubscribeGoesThroughTheLibrarysSubscribe(t *testing.T) {
 		t.Fatalf("outcome %v", m)
 	}
 }
+
+// The contract's sends go through the hub, also to the service's own types: the runner sees
+// them and routes them (to another instance, say), which an in-process answer would skip.
+func TestSendsToItsOwnTypesGoThroughTheHub(t *testing.T) {
+	app, _, s := started(t, env{service: "conformance-go", instance: "i-1", capacity: 4})
+	s.Ack(t, fakehub.Ack("hub-1"))
+	ready(t, app)
+	for i, target := range []string{"echo", "echo-query"} {
+		id := fmt.Sprintf("r-own-%d", i)
+		s.Send(t, fakehub.Forward(&hubpb.Request{Id: id, Kind: hubpb.RequestKind_COMMAND, Type: "conformance.Send",
+			Payload: []byte(`{"op":"unary","target":"` + target + `","payload":{"mark":"own"}}`)}))
+		sent, reply := nextFrame(t, s)
+		if sent == nil {
+			t.Fatalf("%s: answered %v without a request to the hub", target, reply)
+		}
+		if !strings.HasPrefix(sent.GetType(), "conformance.Echo") {
+			t.Fatalf("%s: the library sent %v", target, sent)
+		}
+		s.Send(t, &hubpb.ServerMessage{Message: &hubpb.ServerMessage_Reply{Reply: &hubpb.Reply{
+			RequestId: sent.GetId(), Result: &hubpb.Reply_Payload{Payload: []byte(`{}`)}}}})
+		if _, reply = nextFrame(t, s); reply.GetRequestId() != id {
+			t.Fatalf("%s: reply %v", target, reply)
+		}
+	}
+}

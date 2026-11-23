@@ -18,6 +18,7 @@ func clearEnv(t *testing.T) {
 		"SNODRA_SERVER_RETRY_MAX_ATTEMPTS", "SNODRA_SERVER_RETRY_INITIAL_BACKOFF_MS",
 		"SNODRA_SERVER_RETRY_MULTIPLIER", "SNODRA_SERVER_RETRY_MAX_BACKOFF_MS",
 		"SNODRA_JWKS_URL", "SNODRA_ISSUER", "SNODRA_SECURITY_ROLES_CLAIM", "SNODRA_FORWARD_JWT",
+		"SNODRA_ALWAYS_THROUGH_HUB",
 		"SNODRA_SERVER_TOKEN", "SNODRA_SERVER_TOKEN_FILE", "SNODRA_SERVER_TLS", "SNODRA_SERVER_TLS_CA",
 		"SNODRA_SERVER_TLS_SERVER_NAME", "SNODRA_SERVER_TLS_CLIENT_CERT", "SNODRA_SERVER_TLS_CLIENT_KEY",
 		"SNODRA_SERVER_OAUTH2_TOKEN_URI", "SNODRA_SERVER_OAUTH2_CLIENT_ID", "SNODRA_SERVER_OAUTH2_CLIENT_SECRET",
@@ -183,6 +184,18 @@ func TestFromEnvIdentitySettings(t *testing.T) {
 	is(t, app.identity.verifier != nil, true)
 	is(t, strings.Join(app.identity.roles.path, "."), "realm_access.roles")
 	is(t, app.cfg.forwardJWT, false)
+
+	is(t, app.cfg.alwaysThroughHub, false)
+	t.Setenv("SNODRA_ALWAYS_THROUGH_HUB", "true")
+	app, err = New(FromEnv())
+	is(t, err, nil)
+	is(t, app.cfg.alwaysThroughHub, true)
+	t.Setenv("SNODRA_ALWAYS_THROUGH_HUB", "sometimes")
+	_, err = New(FromEnv())
+	if err == nil || !strings.Contains(err.Error(), "SNODRA_ALWAYS_THROUGH_HUB") {
+		t.Fatalf("got %v, want an error naming SNODRA_ALWAYS_THROUGH_HUB", err)
+	}
+	t.Setenv("SNODRA_ALWAYS_THROUGH_HUB", "")
 
 	t.Setenv("SNODRA_FORWARD_JWT", "maybe")
 	_, err = New(FromEnv())
