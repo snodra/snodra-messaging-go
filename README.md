@@ -134,6 +134,8 @@ order, err := snodra.Query[Receipt](ctx, app, GetOrder{OrderID: receipt.OrderID}
 
 - A context deadline is the caller's timeout; a cancelled context returns `context.Canceled`, together with
   `ErrOutcomeUnknown` once the request was written.
+- While no hub can take a request (none connected yet, a hub restarting), the call waits for one within its timeout
+  (5 s without one), and only then fails with `ErrNeverSent`.
 - A per-call `snodra.Timeout` wins over the app's `snodra.DefaultTimeout`; with neither, the hub applies the type's own
   timeout.
 - Retries are opt-in: `snodra.DefaultRetry(snodra.RetryNeverRan)` or `snodra.Retry(...)` per call. A command is retried
@@ -143,9 +145,10 @@ order, err := snodra.Query[Receipt](ctx, app, GetOrder{OrderID: receipt.OrderID}
   and its trace context.
 - A command, or a query that is not shared, of a type this instance handles itself is answered in-process: its handler
   runs on the caller's goroutine with no hub, no permit and no handler slot, also before `Start` and after `Shutdown`.
-  It sees a fresh request id, the caller's `snodra.Header`s and the correlation id, and acts for the caller of the
-  request being handled (anonymous outside a handler); routing key, timeout, priority and retry do not apply (the
-  caller's context bounds it), nothing goes to the telemetry, and its errors are those a hub would have relayed.
+  It sees a fresh request id, the caller's `snodra.Header`s and the correlation id, and acts for the caller the hub
+  path would carry (the request being handled's, when `snodra.ForwardJWT` is on; anonymous outside a handler or with it
+  off); routing key, timeout, priority and retry do not apply (the caller's context bounds it), nothing goes to the
+  telemetry, and its errors are those a hub would have relayed.
   `snodra.AlwaysRouteThroughHub(true)` (`SNODRA_SERVER_ALWAYS_ROUTE_THROUGH_HUB=true`, the variable the other Snodra
   libraries read too) sends every request through a hub. Streams, scatter-gathers and subscriptions always go through
   a hub.
@@ -271,7 +274,8 @@ app, err := snodra.New(
 ## Behaviour worth knowing
 
 - **Shutdown.** `App.Shutdown(ctx)` leaves the hubs in order (an empty registration so requests route elsewhere, then
-  then every subscription it serves ends, then the handlers in flight for at most 5 s, then the stream half-close) and returns by `ctx`'s deadline.
+  every subscription it serves ends, then the handlers in flight for at most 5 s, then the stream half-close) and
+  returns by `ctx`'s deadline.
   `App.Run` shuts down within 15 s. A handler that ignores its context outlives `Shutdown`: the library cannot stop a
   goroutine, so it stops waiting for it.
 - **Cancelled requests.** When the hub cancels a request (the caller gave up, the request timed out), the handler's
@@ -294,7 +298,8 @@ without one. The separate module `github.com/snodra/snodra-messaging-go/otel` im
 metric names and labels of the other libraries (request duration, connected hubs, handlers in flight, token fetches,
 certificate rotations, credential refreshes). It also creates a span for every request a handler serves, which neither
 the Rust nor the Kotlin library does, and names its instrumentation scope after this module (see SG-24 in
-[SPEC-GAPS.md](SPEC-GAPS.md)). A call its caller cancels records no metric.
+[SPEC-GAPS.md](SPEC-GAPS.md)). A call its caller cancels, one its options refuse and one answered in-process record no
+metric.
 
 ```go
 app, err := snodra.New(

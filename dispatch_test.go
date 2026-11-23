@@ -557,6 +557,10 @@ func TestEveryModeAgainstEveryHandler(t *testing.T) {
 		{"u-7", cmd, "orders.Missing", unary, reply, hubpb.ErrorCode_NO_HANDLER, ""},
 		{"u-8", qry, "orders.PlaceOrder", unary, reply, hubpb.ErrorCode_NO_HANDLER, ""}, // a command type asked as a query
 		{"u-9", cmd, "orders.GetOrder", unary, reply, hubpb.ErrorCode_NO_HANDLER, ""},   // a query type sent as a command
+		{"u-10", cmd, "orders.ListOrders", unary, reply, hubpb.ErrorCode_NO_HANDLER, "no handler for type orders.ListOrders"},
+		{"u-11", cmd, "orders.WatchOrders", unary, reply, hubpb.ErrorCode_NO_HANDLER, "no handler for type orders.WatchOrders"},
+		{"u-12", hubpb.RequestKind_REQUEST_KIND_UNSPECIFIED, "orders.GetOrder", unary, reply, hubpb.ErrorCode_INVALID_REQUEST,
+			"unsupported request kind REQUEST_KIND_UNSPECIFIED"}, // the enum's name, as the reference library writes it
 		// Streaming requests: a ReplyEnd (after the parts, when served).
 		{"s-1#1", qry, "orders.PlaceOrder", strm, end, hubpb.ErrorCode_NO_HANDLER, ""},
 		{"s-2#1", qry, "orders.GetOrder", strm, end, hubpb.ErrorCode_INVALID_REQUEST,

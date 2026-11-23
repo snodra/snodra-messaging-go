@@ -63,8 +63,8 @@ spot.
   permits; with several hubs ([Several hubs](https://snodra.damoreira.com/library-authors/protocol/)) a stream is
   topped up with `Permits{count, grant}` when another hub leaves, and the page does not say whether the mark follows.
 - **Settled:** the mark is the stream's `Register.initial_permits` alone, as the Kotlin library computes it; a top-up
-  raises what the hub holds (and its cap on the session), not the mark. The Rust library computes the mark from
-  everything the stream offered, top-ups included.
+  raises what the hub holds (and its cap on the session), not the mark. The Rust library changes to it (it computed
+  the mark from everything the stream offered, top-ups included).
 - **This library:** does what the Kotlin library does (`permits.go`); before, it followed the Rust library.
 - **Question:** settled; the specification's `initial_permits` is the Register's.
 
@@ -95,7 +95,7 @@ spot.
   `SNODRA_JWKS_URL`) make the registration fail, and so `Start` and `Run`; without a JWKS `CallerFrom` reports no
   caller and a warning is logged once per `App` when a token arrives (`identity.go`, `register.go`, `internal/jwt`).
   Before, it read the claims of a signed token unverified (`Caller.Verified` false, now removed) and let the guards
-  pass on them, as the Rust library and the Kotlin library (without a `JwtDecoder`) still do.
+  pass on them, as the Rust library and the Kotlin library (without a `JwtDecoder`) did; both now do as settled.
 - **Question:** settled.
 
 ### SG-7: a token endpoint that fails before any stream
@@ -139,7 +139,8 @@ spot.
   the half-close are "bounded" without a value.
 - **Reference library:** the Kotlin library waits at most 1 s for the acks, then ends every subscription it serves,
   then waits at most 5 s for the handlers in flight, then half-closes each stream and waits at most 2 s for the hub
-  to finish it. The Rust library drains the handlers for 10 s first and ends the subscriptions after.
+  to finish it. The Rust library drained the handlers for 10 s first and ended the subscriptions after; it changes to
+  the Kotlin library's order and bounds.
 - **This library:** does what the Kotlin library does, each wait also bounded by the context given to `Shutdown`
   (when it ends first the streams are dropped and `Shutdown` returns the context's error), and the subscriptions' ends
   waited for at most 2 s more after the drain (`app.go`); before, it followed the Rust library.
@@ -157,7 +158,7 @@ spot.
   `NO_HANDLER`. One deadline bounds the call: when no hub can take the request it waits for one, and it starts no new
   hop, once its chosen timeout (5 s without one) has passed since it began; so a call lasts at most that plus one
   hop's guard. Unary requests, scatter-gathers, streams and subscriptions move alike. This is what the Kotlin library
-  does; the Rust library changes to it.
+  and the Rust library do.
 - **This library:** does so (`send.go`, `stream_client.go`), failing with `ErrNeverSent`. Before, it failed at once
   when no hub was acknowledged (outside a client certificate rollover), and later each move waited for a hub anew.
 - **Question:** settled.
@@ -204,7 +205,8 @@ spot.
   that does not check, and a request answered in-process, reach them.
 - **This library:** answers as the table says (`dispatch.go`, `subscription_handler.go`), pinned cell by cell by
   `TestEveryModeAgainstEveryHandler`. Before, it answered a streaming request to a subscription handler, and a
-  subscription request of a command type or of a type not served, with `NO_HANDLER`, as the Rust library does.
+  subscription request of a command type or of a type not served, with `NO_HANDLER`, as the Rust library did; the
+  Rust library now answers as the table says too.
 - **Question:** settled; what remains is the specification's wording of the hub's relay of a unary `Reply`, which no
   official library's handler sends to a streaming request.
 
@@ -248,8 +250,8 @@ spot.
 - **Settled:** such a close is a refusal whether or not the stream was acknowledged (kept as the latest rejection, the
   next attempt after 80 to 100 % of the backoff cap), except the hub's close of an acknowledged certificate session
   at the certificate's end (`UNAUTHENTICATED` "certificate expired"), which reconnects from the backoff floor and
-  reads the certificate files again. This is what the Kotlin library does; the Rust library takes every
-  `UNAUTHENTICATED` close of an acknowledged certificate session as that exception.
+  reads the certificate files again. This is what the Kotlin library does; the Rust library, which changes to it, took
+  every `UNAUTHENTICATED` close of an acknowledged certificate session as that exception.
 - **This library:** does what the Kotlin library does (`connection.go`); before, it followed the Rust library.
 - **Question:** settled.
 
@@ -277,8 +279,8 @@ spot.
   (`RESOURCE_EXHAUSTED`; for a subscription the hub's own reason after the colon, a subscriber buffer overflow or an
   instance's subscription limit), the hub's message for `CANCELLED` ("cancelled by the hub" when it gave none), and
   the hub's message for an unknown code (read as `HANDLER_ERROR`). A handler side answers a type it does not serve
-  with `NO_HANDLER` "no handler for type <type>". The Rust library prefixes `CANCELLED` with the type and has no
-  suffix for `RESOURCE_EXHAUSTED`.
+  with `NO_HANDLER` "no handler for type <type>". The Rust library, which changes to these texts, prefixed
+  `CANCELLED` with the type and had no suffix for `RESOURCE_EXHAUSTED`.
 - **This library:** does what the Kotlin library does (`errors.go`, `dispatch.go`); before, it followed the Rust
   library. The reasons of the `Cancel` it writes are the Kotlin library's too ("collector cancelled", "subscriber
   cancelled", "no part within the local guard", "no initial result within the local guard", "<stream or
@@ -304,23 +306,16 @@ spot.
 - **Specification:** [protocol.md, Heartbeats](https://snodra.damoreira.com/library-authors/protocol/) says a library
   "must drop a stream that brought no echo for three heartbeat intervals"; it does not say when the library looks, nor
   how far past three intervals the drop may come.
-- **Rust library:** looks on each heartbeat tick, before sending that tick's heartbeat, and drops the stream when
-  more than three intervals have passed since the last echo it received. It also does so before the `RegisterAck`,
-  with the 3 s interval and the stream's opening as the first sign of life: a stream that brings neither an ack nor
-  an echo is dropped on its 9 s tick (which, firing a little after its deadline, sees more than 9 s), before its
-  10 s handshake timeout. Since an echo normally arrives just after its tick, the drop normally comes on the fourth
-  tick after the last echoed heartbeat; a tick that fires a little late, or an echo that is unusually fast, makes the
-  third tick see "more than three intervals" and drop one tick earlier, exactly three intervals after the last echo.
-  The Kotlin library also looks on the tick, from the
-  `RegisterAck` on, and drops when the oldest unanswered heartbeat is more than three intervals old.
-- **This library:** looks on each heartbeat tick from the `RegisterAck` on, with the Rust library's comparison
-  (more than three intervals since the last echo, or since the ack), and also waits until three heartbeats sent since
-  that echo are unanswered: the drop always comes on the tick after the third unanswered heartbeat, between three and
-  four intervals after the last echo (`connection.go`, `hubSilent`). Before the `RegisterAck` it does not look: a
-  stream that brings neither an ack nor an echo is closed by the 10 s handshake timeout, about 1 s later than in the
-  Rust library (as the Kotlin library, whose ticks start at the ack).
-- **Question:** settled: this library's rule is the specification (more than three intervals since the last echo, and
-  three heartbeats unanswered; no look before the `RegisterAck`); the other libraries change to it.
+- **Settled:** a library looks on each heartbeat tick from the `RegisterAck` on and drops the stream when more than
+  three heartbeat intervals have passed since the last echo (or since the ack) and the three heartbeats sent since
+  that echo are all unanswered: the drop comes on the tick after the third unanswered heartbeat, between three and
+  four intervals after the last echo, never before three full intervals. Before the `RegisterAck` it does not look:
+  the 10 s handshake timeout closes a stream that brings neither an ack nor an echo. The Kotlin library and the Rust
+  library now do so too; before, the Rust library also looked before the ack (dropping such a stream at about 9 s)
+  and could drop exactly three intervals after the last echo, and the Kotlin library dropped when the oldest
+  unanswered heartbeat was more than three intervals old.
+- **This library:** does so (`connection.go`, `hubSilent`).
+- **Question:** settled.
 
 ### SG-20: the static token file
 
@@ -355,29 +350,28 @@ spot.
 - **Specification:** [protocol.md, Several hubs](https://snodra.damoreira.com/library-authors/protocol/) says a later
   target answering a `hub_id` another target owns "is closed and parked [...] and is retried only once the owner is
   gone".
-- **Rust library:** closes such a target for good: it is never retried, also when the owner later answers
-  another id; with a `dns:///` target it is dropped once its address leaves the answer. An instance behind aliases or
-  load-balanced addresses can so stay one hub short after a rolling restart of the hubs.
+- **Rust library:** closed such a target for good (never retried, also when the owner later answered another id), so
+  an instance behind aliases could stay one hub short after a rolling restart of the hubs; it now parks and retries
+  it as settled.
 - **This library:** follows the specification, as the Kotlin library does (`pool.go`, `connection.go`): the
   duplicate's stream is closed and its address parked (no stream, not counted in the permit split, not in the hub ids
   or the status); once no kept connection owns that hub id any more (the owner now answers another id, or its address
   left the DNS answer and is being drained), the parked address is connected again at once, unless its own address
   left the DNS answer.
-- **Question:** settled: parked and retried as this library does; the Rust library changes to it.
+- **Question:** settled: parked and retried as this library and the Kotlin library do, and now the Rust library.
 
 ### SG-23: the permit split during a client certificate rollover with several hubs
 
 - **Specification:** [protocol.md, Several hubs](https://snodra.damoreira.com/library-authors/protocol/) counts in N
   the hubs that are live or on their first connect attempt, and says "a hub that joins or returns gets
   `ceil(max / N)` on its new stream".
-- **Rust library:** takes a hub being rolled over to a renewed client certificate out of N while another hub
-  serves; the rolled hub's new `Register` therefore offers `ceil(max / (N - 1))` (5 of 5 with two hubs and a
-  capacity of 5) and the other hubs are topped up meanwhile.
+- **Rust library:** took a hub being rolled over to a renewed client certificate out of N while another hub served
+  (its new `Register` offered `ceil(max / (N - 1))`, 5 of 5 with two hubs and a capacity of 5); it now keeps it
+  counted, as settled.
 - **This library:** keeps counting the rolled hub, as the Kotlin library does: its new `Register` offers
   `ceil(max / N)` (3 of 5); the other hubs are topped up once its old stream has ended, as in both libraries
   (`pool.go`).
-- **Question:** settled: the rolled hub stays counted, as in this library and the Kotlin library; the Rust library
-  changes to it.
+- **Question:** settled: the rolled hub stays counted, as in all three libraries.
 
 ### SG-24: the names of the telemetry
 

@@ -367,3 +367,21 @@ func TestTheGuardsRunAfterTheDecoding(t *testing.T) {
 	ws.Send(t, subscriptionRequest("w#2", "t", map[string]string{"authorization": bearer}))
 	is(t, nextEnd(t, ws).GetError().GetCode(), hubpb.ErrorCode_PERMISSION_DENIED)
 }
+
+// The scheme of the authorization header is read in any letter case, as the reference library
+// reads it.
+func TestTheBearerSchemeInAnyCase(t *testing.T) {
+	key, _ := testKeys(t)
+	srv, _ := testJWKS(t)
+	s, callers := guarded(t, []Option{JWKS(srv.URL, testIssuer)}, RequireAuthenticated())
+	tok := mint(t, key, "k1", userClaims("u-1", time.Minute, nil))
+	for _, scheme := range []string{"Bearer ", "bearer ", "BEARER ", "bEaReR "} {
+		code, msg := placeOrder(t, s, scheme+tok, `{}`)
+		if code != 0 {
+			t.Fatalf("%q: %v %s", scheme, code, msg)
+		}
+		is(t, receive(t, callers).Subject, "u-1")
+	}
+	code, _ := placeOrder(t, s, "Bearer"+tok, `{}`) // no space: not a bearer token
+	is(t, code, hubpb.ErrorCode_UNAUTHENTICATED)
+}

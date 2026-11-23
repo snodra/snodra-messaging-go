@@ -10,7 +10,8 @@ import (
 
 // handlerConfig is what the [HandlerOption]s of a registration set.
 type handlerConfig struct {
-	// guards must all accept the caller before the payload is decoded; none: any caller.
+	// guards must all accept the caller once the payload is decoded (an anonymous caller of a
+	// guarded handler is refused before); none: any caller.
 	guards []func(Caller) bool
 	// shared registers a query in Register.shared_query_types ([Shared]).
 	shared bool
@@ -92,11 +93,11 @@ func (e *decodeError) Unwrap() error { return e.err }
 // decoded into a fresh C. R is the answer: [Empty] (or a nil pointer) answers {}.
 //
 // Handlers are registered before [App.Start]. A registration error (after Start:
-// [ErrRegistrationClosed]; a type registered twice, as a command and a query, an empty type
-// name, an interface type parameter, a nil handler, a [RequireCaller] without a function, a guard
-// without [JWKS], a command with [Shared]) is returned, and also kept: Start returns every one of them, joined,
-// and does not start.
-// See https://snodra.damoreira.com/library-authors/protocol/ (Handling a request).
+// [ErrRegistrationClosed]; a type registered twice, as a command and a query, an empty type name,
+// an interface type parameter, a nil handler, a [RequireCaller] without a function, a guard without
+// [JWKS], a command with [Shared]) is returned, and also kept: Start returns every one of them,
+// joined, and does not start. See https://snodra.damoreira.com/library-authors/protocol/ (Handling
+// a request).
 func HandleCommand[C Message, R any](app *App, h func(context.Context, C) (R, error), opts ...HandlerOption) error {
 	return register(app, kindCommand, h, opts)
 }

@@ -79,21 +79,19 @@ func (s *service) echo(ctx context.Context, payload []byte) EchoAnswer {
 	return a
 }
 
-// registerGuarded registers conformance.Guarded: for an authenticated caller that is not the
-// subject the contract names as refused. A guard needs the issuer's keys; without them (the
-// runner gives them only to the checks that call Guarded) no caller can be verified, so the
-// handler refuses every one itself.
+// registerGuarded registers conformance.Guarded, for an authenticated caller that is not the
+// subject the contract names as refused, when the runner gives the issuer's keys: a guard needs
+// them. Without them (the runner gives them only to the checks that call Guarded) it is not
+// registered at all, as in the reference service, and a call of it is NO_HANDLER.
 func registerGuarded(app *snodra.App, e env) error {
 	if e.jwksURL == "" {
-		return snodra.HandleCommand(app, func(context.Context, Guarded) (GuardedAnswer, error) {
-			return GuardedAnswer{}, snodra.Unauthenticated("handler requires authentication")
-		})
+		return nil
 	}
 	return snodra.HandleCommand(app, guarded, snodra.RequireCaller(func(c snodra.Caller) bool { return c.Subject != "conformance-refused" }))
 }
 
-// guarded answers the count and the caller's subject; its guard ran before the payload was
-// decoded.
+// guarded answers the count and the caller's subject: an anonymous caller was refused before
+// the payload was decoded, the guard ran after it.
 func guarded(ctx context.Context, m Guarded) (GuardedAnswer, error) {
 	c, _ := snodra.CallerFrom(ctx)
 	return GuardedAnswer{Count: m.Count, User: c.Subject}, nil

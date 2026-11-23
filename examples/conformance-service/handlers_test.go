@@ -47,7 +47,11 @@ func started(t *testing.T, e env) (*snodra.App, *fakehub.Hub, *fakehub.Stream) {
 	})
 	s := hub.Next(t)
 	r := s.RecvRegister(t)
-	if got := strings.Join(r.GetCommandTypes(), ","); got != "conformance.Done,conformance.Echo,conformance.Emit,conformance.Fail,conformance.Guarded,conformance.Relay,conformance.Send,conformance.Sleep,conformance.Strict" {
+	commands := "conformance.Done,conformance.Echo,conformance.Emit,conformance.Fail,conformance.Relay,conformance.Send,conformance.Sleep,conformance.Strict"
+	if e.jwksURL != "" { // Guarded only with the issuer's keys
+		commands = "conformance.Done,conformance.Echo,conformance.Emit,conformance.Fail,conformance.Guarded,conformance.Relay,conformance.Send,conformance.Sleep,conformance.Strict"
+	}
+	if got := strings.Join(r.GetCommandTypes(), ","); got != commands {
 		t.Fatalf("command types %s", got)
 	}
 	if got := strings.Join(r.GetQueryTypes(), ","); got != "conformance.EchoQuery,conformance.Outcome,conformance.SleepQuery,conformance.Stream,conformance.View,conformance.Watch" {
@@ -449,16 +453,16 @@ func TestGuardedNeedsAnAcceptedCaller(t *testing.T) {
 	}
 }
 
-// Without a JWKS no caller can be verified: the service still starts, and Guarded refuses
-// every caller.
-func TestGuardedWithoutAJWKSRefusesEveryCaller(t *testing.T) {
+// Without a JWKS no caller can be verified: the service still starts, without Guarded (as the
+// reference service), so a call of it is NO_HANDLER.
+func TestGuardedWithoutAJWKSIsNotServed(t *testing.T) {
 	iss := newIssuer(t)
 	app, _, s := started(t, env{service: "conformance-go", instance: "i-1", capacity: 4})
 	s.Ack(t, fakehub.Ack("hub-1"))
 	ready(t, app)
 	for _, headers := range []map[string]string{nil, {"authorization": "Bearer " + iss.token(t, "alice")}} {
-		if e := call(t, s, hubpb.RequestKind_COMMAND, "conformance.Guarded", `{"count":2}`, headers).GetError(); e.GetCode() != hubpb.ErrorCode_UNAUTHENTICATED {
-			t.Fatalf("Guarded %v: %v, want UNAUTHENTICATED", headers, e)
+		if e := call(t, s, hubpb.RequestKind_COMMAND, "conformance.Guarded", `{"count":2}`, headers).GetError(); e.GetCode() != hubpb.ErrorCode_NO_HANDLER {
+			t.Fatalf("Guarded %v: %v, want NO_HANDLER", headers, e)
 		}
 	}
 }

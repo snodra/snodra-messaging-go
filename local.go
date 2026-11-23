@@ -9,11 +9,11 @@ import (
 	"github.com/snodra/snodra-messaging-go/internal/uuid"
 )
 
-// localHandler is the handler of this instance that answers a call of kind (a [Send] or a
-// [Query]) of m in-process, and m's type; nil when the call goes through a hub: with
-// [AlwaysRouteThroughHub], for a type this instance does not handle in that kind, and for a [Shared]
-// query type (the hub spreads it over every owner, this instance included). The handler of a
-// query type may be a streaming or a subscription query's: it answers INVALID_REQUEST, as through
+// localHandler is the handler of this instance that answers a call of kind (a [Send] or a [Query])
+// of m in-process, and m's type; nil when the call goes through a hub: with
+// [AlwaysRouteThroughHub], for a type this instance does not handle in that kind, and for a
+// [Shared] query type (the hub spreads it over every owner, this instance included). The handler of
+// a query type may be a streaming or a subscription query's: it answers INVALID_REQUEST, as through
 // the hub.
 func (a *App) localHandler(kind hubpb.RequestKind, m Message) (*handler, string) {
 	if a == nil || a.cfg.alwaysRouteThroughHub || m == nil {
@@ -43,8 +43,9 @@ func (a *App) localHandler(kind hubpb.RequestKind, m Message) (*handler, string)
 // goroutine, as the reference library answers a request for a type its instance handles: no
 // hub, no permit, no handler slot, no retry, no timeout of its own (the handler runs under ctx),
 // nothing to the telemetry. The handler sees a request with a fresh id, the caller's [Header]s
-// and the correlation id; it acts for the caller of the request ctx is handling (anonymous
-// outside a handler), whose token and trace go on with the requests it sends. Its guards, its
+// and the correlation id; it acts for the caller the hub path would carry: that of the request
+// ctx is handling when [ForwardJWT] is on (anonymous outside a handler, or with it off), whose
+// token and trace go on with the requests it sends. Its guards, its
 // errors, a panic and an answer that does not decode fail the call as they would through a hub.
 func local[R any](ctx context.Context, app *App, h *handler, kind hubpb.RequestKind, typ string, m Message, opts []SendOption) (R, error) {
 	var zero R
@@ -62,7 +63,9 @@ func local[R any](ctx context.Context, app *App, h *handler, kind hubpb.RequestK
 	answer, werr := app.serveLocally(ctx, h, kind, typ, payload, cfg.headers)
 	if werr != nil {
 		if err := ctx.Err(); err != nil {
-			return zero, err // the caller's context ended the handler
+			// The caller gave up while the handler ran: as for a written request, the context's
+			// error with an unknown outcome.
+			return zero, fmt.Errorf("%w: %w", ErrOutcomeUnknown, err)
 		}
 		return zero, errorFromWire(typ, werr)
 	}
@@ -99,7 +102,11 @@ func (a *App) serveLocally(ctx context.Context, h *handler, kind hubpb.RequestKi
 	headers[correlationIDHeader] = correlation
 	scope := &handling{info: MessageInfo{ID: id, Type: typ, CorrelationID: correlation, Headers: headers}}
 	if parent != nil { // the caller of the request being handled calls on
-		scope.authorization, scope.traceparent, scope.caller = parent.authorization, parent.traceparent, parent.caller
+		scope.traceparent = parent.traceparent
+		// The caller the hub path would carry: the handled request's, when its token is forwarded.
+		if a.cfg.forwardJWT {
+			scope.authorization, scope.caller = parent.authorization, parent.caller
+		}
 	}
 	if code, msg, refused := anonymousRefusal(h.cfg, scope.caller); refused {
 		return nil, fail(hubpb.ErrorCode(code), msg)

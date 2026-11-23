@@ -62,9 +62,9 @@ func MaxSubscriptions(n int) Option {
 	}
 }
 
-// Updates pushes the updates, of type U, of the subscription query type Q to the subscriptions
-// this instance serves ([HandleSubscription]). Each call reaches every open subscription of Q whose query
-// match accepts (a nil match accepts every one), in call order per subscription; a call never
+// Updates pushes the updates, of type U, of the subscription query type Q to the subscriptions this
+// instance serves ([HandleSubscription]). Each call reaches every open subscription of Q whose
+// query match accepts (a nil match accepts every one), in call order per subscription; a call never
 // waits for a hub stream. It is safe for concurrent use, also from a match.
 //
 // A subscription is reached from the moment its request is read: what is emitted before its
@@ -403,12 +403,12 @@ func (a *App) subscribe(req *hubpb.Request, ref *streamRef) {
 }
 
 // admitSubscription decodes the query of the registered subscription sub (h's, when it has a
-// handler) and decides its admission, in the reference library's order: the caller's token,
-// then a type not served here, then an anonymous caller of a guarded handler (before the
-// decoding's verdict: it cannot probe the query's shape), then the decoding (a decoding that
-// panics is HANDLER_ERROR "handler panicked", as for a unary handler), then the guards. Admitted, what was emitted
-// meanwhile goes out; refused, the refusal is its one ReplyEnd (none when the hub cancelled it
-// meanwhile).
+// handler) and decides its admission, in the reference library's order: the caller's token, then a
+// type not served here, then an anonymous caller of a guarded handler (before the decoding's
+// verdict: it cannot probe the query's shape), then the decoding (a decoding that panics is
+// HANDLER_ERROR "handler panicked", as for a unary handler), then the guards. Admitted, what was
+// emitted meanwhile goes out; refused, the refusal is its one ReplyEnd (none when the hub cancelled
+// it meanwhile).
 func (a *App) admitSubscription(req *hubpb.Request, ref *streamRef, h *handler, sub *servedSubscription, unserved *hubpb.Error) {
 	id := req.GetId()
 	defer sub.settle(nil) // whatever happens: an Emit never waits for it for ever

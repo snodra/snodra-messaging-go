@@ -86,14 +86,15 @@ func MaxResults(n uint32) SendOption { return func(c *sendConfig) { c.maxResults
 // https://snodra.damoreira.com/library-authors/protocol/ (Requests).
 //
 // A command of a type this instance handles itself is answered in-process, unless
-// [AlwaysRouteThroughHub] is on: its handler runs on the caller's goroutine under ctx, with no hub, no
-// permit and no handler slot ([MaxConcurrent] does not count it), also before [App.Start] and
-// after [App.Shutdown]. The handler sees a request with a fresh id, the call's [Header]s and the
-// correlation id (that of the request ctx is handling, else a new one); it acts for the caller of
-// the request ctx is handling, anonymous outside a handler, whose token and trace go on with the
-// requests it sends; its guards apply. [RoutingKey], [Timeout], [Priority] and retries do not apply,
-// and the telemetry records nothing. Its error is the [*Error] the hub would have relayed (a panic
-// is HANDLER_ERROR "handler panicked"); when ctx ended and the handler failed, ctx's error.
+// [AlwaysRouteThroughHub] is on: its handler runs on the caller's goroutine under ctx, with no
+// hub, no permit and no handler slot ([MaxConcurrent] does not count it), also before
+// [App.Start] and after [App.Shutdown]. The handler sees a request with a fresh id, the call's
+// [Header]s and the correlation id (that of the request ctx is handling, else a new one); it acts
+// for the caller the hub path would carry (that of the request ctx is handling when [ForwardJWT]
+// is on; anonymous outside a handler or with it off), and its guards apply. [RoutingKey],
+// [Timeout], [Priority] and retries do not apply, and the telemetry records nothing. Its error is
+// the [*Error] the hub would have relayed (a panic is HANDLER_ERROR "handler panicked"); when ctx
+// ended while the handler failed, ctx's error with [ErrOutcomeUnknown], as for a written request.
 func Send[R any](ctx context.Context, app *App, cmd Message, opts ...SendOption) (R, error) {
 	return request[R](ctx, app, hubpb.RequestKind_COMMAND, cmd, opts)
 }
@@ -577,6 +578,7 @@ func (a *App) write(ctx context.Context, tmpl *hubpb.Request, chosen time.Durati
 		return nil, 0, nil, fmt.Errorf("%w: the app is not started (sending %s)", ErrNeverSent, typ)
 	}
 	for {
+		changed := p.liveChange() // taken before the try: a change during it wakes the wait
 		ref, guard, conn, err := a.writeOnce(ctx, p, tmpl, chosen, c, skip)
 		if err == nil || ctx.Err() != nil || len(skip) > 0 {
 			return ref, guard, conn, err
@@ -588,8 +590,11 @@ func (a *App) write(ctx context.Context, tmpl *hubpb.Request, chosen time.Durati
 		if left <= 0 {
 			return ref, guard, conn, err
 		}
-		timer := time.NewTimer(min(left, rollPoll))
+		// Woken when the live hubs change; the poll only backs that up.
+		timer := time.NewTimer(min(left, hubPoll))
 		select {
+		case <-changed:
+			timer.Stop()
 		case <-timer.C:
 		case <-ctx.Done():
 			timer.Stop()

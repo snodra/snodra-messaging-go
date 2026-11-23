@@ -616,6 +616,9 @@ func (c *hubConn) setRolling(on bool) {
 	c.mu.Lock()
 	c.rolling = on
 	c.mu.Unlock()
+	if c.pool != nil {
+		c.pool.signal() // the hubs a request may go to changed
+	}
 }
 
 // isRolling is true while the connection is being rolled over to a renewed certificate.

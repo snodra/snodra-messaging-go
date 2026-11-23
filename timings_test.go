@@ -39,6 +39,7 @@ func TestDefaultTimings(t *testing.T) {
 	is(t, tokenWakeInterval, 5*s)
 	is(t, rollSettle, 50*ms)
 	is(t, rollPoll, 10*ms)
+	is(t, hubPoll, 100*ms)
 	is(t, d.tokenFetchWait, 11*s)
 	is(t, d.creditWait, 10*time.Minute)
 	is(t, defaultCredit, uint32(64))

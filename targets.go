@@ -39,11 +39,11 @@ func (t target) hostPort() (host, port string) {
 
 const dnsScheme = "dns:///"
 
-// parseTargets reads the hub addresses ([Hubs], SNODRA_SERVER_ADDRESS): a list of host:port
-// (a static://, http:// or https:// prefix optional, static:// also before the other two), in
-// order, repeats removed (host:port, static:// and http:// name one target; https:// another, as
-// in the reference library); or exactly one dns:///name:port. It fails when they name no hub, when a DNS target is
-// not alone, or when an entry lacks a host or a port.
+// parseTargets reads the hub addresses ([Hubs], SNODRA_SERVER_ADDRESS): a list of host:port (a
+// static://, http:// or https:// prefix optional, static:// also before the other two), in order,
+// repeats removed (host:port, static:// and http:// name one target; https:// another, as in the
+// reference library); or exactly one dns:///name:port. It fails when they name no hub, when a DNS
+// target is not alone, or when an entry lacks a host or a port.
 func parseTargets(addresses []string) ([]target, error) {
 	var entries []string
 	for _, a := range addresses {

@@ -60,6 +60,30 @@ type pool struct {
 	closed   bool                // the shutdown began: no connection is added
 
 	turn atomic.Uint64 // the round-robin position
+
+	sigMu sync.Mutex
+	sig   chan struct{} // closed (and replaced) when the live hubs may have changed
+}
+
+// liveChange is a channel closed the next time the live hubs may change: a call waiting for a
+// hub waits on it.
+func (p *pool) liveChange() <-chan struct{} {
+	p.sigMu.Lock()
+	defer p.sigMu.Unlock()
+	if p.sig == nil {
+		p.sig = make(chan struct{})
+	}
+	return p.sig
+}
+
+// signal wakes the calls waiting for a hub.
+func (p *pool) signal() {
+	p.sigMu.Lock()
+	if p.sig != nil {
+		close(p.sig)
+		p.sig = nil
+	}
+	p.sigMu.Unlock()
 }
 
 func newPool(a *App) *pool {
@@ -268,6 +292,7 @@ func (p *pool) initialPermits(c *hubConn) uint32 {
 // permits are never revoked), and every live hub gets an InstanceStatus at once, as in the
 // reference library.
 func (p *pool) changed() {
+	defer p.signal()
 	defer p.reportStatus()
 	share := shareOf(p.app.cfg.maxConcurrent, p.hubCount(nil))
 	for _, h := range p.live() {

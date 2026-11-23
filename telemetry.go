@@ -292,11 +292,11 @@ func refusedOrCancelled(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.As(err, &refused)
 }
 
-// requestOutcome is the outcome label of a call that ended with err (nil: "ok"). It is the
-// hub's outcome names for an [*Error], "unavailable" when no hub took the request or its stream
-// broke before the answer, "invalid_request" for an answer that does not decode, "timeout" for
-// the caller's own deadline, and "error" for anything else. The caller's own cancellation is not an outcome: a
-// call it ends records nothing (see requestDone).
+// requestOutcome is the outcome label of a call that ended with err (nil: "ok"). It is the hub's
+// outcome names for an [*Error], "unavailable" when no hub took the request or its stream broke
+// before the answer, "invalid_request" for an answer that does not decode, "timeout" for the
+// caller's own deadline, and "error" for anything else. The caller's own cancellation is not an
+// outcome: a call it ends records nothing (see requestDone).
 func requestOutcome(err error) string {
 	if err == nil {
 		return "ok"

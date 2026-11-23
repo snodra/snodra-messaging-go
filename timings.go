@@ -123,6 +123,9 @@ const (
 	rollSettle = 50 * time.Millisecond
 	// rollPoll is how often a rolled hub's requests are counted again.
 	rollPoll = 10 * time.Millisecond
+	// hubPoll is how often a call waiting for a hub looks again when no change of the live hubs
+	// woke it.
+	hubPoll = 100 * time.Millisecond
 )
 
 // defaultTimings are the shipped values.

@@ -216,10 +216,84 @@ func TestALocalCallRunsUnderTheCallersContext(t *testing.T) {
 	}()
 	<-started
 	cancel()
-	is(t, errors.Is(receive(t, done), context.Canceled), true)
+	// As a written request whose caller gave up: the context's error, and an unknown outcome.
+	err := receive(t, done)
+	is(t, errors.Is(err, context.Canceled), true)
+	is(t, errors.Is(err, ErrOutcomeUnknown), true)
 
 	// A context that ended before the call: the handler never runs.
-	_, err := Send[Empty](ctx, app, PlaceOrder{})
+	_, err = Send[Empty](ctx, app, PlaceOrder{})
 	is(t, errors.Is(err, ErrNeverSent), true)
 	is(t, errors.Is(err, context.Canceled), true)
+}
+
+// A local call acts for the caller the hub path would carry: the handled request's caller when
+// its token is forwarded, nobody when ForwardJWT is off.
+func TestALocalCallSeesTheCallerTheHubWouldCarry(t *testing.T) {
+	srv, _ := testJWKS(t)
+	key, _ := testKeys(t)
+	token := "Bearer " + mint(t, key, "k1", userClaims("alice", time.Hour, nil))
+	seen := func(t *testing.T, forward, throughHub bool) string {
+		hub := fakehub.Start(t)
+		callers := make(chan string, 2)
+		_, s := serving(t, hub, func(app *App) {
+			is(t, HandleCommand(app, func(ctx context.Context, p PlaceOrder) (Receipt, error) {
+				return Send[Receipt](ctx, app, ShipOrder{OrderID: p.OrderID})
+			}), nil)
+			is(t, HandleCommand(app, func(ctx context.Context, _ ShipOrder) (Receipt, error) {
+				c, _ := CallerFrom(ctx)
+				callers <- c.Subject
+				return Receipt{}, nil
+			}), nil)
+		}, JWKS(srv.URL, testIssuer), ForwardJWT(forward), AlwaysRouteThroughHub(throughHub))
+		s.Send(t, fakehub.Forward(&hubpb.Request{Id: "r-1", Kind: hubpb.RequestKind_COMMAND, Type: "orders.PlaceOrder",
+			Payload: []byte(`{}`), Headers: map[string]string{"authorization": token}}))
+		if throughHub { // the hub forwards ShipOrder back to this instance, as it was sent
+			r := s.RecvRequest(t)
+			s.Send(t, fakehub.Forward(&hubpb.Request{Id: "r-2", Kind: r.GetKind(), Type: r.GetType(),
+				Payload: r.GetPayload(), Headers: r.GetHeaders()}))
+			reply := nextReply(t, s)
+			is(t, reply.GetRequestId(), "r-2")
+			s.Send(t, replyTo(r.GetId(), string(reply.GetPayload())))
+		}
+		is(t, nextReply(t, s).GetRequestId(), "r-1")
+		return receive(t, callers)
+	}
+	for _, forward := range []bool{true, false} {
+		viaHub := seen(t, forward, true)
+		local := seen(t, forward, false)
+		if local != viaHub {
+			t.Fatalf("ForwardJWT(%v): the local handler saw %q, through the hub %q", forward, local, viaHub)
+		}
+	}
+	is(t, seen(t, true, false), "alice")
+	is(t, seen(t, false, false), "")
+}
+
+// The handler of a local call gets its own copy of the message, through the codec: what it
+// changes the caller never sees, as through a hub.
+func TestALocalCallGoesThroughTheCodec(t *testing.T) {
+	app := newApp(t, Hubs("127.0.0.1:1"))
+	is(t, HandleCommand(app, func(_ context.Context, c *CancelOrder) (Empty, error) {
+		c.ID = "changed by the handler"
+		return Empty{}, nil
+	}), nil)
+	is(t, HandleQuery(app, listOrders2), nil)
+	msg := &CancelOrder{ID: "o-1"}
+	_, err := Send[Empty](context.Background(), app, msg)
+	is(t, err, nil)
+	is(t, msg.ID, "o-1")
+	// A query of a streaming type this instance serves: INVALID_REQUEST, as the hub path answers.
+	app2 := newApp(t, Hubs("127.0.0.1:1"))
+	is(t, HandleStream(app2, listOrders), nil)
+	_, err = Query[Receipt](context.Background(), app2, ListOrders{})
+	var e *Error
+	is(t, errors.As(err, &e), true)
+	is(t, e.Code, CodeInvalidRequest)
+	is(t, e.Message, "orders.ListOrders is a streaming query: send it with Stream (mode STREAMING)")
+}
+
+// listOrders2 is a query handler of another type, so that the app has more than one handler.
+func listOrders2(_ context.Context, q GetOrder) (Receipt, error) {
+	return Receipt{OrderID: q.OrderID}, nil
 }

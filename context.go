@@ -55,9 +55,9 @@ func MessageFrom(ctx context.Context) (MessageInfo, bool) {
 	return MessageInfo{}, false
 }
 
-// CallerFrom returns who sent the request being handled, read from its forwarded token, and
-// false for an anonymous caller (the request carried no token) and outside a handler. Do not
-// change the returned Roles.
+// CallerFrom returns who sent the request being handled, read from its forwarded token verified
+// against the issuer's keys ([JWKS]), and false for an anonymous caller (no token, or no JWKS to
+// verify it) and outside a handler. Do not change the returned Roles.
 func CallerFrom(ctx context.Context) (Caller, bool) {
 	if h := handlingFrom(ctx); h != nil && h.caller != nil {
 		return *h.caller, true

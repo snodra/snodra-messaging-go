@@ -784,3 +784,35 @@ func TestInstanceStatusWhenTheLiveHubsChange(t *testing.T) {
 		return len(all) > before && slices.Equal(all[len(all)-1].GetConnectedHubIds(), []string{"hub-1"})
 	})
 }
+
+// An address that leaves the DNS answer leaves the live hubs, and the hubs that stay hear of it
+// at once in an InstanceStatus, without waiting for the next interval.
+func TestInstanceStatusAfterADNSRemoval(t *testing.T) {
+	a, b := fakehub.Start(t), fakehub.Start(t)
+	var mu sync.Mutex
+	answer := []string{a.Addr(), b.Addr()}
+	resolve := func(context.Context, string, string) ([]string, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(answer), nil
+	}
+	tm := scaled()
+	tm.dnsRefresh = 50 * ms
+	app := startApp(t, Hubs("dns:///hubs.example:7000"), withTimings(tm), withResolver(resolve)) // status every 5 s
+	registered(t, a, "hub-a")
+	sb, _ := registered(t, b, "hub-b")
+	hubIDsAre(t, app, "hub-a", "hub-b")
+	poll(t, func() bool {
+		all := sb.Statuses()
+		return len(all) > 0 && len(all[len(all)-1].GetConnectedHubIds()) == 2
+	})
+	removed := time.Now()
+	mu.Lock()
+	answer = []string{b.Addr()}
+	mu.Unlock()
+	poll(t, func() bool {
+		all := sb.Statuses()
+		return len(all) > 0 && slices.Equal(all[len(all)-1].GetConnectedHubIds(), []string{"hub-b"})
+	})
+	within(t, time.Since(removed), 0, time.Second)
+}

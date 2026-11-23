@@ -266,7 +266,7 @@ func Logger(l *slog.Logger) Option {
 }
 
 // checkBackoff refuses what cannot work: a minimum of 0 or less, a maximum below the minimum.
-// TODO(spec-gap): SG-16 (a maximum above 5 s, or below 1.25 s, is accepted as by the reference libraries).
+// TODO(spec-gap): SG-16 (a maximum above 5 s, or below 1.25 s, is accepted, as by the others).
 func checkBackoff(min, max time.Duration, setting string) error {
 	if min <= 0 {
 		return fmt.Errorf("snodra: the reconnect backoff minimum (%s) must be positive, got %v", setting, min)

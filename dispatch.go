@@ -343,7 +343,7 @@ func (a *App) lookup(req *hubpb.Request, streaming bool) (*handler, hubpb.ErrorC
 		return h, 0, ""
 	case hubpb.RequestKind_QUERY:
 	default:
-		return nil, hubpb.ErrorCode_INVALID_REQUEST, fmt.Sprintf("unsupported request kind %d", req.GetKind())
+		return nil, hubpb.ErrorCode_INVALID_REQUEST, "unsupported request kind " + req.GetKind().String()
 	}
 	switch {
 	case h == nil || h.kind == kindCommand:

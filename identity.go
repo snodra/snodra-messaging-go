@@ -36,15 +36,16 @@ func RequireAuthenticated() HandlerOption {
 
 // RequireRole lets only a caller with role run the handler: an anonymous caller is answered
 // UNAUTHENTICATED before the payload is decoded, a caller without the role PERMISSION_DENIED once
-// it decoded (a payload that does not decode is INVALID_REQUEST for any caller with a token). The roles come from the token's verified claims (see [RolesClaim]); it needs [JWKS].
+// it decoded (a payload that does not decode is INVALID_REQUEST for any caller with a token). The
+// roles come from the token's verified claims (see [RolesClaim]); it needs [JWKS].
 func RequireRole(role string) HandlerOption {
 	return RequireCaller(func(c Caller) bool { return c.HasRole(role) })
 }
 
-// RequireCaller lets only a caller allow accepts run the handler: an anonymous caller is
-// answered UNAUTHENTICATED before the payload is decoded, a caller allow refuses
-// PERMISSION_DENIED once it decoded, as in the reference library. When a handler has several of these options, every one must accept. The
-// Caller is read from the token's verified claims; it needs [JWKS].
+// RequireCaller lets only a caller allow accepts run the handler: an anonymous caller is answered
+// UNAUTHENTICATED before the payload is decoded, a caller allow refuses PERMISSION_DENIED once it
+// decoded, as in the reference library. When a handler has several of these options, every one must
+// accept. The Caller is read from the token's verified claims; it needs [JWKS].
 func RequireCaller(allow func(Caller) bool) HandlerOption {
 	return func(c *handlerConfig) {
 		if allow == nil {
@@ -115,11 +116,14 @@ func (r *identityResolver) resolve(ctx context.Context, authorization string) (*
 	if raw == "" {
 		return nil, nil
 	}
-	token, ok := strings.CutPrefix(raw, "Bearer ")
-	if !ok {
-		token, ok = strings.CutPrefix(raw, "bearer ")
+	// The scheme in any letter case, as the reference library reads it.
+	const scheme = "Bearer "
+	ok := len(raw) >= len(scheme) && strings.EqualFold(raw[:len(scheme)], scheme)
+	token := ""
+	if ok {
+		token = strings.TrimSpace(raw[len(scheme):])
 	}
-	if token = strings.TrimSpace(token); !ok || token == "" {
+	if !ok || token == "" {
 		return nil, errors.New("malformed authorization header")
 	}
 	var (
