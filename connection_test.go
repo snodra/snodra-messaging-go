@@ -31,7 +31,7 @@ func TestEveryStreamOpensWithRegisterThenHeartbeat(t *testing.T) {
 	is(t, first.GetInstanceId(), "i-1")
 	is(t, first.GetInitialPermits(), uint32(8))
 	is(t, first.GetLoadFactor(), uint32(100))
-	is(t, first.GetClientVersion(), "snodra-messaging-go/0.1.0")
+	is(t, first.GetClientVersion(), "snodra-messaging-go/"+Version)
 	is(t, first.GetTags()["zone"], "a")
 	is(t, s.Recv(t).GetHeartbeat() != nil, true)
 	s.Close(codes.Unavailable, "restart")
