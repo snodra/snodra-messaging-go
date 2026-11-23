@@ -217,16 +217,6 @@ func (p *pool) order(key string, turn bool) []*hubConn {
 	return out
 }
 
-// rolling is true while a client certificate rollover has a kept connection out of the routing.
-func (p *pool) rolling() bool {
-	for _, c := range p.all() {
-		if c.memberRole() == roleActive && c.isRolling() {
-			return true
-		}
-	}
-	return false
-}
-
 // pick is the hub a request with key goes to first (taking a round-robin turn); with none, an
 // error wrapping ErrNeverSent.
 func (p *pool) pick(key string) (*hubConn, error) {

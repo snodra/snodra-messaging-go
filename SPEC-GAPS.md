@@ -154,8 +154,11 @@ what the Kotlin library does where it differs, and what this library does. The c
   queued goes to the next hub without counting as a move. Unary requests, scatter-gathers, streams and subscriptions
   move alike.
 - **This library:** does the same (`send.go`, `stream_client.go`), failing with `ErrNeverSent`.
-- **Also:** on a move the reference library and this one send the call's chosen timeout again as `Request.timeout_ms`
-  (each hop is guarded by the full bound), while the Kotlin library sends what is left of the call's deadline.
+- **Also:** each move sends the call's chosen timeout again as `Request.timeout_ms` (each hop is guarded by the full
+  bound), and so does the walk over the hubs that answer a unary request `NO_HANDLER`. When no hub can take the
+  request (none acknowledged, or every one failed to take it), the call waits for a hub, as the Kotlin library does,
+  within its chosen timeout, else 5 s, and fails with `ErrNeverSent` when none came; before, it failed at once
+  outside a client certificate rollover.
 - **Question:** should the specification bound the moves, and with which number; and should a moved request send its
   remaining time or its timeout unchanged?
 

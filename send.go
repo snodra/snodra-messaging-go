@@ -67,8 +67,10 @@ func MaxResults(n uint32) SendOption { return func(c *sendConfig) { c.maxResults
 //   - an [*Error] (test with errors.As): the hub's or the handler's answer, by its [Code], or the
 //     library's own TIMEOUT when no answer came within the hub's bound for the request plus 1 s
 //     (a request still waiting in the library's buffer then is withdrawn and reported as TIMEOUT);
-//   - [ErrNeverSent] (test with errors.Is): no hub had an acknowledged stream, or the request was
-//     still in the library's buffer when the stream broke; the handler never saw it;
+//   - [ErrNeverSent] (test with errors.Is): no hub took the request within the call's timeout
+//     (5 s without one: a call made while no hub is acknowledged, or whose stream broke while the
+//     request was still in the library's buffer, waits for a hub and goes out on it), or the app
+//     is not started; the handler never saw it;
 //   - [ErrOutcomeUnknown]: the request was written, then its stream broke before the answer; the
 //     handler may or may not have run;
 //   - the context's error, when ctx ended first: with [ErrOutcomeUnknown] too once the request was
@@ -465,8 +467,8 @@ func (p *pendingCalls) end(e *hubpb.ReplyEnd) {
 // (https://snodra.damoreira.com/library-authors/protocol/, Several hubs): when the stream it
 // was queued on is lost before the request was written, it goes to the next hub, at most
 // maxUnwrittenMoves times; and a unary request a hub answers with NO_HANDLER (never delivered)
-// goes to each other live hub in turn, at most once each, within what is left of chosen; when
-// every hub declined, the last answer is the attempt's.
+// goes to each other live hub in turn, at most once each, while chosen lasts; when every hub
+// declined, the last answer is the attempt's. Every hop sends chosen unchanged.
 func (a *App) attempt(ctx context.Context, tmpl *hubpb.Request, chosen time.Duration) (answer, error) {
 	typ := tmpl.GetType()
 	id := uuid.New()
@@ -477,16 +479,13 @@ func (a *App) attempt(ctx context.Context, tmpl *hubpb.Request, chosen time.Dura
 	var declined []*hubConn // the hubs that answered NO_HANDLER
 	var noHandler *answer   // the last of those answers
 	for {
-		timeout := chosen
-		if noHandler != nil && chosen > 0 {
-			left := chosen - time.Since(started)
-			if left <= 0 {
-				return *noHandler, nil
-			}
-			timeout = max(left, minTimeout)
+		// A move to another hub sends the request as it was, its timeout unchanged; the walk over
+		// the hubs that answer NO_HANDLER ends with the chosen timeout.
+		if noHandler != nil && chosen > 0 && time.Since(started) >= chosen {
+			return *noHandler, nil
 		}
 		c := &call{id: id, answer: make(chan answer, 1), gather: tmpl.GetMode() == hubpb.RequestMode_SCATTER_GATHER}
-		ref, guard, conn, err := a.write(ctx, tmpl, timeout, c, declined)
+		ref, guard, conn, err := a.write(ctx, tmpl, chosen, c, declined)
 		if err != nil {
 			if noHandler != nil && ctx.Err() == nil {
 				return *noHandler, nil // no other hub left to try
@@ -561,20 +560,19 @@ func (a *App) write(ctx context.Context, tmpl *hubpb.Request, chosen time.Durati
 	if p == nil {
 		return nil, 0, nil, fmt.Errorf("%w: the app is not started (sending %s)", ErrNeverSent, typ)
 	}
-	var until time.Time // the end of a wait for a hub out of the routing for a rollover
+	var until time.Time // the end of the wait for a hub
 	for {
 		ref, guard, conn, err := a.writeOnce(ctx, p, tmpl, chosen, c, skip)
-		if err == nil || ctx.Err() != nil || len(skip) > 0 || !p.rolling() {
+		if err == nil || ctx.Err() != nil || len(skip) > 0 {
 			return ref, guard, conn, err
 		}
-		// No hub took it only because a client certificate rollover has the hub(s) out of the
-		// routing (a single hub, reconnecting with the renewed pair): wait for one, within the
-		// caller's timeout and at most rollReconnectLimit (when the rollover gives up anyway), as
-		// the reference library does.
+		// No hub took it (none is acknowledged, the hubs are reconnecting or rolled over to a
+		// renewed client certificate, the streams broke before they took it): wait for a hub, and
+		// try again, within the call's timeout, else 5 s, as the reference library does.
 		if until.IsZero() {
-			limit := a.cfg.timings.rollReconnectLimit
+			limit := defaultBudget
 			if chosen > 0 {
-				limit = min(limit, chosen)
+				limit = chosen
 			}
 			until = time.Now().Add(limit)
 		}

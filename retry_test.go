@@ -121,7 +121,9 @@ func TestACommandIsNeverRetriedAfterAnUnknownOutcome(t *testing.T) {
 	is(t, aliveFrame(s2.Recv(t)), true) // alive
 }
 
-func TestARequestNeverSentIsRetried(t *testing.T) {
+// A request still in the buffer when its stream broke waits for the next stream, within its
+// timeout, and goes out on it with its id: a move, not a retry, as in the reference library.
+func TestARequestNeverWrittenMovesToTheNextStream(t *testing.T) {
 	held := make(chan *hubpb.Request, 2)
 	release := make(chan struct{})
 	policy := RetryPolicy{MaxAttempts: 10, InitialBackoff: 50 * ms, Multiplier: 2, MaxBackoff: 200 * ms}
@@ -133,8 +135,8 @@ func TestARequestNeverSentIsRetried(t *testing.T) {
 	s2.RecvRegister(t)
 	s2.Recv(t)
 	s2.Ack(t, fakehub.Ack("hub-1"))
-	second := receive(t, held) // the retry, on the new stream
-	is(t, second.GetId() != first.GetId(), true)
+	second := receive(t, held) // the move, on the new stream
+	is(t, second.GetId(), first.GetId())
 	close(release)
 	r := s2.RecvRequest(t)
 	is(t, r.GetId(), second.GetId())

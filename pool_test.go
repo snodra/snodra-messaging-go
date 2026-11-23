@@ -386,9 +386,7 @@ func TestNoHandlerIsTriedOnTheOtherHubs(t *testing.T) {
 	st[1].Send(t, fakehub.HubError(r.GetId(), hubpb.ErrorCode_NO_HANDLER, "no handler"))
 	r1 := st[0].RecvRequest(t)
 	is(t, r1.GetId(), r.GetId())
-	if r1.GetTimeoutMs() == 0 || r1.GetTimeoutMs() > 2000 {
-		t.Fatalf("the second hub got timeout_ms %d, want what is left of 2000", r1.GetTimeoutMs())
-	}
+	is(t, r1.GetTimeoutMs(), uint32(2000)) // the request as it was, its timeout unchanged
 	st[0].Send(t, replyTo(r1.GetId(), `{"total":7}`))
 	o := await(t, sent)
 	is(t, o.err, nil)
@@ -721,13 +719,13 @@ func TestASendWaitsForALoneHubRolledOver(t *testing.T) {
 	}))
 	is(t, errors.Is(o.err, ErrNeverSent), true)
 	within(t, o.elapsed, 290*ms, 1500*ms)
-	// Without a rollover nothing waits.
+	// Without a rollover too: a call waits for a hub within its timeout.
 	c.setRolling(false)
 	o = await(t, async(func() (Empty, error) {
 		return Send[Empty](context.Background(), app, PlaceOrder{}, Timeout(300*ms))
 	}))
 	is(t, errors.Is(o.err, ErrNeverSent), true)
-	within(t, o.elapsed, 0, 100*ms)
+	within(t, o.elapsed, 290*ms, 1500*ms)
 }
 
 func TestAHubIDFreedByADuplicateRevivesTheAddressParkedBehindIt(t *testing.T) { // SG-22

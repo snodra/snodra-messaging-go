@@ -219,11 +219,11 @@ func TestNoAcknowledgedStreamIsNeverSent(t *testing.T) {
 	s.RecvRegister(t)
 	s.EchoHeartbeats(true) // echoes, but no ack
 	start := time.Now()
-	_, err = Send[Empty](ctxWithin(t, 5*time.Second), app, PlaceOrder{}, Timeout(2*time.Second))
+	_, err = Send[Empty](ctxWithin(t, 5*time.Second), app, PlaceOrder{}, Timeout(250*ms))
 	is(t, errors.Is(err, ErrNeverSent), true)
 	is(t, errors.Is(fmt.Errorf("place order: %w", err), ErrNeverSent), true) // through a wrapper
 	is(t, errors.Is(err, ErrOutcomeUnknown), false)
-	within(t, time.Since(start), 0, 100*ms) // at once: it waits for no ack
+	within(t, time.Since(start), 240*ms, 1500*ms) // it waited for an ack, within its timeout
 	s.Nothing(t, 200*ms, "request")
 	is(t, aliveFrame(s.Recv(t)), true) // the stream is alive: nothing was written to it
 }
@@ -245,10 +245,12 @@ func blockRequests(held chan<- *hubpb.Request, release <-chan struct{}) Option {
 func TestBufferedRequestIsNeverSentWhenTheStreamBreaks(t *testing.T) {
 	held := make(chan *hubpb.Request, 1)
 	app, hub, s := sending(t, fakehub.Ack("hub-1"), blockRequests(held, nil))
-	sent := async(func() (Empty, error) { return Send[Empty](ctxWithin(t, 5*time.Second), app, PlaceOrder{}) })
+	sent := async(func() (Empty, error) {
+		return Send[Empty](ctxWithin(t, 5*time.Second), app, PlaceOrder{}, Timeout(300*ms))
+	})
 	receive(t, held) // in the outbound buffer, not taken by the writer
 	s.Close(codes.Unavailable, "restart")
-	o := await(t, sent)
+	o := await(t, sent) // no hub came back within its timeout
 	is(t, errors.Is(o.err, ErrNeverSent), true)
 	is(t, errors.Is(o.err, ErrOutcomeUnknown), false)
 	is(t, waiting(app), 0)
@@ -472,7 +474,7 @@ func fullBuffer(t *testing.T, app *App) <-chan outcome[Empty] {
 		go func() { _, _ = Send[Empty](context.Background(), app, PlaceOrder{}) }() // they end with the stream
 	}
 	poll(t, func() bool { ref.mu.Lock(); defer ref.mu.Unlock(); return ref.requests == outboundLimit })
-	waiting := async(func() (Empty, error) { return Send[Empty](context.Background(), app, PlaceOrder{}) })
+	waiting := async(func() (Empty, error) { return Send[Empty](context.Background(), app, PlaceOrder{}, Timeout(300*ms)) })
 	poll(t, func() bool { ref.mu.Lock(); defer ref.mu.Unlock(); return ref.room != nil }) // it waits for room
 	return waiting
 }
@@ -512,3 +514,36 @@ func TestASendWaitingForRoomEndsWithShutdown(t *testing.T) {
 
 // aliveFrame is a heartbeat or an InstanceStatus: what a live stream sends unprompted.
 func aliveFrame(m *hubpb.ClientMessage) bool { return m.GetHeartbeat() != nil || m.GetStatus() != nil }
+
+// A call made while no hub is acknowledged waits for one, within its timeout (5 s without one),
+// as the reference library's calls do.
+func TestACallWaitsForAHubWithinItsTimeout(t *testing.T) {
+	hub := fakehub.Start(t)
+	app := startApp(t, Hubs(hub.Addr()))
+	s := hub.Next(t)
+	s.RecvRegister(t)
+	s.Recv(t) // the heartbeat after the Register
+	sent := async(func() (Empty, error) {
+		return Send[Empty](context.Background(), app, PlaceOrder{}, Timeout(3*time.Second))
+	})
+	time.Sleep(150 * ms)           // within the handshake timeout of the tests' timings (300 ms)
+	s.Ack(t, fakehub.Ack("hub-1")) // a hub comes up while the call waits
+	r := s.RecvRequest(t)
+	if r.GetTimeoutMs() < 2500 || r.GetTimeoutMs() > 3000 {
+		t.Fatalf("timeout_ms %d, want the 3 s chosen", r.GetTimeoutMs())
+	}
+	s.Send(t, replyTo(r.GetId(), `{}`))
+	is(t, await(t, sent).err, nil)
+
+	// No hub within the call's timeout: never sent, once the timeout is over.
+	s.Close(codes.Unavailable, "restarting")
+	poll(t, func() bool { return len(app.HubIDs()) == 0 })
+	start := time.Now()
+	o := await(t, async(func() (Empty, error) {
+		return Send[Empty](context.Background(), app, PlaceOrder{}, Timeout(400*ms))
+	}))
+	if !errors.Is(o.err, ErrNeverSent) {
+		t.Fatalf("got %v, want ErrNeverSent", o.err)
+	}
+	within(t, time.Since(start), 350*ms, 2*time.Second)
+}
