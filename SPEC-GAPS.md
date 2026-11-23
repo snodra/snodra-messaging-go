@@ -1,20 +1,20 @@
 # Specification gaps
 
 Places where the [library specification](https://snodra.damoreira.com/library-authors/) is silent, or where the
-reference library (the Rust library) departs from it. This library does on the wire what the reference library does,
-unless the entry says otherwise: SG-19, SG-22 and SG-23 depart from it (SG-22 and SG-23 as the Kotlin library does), and
-SG-24 records the telemetry names, scope and span that differ from it. Each entry says what the Rust library does,
-what the Kotlin library does where it differs, and what this library does. The code carries a
-`// TODO(spec-gap): SG-<n>` comment at the spot.
+reference libraries departed from it or from each other. The Kotlin library is the reference: this library does on the
+wire what the Kotlin library does, and where an entry is settled its behaviour is the specification. Each entry says
+what the Rust library and the Kotlin library do where they matter, and what this library does; SG-24 records the
+telemetry names, scope and span that differ from them. The code carries a `// TODO(spec-gap): SG-<n>` comment at the
+spot.
 
 ## Format of an entry
 
 ### SG-<n>: short title
 
 - **Specification:** what the specification says (or that it is silent).
-- **Reference library:** what the Rust library does (and the Kotlin library, where it differs).
+- **Rust library** / **Reference library:** what the other libraries do (or **Settled:** what is now the specification).
 - **This library:** what the Go code does.
-- **Question:** the open question for the specification owner.
+- **Question:** the open question, or that it is settled.
 
 ## Entries
 
@@ -22,11 +22,11 @@ what the Kotlin library does where it differs, and what this library does. The c
 
 - **Specification:** [protocol.md, Connect and register](https://snodra.damoreira.com/library-authors/protocol/)
   says a stream the hub closes with `UNAVAILABLE` "is an ordinary closure: reconnect from the backoff floor".
-- **Reference library:** goes back to the floor (500 ms) only after an attempt that reached the `RegisterAck`; an
+- **Rust library:** goes back to the floor (500 ms) only after an attempt that reached the `RegisterAck`; an
   `UNAVAILABLE` close before the ack keeps doubling the wait like any other failure.
-- **This library:** does what the reference library does (`connection.go`).
-- **Question:** does "from the backoff floor" mean a reset after every `UNAVAILABLE` close, even of a stream that was
-  never acknowledged, or only that `UNAVAILABLE` is not a refusal (no wait at the cap)?
+- **This library:** does the same, as the Kotlin library does (`connection.go`).
+- **Question:** settled: the behaviour above is the specification's reading, and the Kotlin library's (the floor comes
+  back only after an acknowledged stream; `UNAVAILABLE` is not a refusal).
 
 ### SG-2: the retry budget when the caller chose no timeout
 
@@ -34,13 +34,13 @@ what the Kotlin library does where it differs, and what this library does. The c
   says that when a library retries, "all attempts share the caller's time budget, and each attempt sends what is left
   of it as `Request.timeout_ms`, never 0"; it does not say what the budget is when the caller chose no timeout, nor
   how little of it may be left for a retry to start.
-- **Reference library:** the budget is the caller's timeout; else the hub's per-type override for the type, else
+- **Rust library:** the budget is the caller's timeout; else the hub's per-type override for the type, else
   `RegisterAck.default_timeout_ms` (from the ack of the hub the request would go to); else 5 s (no hub acknowledged
   yet). A retry starts only when at least `max(initial backoff, 250 ms)` of the budget is left after its wait;
   otherwise the call ends with the last error.
 - **This library:** does the same (`retry.go`).
-- **Question:** should the specification name the budget without a caller's timeout, and the least time left for a
-  retry?
+- **Question:** settled: the budget and the least time left above are the specification, as the Kotlin library
+  computes them (with no hub acknowledged yet, 5 s).
 
 ### SG-3: the local guards of a stream
 
@@ -48,13 +48,13 @@ what the Kotlin library does where it differs, and what this library does. The c
   client-side request guard of a request as "the hub's bound for the request + 1 s"; for a streaming query, whose
   answer is many parts, it names the hub's idle timeout ("no part within `Request.timeout_ms`", from the forward, reset
   by every part) but not how long the sender's own guard waits for the first part and between parts.
-- **Reference library:** guards a stream like the hub's idle timeout: the hub's bound plus 1 s between parts, and
+- **Rust library:** guards a stream like the hub's idle timeout: the hub's bound plus 1 s between parts, and
   twice the bound plus 1 s for the first part (the hub bounds a queue wait by the timeout, then starts its idle clock
   at the forward). When a guard fires the stream fails with `TIMEOUT` and is cancelled at the hub
   (`Cancel{reason "local guard timeout"}`), so that the handler stops holding its permit. A subscription's guard
   covers its initial result only (the bound plus 1 s).
 - **This library:** does the same (`stream_client.go`, `subscribe.go`).
-- **Question:** should the specification size the guards of a stream (first part and idle) as it sizes the unary one?
+- **Question:** settled: the guards above are the specification; the Kotlin library sizes them the same way.
 
 ### SG-4: the low-water mark of a stream that was topped up
 
@@ -73,12 +73,11 @@ what the Kotlin library does where it differs, and what this library does. The c
 - **Specification:** [protocol.md, Credentials](https://snodra.damoreira.com/library-authors/protocol/) says "both
   official libraries renew at 80 % of its lifetime", and the timing summary says "JWT renewal: at 80 % of the token's
   lifetime".
-- **Reference library:** renews when a margin of a fifth of the lifetime, at least 5 s and at most half the lifetime,
+- **Rust library:** renews when a margin of a fifth of the lifetime, at least 5 s and at most half the lifetime,
   is left: at 80 % of a lifetime of 25 s or more, at 50 % of a 10 s token (renewed after 5 s), at 4 s of an 8 s one.
   Between two renewals it waits at least 1 s. The Kotlin library computes the same margin.
-- **This library:** does what the reference libraries do (`credentials.go`, `refreshAt`).
-- **Question:** should the specification state the margin (max(20 %, 5 s), at most half the lifetime) instead of a
-  flat 80 %?
+- **This library:** does what both libraries do (`credentials.go`, `refreshAt`).
+- **Question:** settled: the margin above is the specification; the Kotlin library computes the same.
 
 ### SG-6: forwarded tokens without a JWKS
 
@@ -104,7 +103,7 @@ what the Kotlin library does where it differs, and what this library does. The c
 - **Specification:** [protocol.md, Credentials](https://snodra.damoreira.com/library-authors/protocol/) says what to
   do after the hub closed a JWT session; it says nothing of an access token that cannot be had at all (the endpoint
   refuses, answers an error or cannot be reached) when a stream is about to open.
-- **Reference library:** opens no stream (a token past its renewal margin is never presented), keeps the endpoint's
+- **Rust library:** opens no stream (a token past its renewal margin is never presented), keeps the endpoint's
   error, prefixed "no access token for <service> (<instance>):", as the connection's last rejection (a per-connection
   value that a later accepted `Register` clears, not the application-wide latest refusal of a hub), logs it at error
   once per distinct message, and retries at the ordinary backoff (500 ms doubling to 5 s), not at the cap of a
@@ -113,15 +112,15 @@ what the Kotlin library does where it differs, and what this library does. The c
 - **This library:** does the same, and since it exposes only the application-wide refusal, `App.Rejection` shows the
   failure (code `UNAUTHENTICATED`, the message naming the access token) until a newer refusal replaces it
   (`connection.go`, `credentials.go`).
-- **Question:** should the specification say that no stream is opened without a valid token, how that failure is
-  exposed, and at which backoff it is retried?
+- **Question:** settled: the behaviour above is the specification, as in the Kotlin library (which keeps the failure
+  as its connection's rejection until the endpoint answers again, SG-11).
 
 ### SG-8: the client certificate rollover
 
 - **Specification:** [writing-a-library.md, Credentials](https://snodra.damoreira.com/library-authors/writing-a-library/)
   says the official libraries "watch the files, wait a random delay so replicas do not all leave at once, and roll
   their hubs over one at a time"; it names no period, no bound of the delay and no limit of a hub's rollover.
-- **Reference library:** reads the files every 3 s; for a valid pair (past its notBefore, before its notAfter, for
+- **Rust library:** reads the files every 3 s; for a valid pair (past its notBefore, before its notAfter, for
   the service) that a registered connection does not present, waits once per pair a random delay uniform in
   `[0, min(30 s, a tenth of the presented certificate's remaining validity)]`, reads the files again, then rolls the
   connections in the order of the configured hubs, one at a time: a `Register` with no types, at most 10 s for the
@@ -151,7 +150,7 @@ what the Kotlin library does where it differs, and what this library does. The c
 - **Specification:** [protocol.md, Several hubs](https://snodra.damoreira.com/library-authors/protocol/) says a
   request never handed to a stream's transport "goes to the next hub with the same id"; it does not say how often,
   should the next stream be lost too before it writes the request.
-- **Reference library:** moves such a request at most 8 times; the ninth loss fails the call as never sent
+- **Rust library:** moves such a request at most 8 times; the ninth loss fails the call as never sent
   ("'<type>' not written: 9 hub streams lost before it was"). A request whose stream is gone before it could even be
   queued goes to the next hub without counting as a move. Unary requests, scatter-gathers, streams and subscriptions
   move alike.
@@ -168,7 +167,7 @@ what the Kotlin library does where it differs, and what this library does. The c
 
 - **Specification:** [protocol.md, Connect and register](https://snodra.damoreira.com/library-authors/protocol/) says
   the official libraries log a refusal once per distinct message "and keep it as the connection's last rejection".
-- **Reference library:** keeps two: a per-connection last rejection that a later accepted `Register` clears, and an
+- **Rust library:** keeps two: a per-connection last rejection that a later accepted `Register` clears, and an
   application-wide latest rejection (over every hub) that only a newer refusal replaces; the conformance service
   reports the application-wide one.
 - **This library:** exposes the application-wide one, `App.Rejection`, never cleared by an acceptance (`app.go`,
@@ -211,11 +210,11 @@ what the Kotlin library does where it differs, and what this library does. The c
   handler of a subscription type "recognises the initial request by its `#0` id and answers any other unary request
   with `ErrorCode.INVALID_REQUEST`"; [Scatter-gather](https://snodra.damoreira.com/library-authors/protocol/) numbers
   the targets `<id>#0`, `<id>#1`, ... too.
-- **Reference library:** recognises the initial request by the `#0` suffix alone, as the specification says, and
+- **Rust library:** recognises the initial request by the `#0` suffix alone, as the specification says, and
   notes the collision: a scatter-gather of a subscription type would have its target `<id>#0` answered with the
   initial result (and the other targets with `INVALID_REQUEST`). Only a raw client can send one: the typed calls never
   gather a subscription type. The Kotlin library recognises it by the suffix alone too.
-- **This library:** does what the reference library does (`dispatch.go`).
+- **This library:** does the same, as the Kotlin library does (`dispatch.go`).
 - **Question:** should the initial request carry something no scatter-gather target can (its own mode, or a header),
   or should the hub refuse a scatter-gather of a subscription type?
 
@@ -224,14 +223,14 @@ what the Kotlin library does where it differs, and what this library does. The c
 - **Specification:** [protocol.md, Several hubs](https://snodra.damoreira.com/library-authors/protocol/) says a hub
   whose `RegisterAck.hub_id` is empty is known by its target as `host:port`, "with a `static://` prefix (and in the
   Rust library `http://` or `https://`) stripped"; it says nothing else of those two prefixes.
-- **Reference library:** accepts `http://` and `https://` (after an optional `static://`) in the hub address list and
+- **Rust library:** accepts `http://` and `https://` (after an optional `static://`) in the hub address list and
   strips them from a target that stands for a hub id. An `https://` address is reached over TLS with the system's
   roots when no TLS is configured; with a TLS configuration every hub is reached over TLS, `http://` ones too. Without
   one, every other address is plain text, so a list may mix both. `https://h:7000` and `h:7000` are two targets
   (`static://h:7000` and `http://h:7000` are the same one as `h:7000`).
 - **This library:** does the same (`targets.go`, `tls.go`).
 - **Question:** should the prefixes, and the TLS an `https://` address implies, be part of the specification for every
-  library, or dropped from the reference library?
+  library, or dropped from the Rust library?
 
 ### SG-15: a live stream closed with a refusal code
 
@@ -253,13 +252,12 @@ what the Kotlin library does where it differs, and what this library does. The c
   says that after a refused `Register` a library "waits at least 1 s, and at most its backoff cap of at most 5 s"
   before the next attempt; [Reconnect and backoff](https://snodra.damoreira.com/library-authors/protocol/) caps the
   backoff at 5 s.
-- **Reference library:** refuses only a minimum or maximum of 0 and a minimum above the maximum. A maximum above
+- **Rust library:** refuses only a minimum or maximum of 0 and a minimum above the maximum. A maximum above
   5 s is accepted, and a refused `Register` waits 80 to 100 % of the configured maximum, without a 1 s floor (so a
   maximum of 100 ms retries a refusal every 80 to 100 ms). The Kotlin library does the same.
-- **This library:** does what the reference libraries do (`options.go`, `connection.go`); the shipped default
+- **This library:** does what both libraries do (`options.go`, `connection.go`); the shipped default
   (500 ms to 5 s) is inside the specified range, and `ReconnectBackoff` documents the range.
-- **Question:** should a library refuse (or clamp) a configured maximum above 5 s, and floor a refusal's wait at
-  1 s whatever the configuration?
+- **Question:** settled: the configured values are accepted as they are, as in the Kotlin library.
 
 ### SG-17: the message of the error codes no handler produces
 
@@ -287,19 +285,19 @@ what the Kotlin library does where it differs, and what this library does. The c
   library to validate the token "before it runs a handler that requires an authenticated caller"; it says nothing of
   a request that carries a token that fails (unreadable, expired, wrongly signed) to a handler that requires no
   caller, nor of such a request to a type the instance does not serve.
-- **Reference library:** checks the token of every request first, before it looks the handler up: a token that fails
+- **Rust library:** checks the token of every request first, before it looks the handler up: a token that fails
   is answered `UNAUTHENTICATED` whatever the handler (also instead of `NO_HANDLER`); a request without a token is an
   anonymous caller and runs. The Kotlin library does the same.
 - **This library:** does the same (`dispatch.go`, `subscription_handler.go`, `identity.go`).
-- **Question:** is a failing token `UNAUTHENTICATED` for every handler, or only for a handler that requires an
-  authenticated caller (the others running as if the request carried no token)?
+- **Question:** settled: a failing token is `UNAUTHENTICATED` before the handler lookup, for every handler and for a
+  type not served.
 
 ### SG-19: when a silent hub is dropped
 
 - **Specification:** [protocol.md, Heartbeats](https://snodra.damoreira.com/library-authors/protocol/) says a library
   "must drop a stream that brought no echo for three heartbeat intervals"; it does not say when the library looks, nor
   how far past three intervals the drop may come.
-- **Reference library:** looks on each heartbeat tick, before sending that tick's heartbeat, and drops the stream when
+- **Rust library:** looks on each heartbeat tick, before sending that tick's heartbeat, and drops the stream when
   more than three intervals have passed since the last echo it received. It also does so before the `RegisterAck`,
   with the 3 s interval and the stream's opening as the first sign of life: a stream that brings neither an ack nor
   an echo is dropped on its 9 s tick (which, firing a little after its deadline, sees more than 9 s), before its
@@ -308,14 +306,14 @@ what the Kotlin library does where it differs, and what this library does. The c
   third tick see "more than three intervals" and drop one tick earlier, exactly three intervals after the last echo.
   The Kotlin library also looks on the tick, from the
   `RegisterAck` on, and drops when the oldest unanswered heartbeat is more than three intervals old.
-- **This library:** looks on each heartbeat tick from the `RegisterAck` on, with the reference library's comparison
+- **This library:** looks on each heartbeat tick from the `RegisterAck` on, with the Rust library's comparison
   (more than three intervals since the last echo, or since the ack), and also waits until three heartbeats sent since
   that echo are unanswered: the drop always comes on the tick after the third unanswered heartbeat, between three and
   four intervals after the last echo (`connection.go`, `hubSilent`). Before the `RegisterAck` it does not look: a
   stream that brings neither an ack nor an echo is closed by the 10 s handshake timeout, about 1 s later than in the
-  reference library (as the Kotlin library, whose ticks start at the ack).
-- **Question:** should the specification name the drop moment (for example "on the first heartbeat tick after three
-  unanswered heartbeats"), so that every library drops a silent hub within the same window?
+  Rust library (as the Kotlin library, whose ticks start at the ack).
+- **Question:** settled: this library's rule is the specification (more than three intervals since the last echo, and
+  three heartbeats unanswered; no look before the `RegisterAck`); the other libraries change to it.
 
 ### SG-20: the static token file
 
@@ -323,13 +321,12 @@ what the Kotlin library does where it differs, and what this library does. The c
   says a token file "is read again before every connect, and an empty file after a good read is a rotation caught
   half way: keep the last good token"; it says nothing of a file that cannot be read or is empty when the service
   starts, nor of a token that changes in the file while a stream is registered.
-- **Reference library:** refuses to start when the file cannot be read or is empty. On every heartbeat tick of a
+- **Rust library:** refuses to start when the file cannot be read or is empty. On every heartbeat tick of a
   registered stream it reads the file again and, when it holds another non-empty token, sends it once as
   `ClientMessage.credentials` (a rotation without a reconnect); a file that cannot be read or is empty changes
   nothing. The Kotlin library does both too.
 - **This library:** does the same (`options.go`, `credentials.go`).
-- **Question:** should the specification say that a token file must hold a token at startup, and that a changed
-  token is sent on the live streams?
+- **Question:** settled: the behaviour above is the specification, as in the Kotlin library.
 
 ### SG-21: retrying a stream
 
@@ -337,22 +334,21 @@ what the Kotlin library does where it differs, and what this library does. The c
   says that when a library retries, "all attempts share the caller's time budget, and each attempt sends what is left
   of it as `Request.timeout_ms`"; it says nothing of a streaming query, whose `Request.timeout_ms` is an idle timeout
   (the longest wait for the next part), nor of when a stream stops being retried.
-- **Reference library:** retries a stream with the policy of a unary query, for the same errors, only until its first
+- **Rust library:** retries a stream with the policy of a unary query, for the same errors, only until its first
   part, a clean end or an error it does not retry; a retry is a new stream with a fresh id that sends the caller's
   chosen idle timeout again, not what is left of the budget (the budget only bounds when a retry may start). After the
   first part nothing is retried. The Kotlin library does the same. A subscription is retried the same way until its
   initial result, but each attempt sends what is left of the budget, as a unary request does: there
   `Request.timeout_ms` bounds the initial result only.
 - **This library:** does the same (`stream_client.go`; subscriptions in `subscribe.go`).
-- **Question:** should a retried stream send the remaining budget, as a unary request does, or its idle timeout
-  unchanged; and should the specification say that a stream is retried only before its first part?
+- **Question:** settled: the behaviour above is the specification, as in the Kotlin library.
 
 ### SG-22: a second target answering a hub id already served
 
 - **Specification:** [protocol.md, Several hubs](https://snodra.damoreira.com/library-authors/protocol/) says a later
   target answering a `hub_id` another target owns "is closed and parked [...] and is retried only once the owner is
   gone".
-- **Reference library:** closes such a target for good: it is never retried, also when the owner later answers
+- **Rust library:** closes such a target for good: it is never retried, also when the owner later answers
   another id; with a `dns:///` target it is dropped once its address leaves the answer. An instance behind aliases or
   load-balanced addresses can so stay one hub short after a rolling restart of the hubs.
 - **This library:** follows the specification, as the Kotlin library does (`pool.go`, `connection.go`): the
@@ -360,21 +356,21 @@ what the Kotlin library does where it differs, and what this library does. The c
   or the status); once no kept connection owns that hub id any more (the owner now answers another id, or its address
   left the DNS answer and is being drained), the parked address is connected again at once, unless its own address
   left the DNS answer.
-- **Question:** should the reference library park and retry a duplicate as the specification says?
+- **Question:** settled: parked and retried as this library does; the Rust library changes to it.
 
 ### SG-23: the permit split during a client certificate rollover with several hubs
 
 - **Specification:** [protocol.md, Several hubs](https://snodra.damoreira.com/library-authors/protocol/) counts in N
   the hubs that are live or on their first connect attempt, and says "a hub that joins or returns gets
   `ceil(max / N)` on its new stream".
-- **Reference library:** takes a hub being rolled over to a renewed client certificate out of N while another hub
+- **Rust library:** takes a hub being rolled over to a renewed client certificate out of N while another hub
   serves; the rolled hub's new `Register` therefore offers `ceil(max / (N - 1))` (5 of 5 with two hubs and a
   capacity of 5) and the other hubs are topped up meanwhile.
 - **This library:** keeps counting the rolled hub, as the Kotlin library does: its new `Register` offers
   `ceil(max / N)` (3 of 5); the other hubs are topped up once its old stream has ended, as in both libraries
   (`pool.go`).
-- **Question:** is a rolled hub a hub that "returns" (`ceil(max / N)`), or does it get the share of the hubs that
-  stayed?
+- **Question:** settled: the rolled hub stays counted, as in this library and the Kotlin library; the Rust library
+  changes to it.
 
 ### SG-24: the names of the telemetry
 

@@ -283,10 +283,8 @@ app, err := snodra.New(
 - **Errors on the wire.** A handler's error is HANDLER_ERROR unless it was made with `snodra.Unauthenticated`,
   `snodra.PermissionDenied` or `snodra.InvalidRequest`; `snodra.WithDetails` attaches machine-readable details, which only
   a HANDLER_ERROR carries.
-- **Not yet specified.** Where the specification is silent or the other libraries differ from it, this library does what
-  the Rust library does, except in SG-19, SG-22 and SG-23, where it departs from it (SG-22 and SG-23 as the Kotlin
-  library does). [SPEC-GAPS.md](SPEC-GAPS.md) records each case with what the Rust library, the Kotlin library and this
-  one do, and the question for the specification.
+- **Where the specification was silent.** This library does what the Kotlin library, the reference, does.
+  [SPEC-GAPS.md](SPEC-GAPS.md) records each case: what the libraries do, and what is now settled as the specification.
 
 ## Telemetry
 
