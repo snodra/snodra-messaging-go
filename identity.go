@@ -112,11 +112,12 @@ func newIdentityResolver(cfg config, log *slog.Logger) *identityResolver {
 // bearer token or a token that fails (without a JWKS: one that is not a signed JWS).
 // TODO(spec-gap): SG-6 (without a JWKS a token is no identity, and a guard is a startup error).
 func (r *identityResolver) resolve(ctx context.Context, authorization string) (*Caller, error) {
-	raw := strings.TrimSpace(authorization)
-	if raw == "" {
+	if strings.TrimSpace(authorization) == "" {
 		return nil, nil
 	}
-	// The scheme in any letter case, as the reference library reads it.
+	// The scheme in any letter case and at the very start of the value, as the reference library
+	// reads it: leading whitespace makes the header malformed.
+	raw := authorization
 	const scheme = "Bearer "
 	ok := len(raw) >= len(scheme) && strings.EqualFold(raw[:len(scheme)], scheme)
 	token := ""

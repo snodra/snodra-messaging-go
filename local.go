@@ -2,6 +2,7 @@ package snodra
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 
@@ -64,8 +65,8 @@ func local[R any](ctx context.Context, app *App, h *handler, kind hubpb.RequestK
 	if werr != nil {
 		if err := ctx.Err(); err != nil {
 			// The caller gave up while the handler ran: as for a written request, the context's
-			// error with an unknown outcome.
-			return zero, fmt.Errorf("%w: %w", ErrOutcomeUnknown, err)
+			// error with an unknown outcome, and the handler's own failure with them.
+			return zero, errors.Join(fmt.Errorf("%w: %w", ErrOutcomeUnknown, err), errorFromWire(typ, werr))
 		}
 		return zero, errorFromWire(typ, werr)
 	}

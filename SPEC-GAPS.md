@@ -63,8 +63,8 @@ spot.
   permits; with several hubs ([Several hubs](https://snodra.damoreira.com/library-authors/protocol/)) a stream is
   topped up with `Permits{count, grant}` when another hub leaves, and the page does not say whether the mark follows.
 - **Settled:** the mark is the stream's `Register.initial_permits` alone, as the Kotlin library computes it; a top-up
-  raises what the hub holds (and its cap on the session), not the mark. The Rust library changes to it (it computed
-  the mark from everything the stream offered, top-ups included).
+  raises what the hub holds (and its cap on the session), not the mark. Every official library does it (the Rust
+  library once computed the mark from everything the stream offered, top-ups included).
 - **This library:** does what the Kotlin library does (`permits.go`); before, it followed the Rust library.
 - **Question:** settled; the specification's `initial_permits` is the Register's.
 
@@ -139,8 +139,8 @@ spot.
   the half-close are "bounded" without a value.
 - **Reference library:** the Kotlin library waits at most 1 s for the acks, then ends every subscription it serves,
   then waits at most 5 s for the handlers in flight, then half-closes each stream and waits at most 2 s for the hub
-  to finish it. The Rust library drained the handlers for 10 s first and ended the subscriptions after; it changes to
-  the Kotlin library's order and bounds.
+  to finish it. Every official library does this: the Rust library, which once drained the handlers for 10 s first and
+  ended the subscriptions after, now follows the Kotlin library's order and bounds.
 - **This library:** does what the Kotlin library does, each wait also bounded by the context given to `Shutdown`
   (when it ends first the streams are dropped and `Shutdown` returns the context's error), and the subscriptions' ends
   waited for at most 2 s more after the drain (`app.go`); before, it followed the Rust library.
@@ -250,8 +250,8 @@ spot.
 - **Settled:** such a close is a refusal whether or not the stream was acknowledged (kept as the latest rejection, the
   next attempt after 80 to 100 % of the backoff cap), except the hub's close of an acknowledged certificate session
   at the certificate's end (`UNAUTHENTICATED` "certificate expired"), which reconnects from the backoff floor and
-  reads the certificate files again. This is what the Kotlin library does; the Rust library, which changes to it, took
-  every `UNAUTHENTICATED` close of an acknowledged certificate session as that exception.
+  reads the certificate files again. Every official library does this: the Rust library once took every `UNAUTHENTICATED` close of an acknowledged
+  certificate session as that exception, and now only the "certificate expired" one.
 - **This library:** does what the Kotlin library does (`connection.go`); before, it followed the Rust library.
 - **Question:** settled.
 
@@ -279,8 +279,9 @@ spot.
   (`RESOURCE_EXHAUSTED`; for a subscription the hub's own reason after the colon, a subscriber buffer overflow or an
   instance's subscription limit), the hub's message for `CANCELLED` ("cancelled by the hub" when it gave none), and
   the hub's message for an unknown code (read as `HANDLER_ERROR`). A handler side answers a type it does not serve
-  with `NO_HANDLER` "no handler for type <type>". The Rust library, which changes to these texts, prefixed
-  `CANCELLED` with the type and had no suffix for `RESOURCE_EXHAUSTED`.
+  with `NO_HANDLER` "no handler for type <type>". The Rust library still prefixes `CANCELLED` with the type
+  and has no suffix for `RESOURCE_EXHAUSTED` (`Handler for '<type>' is busy`); its change to these texts is not committed
+  yet, and until it is the Kotlin library's texts are the specified behaviour.
 - **This library:** does what the Kotlin library does (`errors.go`, `dispatch.go`); before, it followed the Rust
   library. The reasons of the `Cancel` it writes are the Kotlin library's too ("collector cancelled", "subscriber
   cancelled", "no part within the local guard", "no initial result within the local guard", "<stream or

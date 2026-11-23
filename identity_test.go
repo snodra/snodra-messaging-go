@@ -160,6 +160,7 @@ func TestCallerValidation(t *testing.T) {
 		{"no token", "", hubpb.ErrorCode_UNAUTHENTICATED, "handler requires authentication"},
 		{"not a JWT", "Bearer abc", hubpb.ErrorCode_UNAUTHENTICATED, "unreadable token"},
 		{"not a bearer token", "Basic dXNlcjpwYXNz", hubpb.ErrorCode_UNAUTHENTICATED, "malformed authorization header"},
+		{"leading whitespace", "  " + bearer(mint(t, key, "k1", userClaims("u-1", time.Minute, nil))), hubpb.ErrorCode_UNAUTHENTICATED, "malformed authorization header"},
 		{"expired", bearer(mint(t, key, "k1", userClaims("u-1", -10*time.Minute, nil))), hubpb.ErrorCode_UNAUTHENTICATED, "invalid token"},
 		{"unknown kid", bearer(mint(t, foreign, "k9", userClaims("u-1", time.Minute, nil))), hubpb.ErrorCode_UNAUTHENTICATED, "unknown signing key"},
 		{"foreign key under the published kid", bearer(mint(t, foreign, "k1", userClaims("u-1", time.Minute, nil))), hubpb.ErrorCode_UNAUTHENTICATED, "invalid token"},

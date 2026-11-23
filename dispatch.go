@@ -343,7 +343,7 @@ func (a *App) lookup(req *hubpb.Request, streaming bool) (*handler, hubpb.ErrorC
 		return h, 0, ""
 	case hubpb.RequestKind_QUERY:
 	default:
-		return nil, hubpb.ErrorCode_INVALID_REQUEST, "unsupported request kind " + req.GetKind().String()
+		return nil, hubpb.ErrorCode_INVALID_REQUEST, "unsupported request kind " + kindName(req.GetKind())
 	}
 	switch {
 	case h == nil || h.kind == kindCommand:
@@ -477,4 +477,13 @@ func (f *inflight) count() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.n
+}
+
+// kindName is the name of a request kind in a refusal: the enum's own, and UNRECOGNIZED for a
+// value the protocol does not define, as the reference library writes it.
+func kindName(k hubpb.RequestKind) string {
+	if _, ok := hubpb.RequestKind_name[int32(k)]; !ok {
+		return "UNRECOGNIZED"
+	}
+	return k.String()
 }

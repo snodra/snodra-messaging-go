@@ -3,6 +3,7 @@ package snodra
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -221,6 +222,28 @@ func TestALocalCallRunsUnderTheCallersContext(t *testing.T) {
 	is(t, errors.Is(err, context.Canceled), true)
 	is(t, errors.Is(err, ErrOutcomeUnknown), true)
 
+	// The handler's own *Error stays reachable with errors.As.
+	started2 := make(chan struct{})
+	is(t, HandleQuery(app, func(ctx context.Context, _ GetOrder) (Receipt, error) {
+		close(started2)
+		<-ctx.Done()
+		return Receipt{}, &Error{Code: CodeInvalidRequest, Message: "refused"}
+	}), nil)
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	done2 := make(chan error, 1)
+	go func() {
+		_, err := Query[Receipt](ctx2, app, GetOrder{})
+		done2 <- err
+	}()
+	<-started2
+	cancel2()
+	err = receive(t, done2)
+	is(t, errors.Is(err, context.Canceled), true)
+	is(t, errors.Is(err, ErrOutcomeUnknown), true)
+	var he *Error
+	is(t, errors.As(err, &he), true)
+	is(t, strings.Contains(he.Message, "refused"), true)
+
 	// A context that ended before the call: the handler never runs.
 	_, err = Send[Empty](ctx, app, PlaceOrder{})
 	is(t, errors.Is(err, ErrNeverSent), true)
@@ -278,7 +301,7 @@ func TestALocalCallGoesThroughTheCodec(t *testing.T) {
 		c.ID = "changed by the handler"
 		return Empty{}, nil
 	}), nil)
-	is(t, HandleQuery(app, listOrders2), nil)
+	is(t, HandleQuery(app, getOrderHandler), nil)
 	msg := &CancelOrder{ID: "o-1"}
 	_, err := Send[Empty](context.Background(), app, msg)
 	is(t, err, nil)
@@ -293,7 +316,7 @@ func TestALocalCallGoesThroughTheCodec(t *testing.T) {
 	is(t, e.Message, "orders.ListOrders is a streaming query: send it with Stream (mode STREAMING)")
 }
 
-// listOrders2 is a query handler of another type, so that the app has more than one handler.
-func listOrders2(_ context.Context, q GetOrder) (Receipt, error) {
+// getOrderHandler is a query handler of another type, so that the app has more than one handler.
+func getOrderHandler(_ context.Context, q GetOrder) (Receipt, error) {
 	return Receipt{OrderID: q.OrderID}, nil
 }
