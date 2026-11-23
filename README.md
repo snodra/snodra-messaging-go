@@ -151,8 +151,9 @@ order, err := snodra.Query[Receipt](ctx, app, GetOrder{OrderID: receipt.OrderID}
   path would carry (the request being handled's, when `snodra.ForwardJWT` is on; anonymous outside a handler or with it
   off); routing key, timeout, priority and retry do not apply (the caller's context bounds it), nothing goes to the
   telemetry, and its errors are those a hub would have relayed.
-  `snodra.AlwaysRouteThroughHub(true)` (`SNODRA_SERVER_ALWAYS_ROUTE_THROUGH_HUB=true`, the variable the other Snodra
-  libraries read too) sends every request through a hub. Streams, scatter-gathers and subscriptions always go through
+  `snodra.AlwaysRouteThroughHub(true)` (`SNODRA_SERVER_ALWAYS_ROUTE_THROUGH_HUB=true`, the variable the Rust library
+  reads; the Kotlin library's setting is the Spring property `snodra.messaging.hub.always-route-through-hub`) sends every
+  request through a hub. Streams, scatter-gathers and subscriptions always go through
   a hub.
 
 ## Streams, scatter-gather and subscriptions

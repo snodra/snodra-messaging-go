@@ -43,7 +43,8 @@ const defaultHubAddress = "static://snodra-server:7000"
 //   - SNODRA_SECURITY_ROLES_CLAIM: [RolesClaim] (default "roles")
 //   - SNODRA_FORWARD_JWT: [ForwardJWT], true or false (default true)
 //   - SNODRA_SERVER_ALWAYS_ROUTE_THROUGH_HUB: [AlwaysRouteThroughHub], true or false (default
-//     false)
+//     false); the Rust library reads it too, the Kotlin library has the Spring property
+//     snodra.messaging.hub.always-route-through-hub instead
 //   - SNODRA_SERVER_TOKEN, SNODRA_SERVER_TOKEN_FILE: [Token], [TokenFile]
 //   - SNODRA_SERVER_OAUTH2_TOKEN_URI: [JWT] with [NewClientCredentials], from
 //     SNODRA_SERVER_OAUTH2_CLIENT_ID (default the service name), SNODRA_SERVER_OAUTH2_CLIENT_SECRET
