@@ -336,8 +336,10 @@ runner and fails when a check fails or is skipped, and keeps the runner's report
 
 Unit tests need no Docker (`go test -race ./...`, in this module and in `observability/`); they run against an in-process scripted
 hub. The two modules form a workspace ([`go.work`](go.work)), so `observability/` builds and tests against the root module
-next to it; consumers never read that file. `go mod tidy` ignores the workspace: in `observability/` it resolves the root
-module at the released version its `go.mod` requires.
+next to it; consumers never read that file. `go mod tidy` and `go get` ignore the workspace: in `observability/` they
+resolve the root module at the released version its `go.mod` requires, from the network (before the first release they
+cannot resolve it at all). Build and test there with the workspace; let a release update that requirement. `go.work.sum`
+is ignored.
 
 ## Releases
 
@@ -351,9 +353,11 @@ tags that one commit twice, because each module has its own tag:
 
 The release commit writes `X.Y.Z` into `Version` (`version.go`, the client version sent to the hub), makes
 `observability/go.mod` require the root module at `vX.Y.Z` with the root module's hashes in `observability/go.sum`, and
-moves the `go.work` replacement to that version. Before anything is pushed, both modules are built, vetted and tested as
-a consumer gets them (the workspace off, the root module fetched from the new tag), and the commit and both tags are then
-pushed together or not at all. The release workflow has the Go proxy and the checksum database fetch both versions,
+moves the `go.work` replacement to that version (`scripts/release-commit.sh`). Before anything is pushed, both modules
+are built, vetted and their whole test suites run as a consumer gets them: the workspace off, the root module fetched
+from the new tag (`scripts/release-check.sh`). A last job, which builds and runs nothing, checks that it received exactly
+the commit and tags that were made and tested, one commit on top of the tested `main`, and pushes the commit and both
+tags together or not at all. Only that job can push. The release workflow has the Go proxy and the checksum database fetch both versions,
 checks that an empty module resolves and builds them, and creates the GitHub release. Pull before you push: `main` then
 carries that commit.
 
