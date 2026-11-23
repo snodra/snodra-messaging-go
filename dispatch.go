@@ -293,12 +293,38 @@ func (a *App) lookup(req *hubpb.Request, streaming bool) (*handler, hubpb.ErrorC
 // the handler or of its error, is HANDLER_ERROR "handler panicked", the reference library's
 // text: the panic value and the stack go to the log only.
 func (a *App) run(ctx context.Context, h *handler, req *hubpb.Request, scope *handling) (payload []byte, werr *hubpb.Error) {
+	var done func(error)
+	defer func() { // after recoverHandler: werr is a panic's too
+		if done != nil {
+			done(handlingErr(werr))
+		}
+	}()
 	defer a.recoverHandler(req, &werr)
+	ctx, done = a.tel.startHandling(ctx, handlingOf(req, scope))
 	payload, err := h.invoke(withHandling(ctx, scope), a.cfg.codec, req.GetPayload())
 	if err != nil {
 		return nil, handlerFailure(req.GetId(), err)
 	}
 	return payload, nil
+}
+
+// handlingOf is what the telemetry is told of the request req about to be handled, with its
+// scope.
+func handlingOf(req *hubpb.Request, scope *handling) Handling {
+	h := Handling{Type: req.GetType(), Kind: kindLabel(req.GetKind() == hubpb.RequestKind_COMMAND),
+		Traceparent: scope.traceparent}
+	if h.Traceparent != "" {
+		h.Tracestate = req.GetHeaders()[tracestateHeader]
+	}
+	return h
+}
+
+// handlingErr is the error of a handling that answered werr (nil: it succeeded).
+func handlingErr(werr *hubpb.Error) error {
+	if werr == nil {
+		return nil
+	}
+	return errors.New(werr.GetMessage())
 }
 
 // recoverHandler, deferred, turns a panic of the handler of req into HANDLER_ERROR "handler

@@ -276,7 +276,14 @@ func (a *App) serveStream(run *runningRequest, req *hubpb.Request, ref *streamRe
 // runStream runs the streaming handler h on req under recover: nil when it ended cleanly, else
 // the error to end the stream with ("handler panicked" for a panic, as for a unary handler).
 func (a *App) runStream(ctx context.Context, h *handler, req *hubpb.Request, scope *handling, out *streamOut) (werr *hubpb.Error) {
+	var done func(error)
+	defer func() { // after recoverHandler: werr is a panic's too
+		if done != nil {
+			done(handlingErr(werr))
+		}
+	}()
 	defer a.recoverHandler(req, &werr)
+	ctx, done = a.tel.startHandling(ctx, handlingOf(req, scope))
 	if err := h.stream(withHandling(ctx, scope), a.cfg.codec, req.GetPayload(), out); err != nil {
 		return handlerFailure(req.GetId(), err)
 	}

@@ -27,6 +27,7 @@ type config struct {
 	logger           *slog.Logger
 	codec            PayloadCodec
 	timings          timings
+	telemetry        Instrumentation // nil: nothing is reported
 
 	defaultTimeout time.Duration    // the sends' timeout when a call chooses none; 0: none
 	retry          *RetryPolicy     // the sends' retry policy; nil: no retry

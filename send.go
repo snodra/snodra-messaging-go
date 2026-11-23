@@ -93,9 +93,20 @@ func Query[R any](ctx context.Context, app *App, q Message, opts ...SendOption) 
 }
 
 // request is a call: its settings, the attempts under the retry policy, the answer decoded.
-func request[R any](ctx context.Context, app *App, kind hubpb.RequestKind, m Message, opts []SendOption) (R, error) {
+func request[R any](ctx context.Context, app *App, kind hubpb.RequestKind, m Message, opts []SendOption) (_ R, err error) {
 	var zero R
-	out, err := prepare(ctx, app, kind, hubpb.RequestMode_UNARY, m, opts)
+	var tel *telemetry // nil for a nil app: prepare fails
+	if app != nil {
+		tel = app.tel
+	}
+	started := tel.now()
+	var out *outgoing
+	defer func() { // one record per call, retries included
+		if out != nil && out.typ != "" {
+			tel.requestDone(kindLabel(kind == hubpb.RequestKind_COMMAND), out.typ, started, err)
+		}
+	}()
+	out, err = prepare(ctx, app, kind, hubpb.RequestMode_UNARY, m, opts)
 	if err != nil {
 		return zero, err
 	}
@@ -111,7 +122,7 @@ func request[R any](ctx context.Context, app *App, kind hubpb.RequestKind, m Mes
 	}
 	r, err := decodeAnswer[R](app.cfg.codec, answer)
 	if err != nil {
-		return zero, fmt.Errorf("snodra: cannot decode the answer of %s: %w", out.typ, err)
+		return zero, &undecodableReply{typ: out.typ, err: err}
 	}
 	return r, nil
 }
@@ -144,7 +155,8 @@ type outgoing struct {
 }
 
 // prepare checks a call of m in mode with opts and builds what its attempts send. Nothing is
-// sent when it fails.
+// sent when it fails; the outgoing it returns then holds the message type once that is known
+// (for the telemetry), nothing else.
 func prepare(ctx context.Context, app *App, kind hubpb.RequestKind, mode hubpb.RequestMode, m Message, opts []SendOption) (*outgoing, error) {
 	if app == nil {
 		return nil, errors.New("snodra: send on a nil App")
@@ -153,6 +165,15 @@ func prepare(ctx context.Context, app *App, kind hubpb.RequestKind, mode hubpb.R
 	if err != nil {
 		return nil, err
 	}
+	out, err := prepareTyped(ctx, app, typ, kind, mode, m, opts)
+	if err != nil {
+		return &outgoing{typ: typ}, err
+	}
+	return out, nil
+}
+
+// prepareTyped is prepare for a message named typ.
+func prepareTyped(ctx context.Context, app *App, typ string, kind hubpb.RequestKind, mode hubpb.RequestMode, m Message, opts []SendOption) (*outgoing, error) {
 	var cfg sendConfig
 	for _, o := range opts {
 		if o != nil {
@@ -199,6 +220,8 @@ func prepare(ctx context.Context, app *App, kind hubpb.RequestKind, mode hubpb.R
 	if cfg.hasPriority {
 		priority = cfg.priority
 	}
+	headers := outgoingHeaders(ctx, cfg.headers, app.cfg.forwardJWT)
+	app.tel.inject(ctx, headers)
 	tmpl := &hubpb.Request{
 		Kind:       kind,
 		Type:       typ,
@@ -206,7 +229,7 @@ func prepare(ctx context.Context, app *App, kind hubpb.RequestKind, mode hubpb.R
 		Payload:    payload,
 		Priority:   priority,
 		Mode:       mode,
-		Headers:    outgoingHeaders(ctx, cfg.headers, app.cfg.forwardJWT),
+		Headers:    headers,
 	}
 	switch mode {
 	case hubpb.RequestMode_SCATTER_GATHER:

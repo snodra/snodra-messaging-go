@@ -211,6 +211,8 @@ type clientCredentials struct {
 	once sync.Once
 	hc   *http.Client
 	err  error
+
+	observe func(result string) // reports each fetch's result; nil: none
 }
 
 // String shows the settings, never the secret.
@@ -293,20 +295,41 @@ func httpURL(raw string) bool {
 	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Hostname() != ""
 }
 
-// Token fetches a token.
+// Token fetches a token, and reports the fetch's result when the app has telemetry.
 func (cc *clientCredentials) Token(ctx context.Context) (AccessToken, error) {
+	tok, result, err := cc.fetch(ctx)
+	if cc.observe != nil {
+		cc.observe(result)
+	}
+	return tok, err
+}
+
+// The results of a fetch, the label of the telemetry's token fetch counter.
+const (
+	fetchOK          = "ok"
+	fetchHTTPError   = "http_error"
+	fetchOAuthError  = "oauth_error"
+	fetchIOError     = "io_error"
+	fetchBadResponse = "bad_response"
+)
+
+// fetch fetches a token and says how it went: ok; an io_error when the request did not complete
+// (or the secret could not be read); an oauth_error for an answer with an OAuth2 error body, an
+// http_error for another non-success status; a bad_response for a success answer that is no
+// usable token response.
+func (cc *clientCredentials) fetch(ctx context.Context) (AccessToken, string, error) {
 	hc, err := cc.client()
 	if err != nil {
-		return AccessToken{}, fmt.Errorf("OAuth2 CA file '%s' %w", cc.cfg.CAFile, err)
+		return AccessToken{}, fetchIOError, fmt.Errorf("OAuth2 CA file '%s' %w", cc.cfg.CAFile, err)
 	}
 	secretValue := cc.secret.reveal()
 	if f := cc.cfg.ClientSecretFile; f != "" {
 		if secretValue, err = readTokenFile(f); err != nil {
-			return AccessToken{}, fmt.Errorf("OAuth2 client secret file '%s' cannot be read: %w", f, err)
+			return AccessToken{}, fetchIOError, fmt.Errorf("OAuth2 client secret file '%s' cannot be read: %w", f, err)
 		}
 	}
 	if secretValue == "" {
-		return AccessToken{}, errors.New("no OAuth2 client secret (the client secret file is empty)")
+		return AccessToken{}, fetchIOError, errors.New("no OAuth2 client secret (the client secret file is empty)")
 	}
 	credentials := formEncode(cc.cfg.ClientID) + ":" + formEncode(secretValue)
 	basic := base64.StdEncoding.EncodeToString([]byte(credentials))
@@ -318,7 +341,7 @@ func (cc *clientCredentials) Token(ctx context.Context) (AccessToken, error) {
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cc.cfg.TokenURL, strings.NewReader(body))
 	if err != nil {
-		return AccessToken{}, mask.error("OAuth2 token endpoint: " + err.Error())
+		return AccessToken{}, fetchIOError, mask.error("OAuth2 token endpoint: " + err.Error())
 	}
 	req.Header.Set("Authorization", "Basic "+basic)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -329,33 +352,33 @@ func (cc *clientCredentials) Token(ctx context.Context) (AccessToken, error) {
 		if errors.As(err, &ue) {
 			err = ue.Err // without the URL
 		}
-		return AccessToken{}, mask.error("OAuth2 token endpoint: " + err.Error())
+		return AccessToken{}, fetchIOError, mask.error("OAuth2 token endpoint: " + err.Error())
 	}
 	defer func() { _ = resp.Body.Close() }()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxTokenResponse+1))
 	if err != nil {
-		return AccessToken{}, mask.error("OAuth2 token endpoint: " + err.Error())
+		return AccessToken{}, fetchIOError, mask.error("OAuth2 token endpoint: " + err.Error())
 	}
 	if len(raw) > maxTokenResponse {
-		return AccessToken{}, mask.error(fmt.Sprintf("OAuth2 token endpoint answered with more than %d bytes", maxTokenResponse))
+		return AccessToken{}, fetchIOError, mask.error(fmt.Sprintf("OAuth2 token endpoint answered with more than %d bytes", maxTokenResponse))
 	}
 	var doc map[string]any
 	parsed := json.Unmarshal(raw, &doc) == nil && doc != nil
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return AccessToken{}, refusal(resp, doc, mask)
+		return AccessToken{}, refusalResult(doc), refusal(resp, doc, mask)
 	}
 	bad := func(what string) error { return mask.error("OAuth2 token endpoint response " + what) }
 	if !parsed {
-		return AccessToken{}, bad("is not valid JSON")
+		return AccessToken{}, fetchBadResponse, bad("is not valid JSON")
 	}
 	value, _ := doc["access_token"].(string)
 	if value == "" {
-		return AccessToken{}, bad("has no access_token")
+		return AccessToken{}, fetchBadResponse, bad("has no access_token")
 	}
 	if kind, present := doc["token_type"]; present {
 		k, _ := kind.(string)
 		if !strings.EqualFold(k, "bearer") {
-			return AccessToken{}, bad(fmt.Sprintf("has token_type '%s', not Bearer", k))
+			return AccessToken{}, fetchBadResponse, bad(fmt.Sprintf("has token_type '%s', not Bearer", k))
 		}
 	}
 	tok := AccessToken{Value: value}
@@ -364,11 +387,20 @@ func (cc *clientCredentials) Token(ctx context.Context) (AccessToken, error) {
 	default:
 		secs, ok := seconds(v)
 		if !ok {
-			return AccessToken{}, bad("has an expires_in that is not a positive number of seconds")
+			return AccessToken{}, fetchBadResponse, bad("has an expires_in that is not a positive number of seconds")
 		}
 		tok.Expiry = time.Now().Add(time.Duration(secs * float64(time.Second)))
 	}
-	return tok, nil
+	return tok, fetchOK, nil
+}
+
+// refusalResult is the fetch result of a non-success answer with the body doc: oauth_error when
+// it names an OAuth2 error, else http_error.
+func refusalResult(doc map[string]any) string {
+	if code, _ := doc["error"].(string); code != "" {
+		return fetchOAuthError
+	}
+	return fetchHTTPError
 }
 
 // seconds reads expires_in: a number or a numeric string, finite, at least 1, capped at ten
@@ -782,6 +814,7 @@ func (c *hubConn) followTokenFile(ref *streamRef) {
 	}
 	c.token, c.emptyWarned = hide(tok), false
 	if ref.send(credentialsFrame(&hubpb.Credentials{Kind: &hubpb.Credentials_Token{Token: tok}})) == nil {
+		c.app.tel.credentialsRefreshSent()
 		c.log.Debug("the hub token file changed; refreshed on the hub stream")
 	}
 }
@@ -799,6 +832,7 @@ func (c *hubConn) followToken(ref *streamRef, registered bool, tok *issuedToken)
 	}
 	c.sentGen = tok.gen
 	if ref.send(credentialsFrame(&hubpb.Credentials{Kind: &hubpb.Credentials_Jwt{Jwt: tok.value()}})) == nil {
+		c.app.tel.credentialsRefreshSent()
 		c.presentedJWT = tok.secret
 		c.log.Debug("the access token is refreshed on the hub stream", "expires_at", tok.expiry)
 	}

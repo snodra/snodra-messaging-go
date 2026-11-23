@@ -353,3 +353,25 @@ reference library departs from it. In each case this library follows the referen
   `ceil(max / N)` (3 of 5); the other hubs are topped up once its old stream has ended, as in both libraries.
 - **Question:** is a rolled hub a hub that "returns" (`ceil(max / N)`), or does it get the share of the hubs that
   stayed?
+
+### SG-24: the names of the telemetry
+
+- **Specification:** silent: the library-author pages define no metric, span or instrumentation scope names.
+- **Reference libraries:** the Rust library and the Kotlin library emit the same instruments (`snodra.hub.client.request.duration`
+  in seconds with `kind`, `type` and `outcome`, the gauges `snodra.hub.client.handlers.in.flight` and
+  `snodra.hub.client.connected.hubs`, the counters `snodra.hub.client.token.fetches` with `result`,
+  `snodra.hub.client.certificate.rotations` and `snodra.hub.client.credentials.refreshes.sent`), so one dashboard serves both.
+  The Rust library's instrumentation scope is `snodra-messaging-rs`; Kotlin's Micrometer meters have none. Neither creates
+  a span for a request its handlers serve (the Kotlin library only writes the current trace context into the requests it
+  sends); the Rust library records the duration of unary commands and queries only, not of scatter-gather, streaming or
+  subscription requests, and maps its `UnknownOutcome` error to `handler_error` where the Kotlin library (and this one)
+  report a broken hub stream as `unavailable`.
+- **This library:** emits the same instrument names, units, attributes, bucket boundaries and descriptions (the
+  `otel` module), for unary commands and queries only. Differences visible to a dashboard: the instrumentation scope is
+  the Go import path `github.com/snodra/snodra-messaging-go`; a handled request gets a server span named after its
+  message type, a child of its valid `traceparent`; the three counters are synchronous, so a series (a `result`, a
+  rotation) appears with its first event instead of at 0 from the start, and they exist whatever the credential kind;
+  a call ended by the caller's own context is `cancelled` (`context.Canceled`) or `timeout` (`context.DeadlineExceeded`)
+  rather than `unavailable`.
+- **Question:** should the specification name the instruments and their labels as part of the library contract, and should
+  every library name its scope after its package and create the handler span?

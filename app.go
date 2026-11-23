@@ -50,6 +50,7 @@ type App struct {
 	subs                                       *servedSubscriptions
 	identity                                   *identityResolver
 	tokens                                     *tokenProvider // the access tokens towards the hubs; nil without JWT
+	tel                                        *telemetry     // what the library reports; never nil
 
 	drainMu    sync.Mutex
 	drainUntil time.Time // when the shutdown's handler drain ends; zero before it
@@ -104,7 +105,12 @@ func New(opts ...Option) (*App, error) {
 	if cfg.tokenSource != nil {
 		tokens = newTokenProvider(cfg.tokenSource, log, cfg.timings.tokenFetchWait)
 	}
+	tel := newTelemetry(cfg.telemetry, log)
+	if cc, ok := cfg.tokenSource.(*clientCredentials); ok {
+		cc.observe = tel.tokenFetched // the copy the options made for this App
+	}
 	return &App{
+		tel:            tel,
 		cfg:            cfg,
 		log:            log,
 		ready:          make(chan struct{}),
@@ -147,7 +153,20 @@ func (a *App) Start(ctx context.Context) error {
 	a.started = true
 	a.pool = newPool(a)
 	a.pool.start(a)
+	a.tel.observeGauges(a.gauges)
 	return nil
+}
+
+// gauges are the library's gauges now, read from memory.
+func (a *App) gauges() Gauges {
+	g := Gauges{HandlersInFlight: int64(a.inflight.count())}
+	a.mu.Lock()
+	p := a.pool
+	a.mu.Unlock()
+	if p != nil {
+		g.ConnectedHubs = int64(len(p.live()))
+	}
+	return g
 }
 
 // Ready waits until a hub has acknowledged the registration (its RegisterAck arrived). It
