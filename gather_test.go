@@ -300,3 +300,21 @@ func TestASharedQueryAnswersPointQueries(t *testing.T) {
 	is(t, r.GetRequestId(), "q-1")
 	is(t, string(r.GetPayload()), `{"count":3}`)
 }
+
+// An end that carries an error fails the whole gather, as an Error with that code does, also
+// after parts: the reference library throws it.
+func TestAGatherEndWithAnErrorFailsTheGather(t *testing.T) {
+	app, _, s := sending(t, fakehub.Ack("hub-1"))
+	gathered := async(func() (*Gathered[Stock], error) { return Gather[Stock](context.Background(), app, GetStock{}) })
+	r := s.RecvRequest(t)
+	s.Send(t, partOf(r.GetId(), 1, "stock-service", "s-1", `{"count":3}`, nil))
+	s.Send(t, streamEnd(r.GetId(), 1, &hubpb.Error{RequestId: r.GetId(), Code: hubpb.ErrorCode_CANCELLED, Message: "the gather outlived its limit"}))
+	o := await(t, gathered)
+	is(t, o.value, (*Gathered[Stock])(nil))
+	var e *Error
+	if !errors.As(o.err, &e) {
+		t.Fatalf("got %v, want an *Error", o.err)
+	}
+	is(t, e.Code, CodeCancelled)
+	is(t, waiting(app), 0)
+}

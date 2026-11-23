@@ -45,8 +45,9 @@ type Gathered[R any] struct {
 // gather goes to one hub, unkeyed.
 //
 // A failed call is one of the errors of [Send]: an [*Error] for a failure of the whole gather
-// (NO_HANDLER when the type has no live target, INVALID_REQUEST for a command type, the
-// library's own TIMEOUT when the hub's end did not come within the hub's bound plus 1 s),
+// (NO_HANDLER when the type has no live target, INVALID_REQUEST for a command type, an end that
+// carries an error, whose parts are dropped, the library's own TIMEOUT when the hub's end did not
+// come within the hub's bound plus 1 s),
 // [ErrNeverSent], [ErrOutcomeUnknown] (the hub stream broke before the end: the parts received
 // are dropped), the context's error, or a local failure.
 // See https://snodra.damoreira.com/library-authors/protocol/ (Scatter-gather).
@@ -62,6 +63,9 @@ func Gather[R any](ctx context.Context, app *App, q Message, opts ...SendOption)
 		}
 		if ans.failure != nil {
 			return nil, errorFromWire(out.typ, ans.failure)
+		}
+		if e := ans.end.GetError(); e != nil { // the hub ended the whole gather with an error
+			return nil, errorFromWire(out.typ, e)
 		}
 		return assemble[R](app.cfg.codec, ans), nil
 	})
