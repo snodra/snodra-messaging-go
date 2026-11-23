@@ -363,15 +363,12 @@ reference library departs from it. In each case this library follows the referen
   `snodra.hub.client.certificate.rotations` and `snodra.hub.client.credentials.refreshes.sent`), so one dashboard serves both.
   The Rust library's instrumentation scope is `snodra-messaging-rs`; Kotlin's Micrometer meters have none. Neither creates
   a span for a request its handlers serve (the Kotlin library only writes the current trace context into the requests it
-  sends); the Rust library records the duration of unary commands and queries only, not of scatter-gather, streaming or
-  subscription requests, and maps its `UnknownOutcome` error to `handler_error` where the Kotlin library (and this one)
-  report a broken hub stream as `unavailable`.
+  sends).
 - **This library:** emits the same instrument names, units, attributes, bucket boundaries and descriptions (the
-  `otel` module), for unary commands and queries only. Differences visible to a dashboard: the instrumentation scope is
-  the Go import path `github.com/snodra/snodra-messaging-go`; a handled request gets a server span named after its
-  message type, a child of its valid `traceparent`; the three counters are synchronous, so a series (a `result`, a
-  rotation) appears with its first event instead of at 0 from the start, and they exist whatever the credential kind;
-  a call ended by the caller's own context is `cancelled` (`context.Canceled`) or `timeout` (`context.DeadlineExceeded`)
-  rather than `unavailable`.
+  `otel` module). Differences visible to a dashboard: the instrumentation scope is the Go import path
+  `github.com/snodra/snodra-messaging-go`; a handled request gets a server span named after its message type, a child of its
+  valid `traceparent`; the three counters are synchronous instead of observable, exported as the same monotonic sums with
+  every series at 0 from the start; a call ended by the caller's own deadline (`context.DeadlineExceeded`) is `timeout`,
+  and a call the caller cancels records nothing (as in both libraries).
 - **Question:** should the specification name the instruments and their labels as part of the library contract, and should
   every library name its scope after its package and create the handler span?

@@ -92,23 +92,31 @@ func Query[R any](ctx context.Context, app *App, q Message, opts ...SendOption) 
 	return request[R](ctx, app, hubpb.RequestKind_QUERY, q, opts)
 }
 
-// request is a call: its settings, the attempts under the retry policy, the answer decoded.
-func request[R any](ctx context.Context, app *App, kind hubpb.RequestKind, m Message, opts []SendOption) (_ R, err error) {
-	var zero R
+// request is a call: its settings, the attempts under the retry policy, the answer decoded. One
+// record goes to the telemetry per call, retries included, unless the caller's own cancellation
+// ended it or the call panicked.
+func request[R any](ctx context.Context, app *App, kind hubpb.RequestKind, m Message, opts []SendOption) (R, error) {
 	var tel *telemetry // nil for a nil app: prepare fails
 	if app != nil {
 		tel = app.tel
 	}
 	started := tel.now()
-	var out *outgoing
-	defer func() { // one record per call, retries included
-		if out != nil && out.typ != "" {
-			tel.requestDone(kindLabel(kind == hubpb.RequestKind_COMMAND), out.typ, started, err)
-		}
-	}()
-	out, err = prepare(ctx, app, kind, hubpb.RequestMode_UNARY, m, opts)
+	r, typ, err := doRequest[R](ctx, app, kind, m, opts)
+	if typ != "" {
+		tel.requestDone(kindLabel(kind == hubpb.RequestKind_COMMAND), typ, started, err)
+	}
+	return r, err
+}
+
+// doRequest is request without the telemetry; typ is the message type once it is known.
+func doRequest[R any](ctx context.Context, app *App, kind hubpb.RequestKind, m Message, opts []SendOption) (_ R, typ string, _ error) {
+	var zero R
+	out, err := prepare(ctx, app, kind, hubpb.RequestMode_UNARY, m, opts)
+	if out != nil {
+		typ = out.typ
+	}
 	if err != nil {
-		return zero, err
+		return zero, typ, err
 	}
 	answer, err := retrying(ctx, kind, out.policy, out.budget, out.chosen, func(timeout time.Duration) ([]byte, error) {
 		ans, err := app.attempt(ctx, out.tmpl, timeout)
@@ -118,13 +126,13 @@ func request[R any](ctx context.Context, app *App, kind hubpb.RequestKind, m Mes
 		return answered(out.typ, ans)
 	})
 	if err != nil {
-		return zero, err
+		return zero, typ, err
 	}
 	r, err := decodeAnswer[R](app.cfg.codec, answer)
 	if err != nil {
-		return zero, &undecodableReply{typ: out.typ, err: err}
+		return zero, typ, &undecodableReply{typ: out.typ, err: err}
 	}
-	return r, nil
+	return r, typ, nil
 }
 
 // decodeAnswer decodes an answer's payload as R: an empty payload reads as {}, and [Empty] is
@@ -181,10 +189,10 @@ func prepareTyped(ctx context.Context, app *App, typ string, kind hubpb.RequestK
 		}
 	}
 	if err := checkHeaders(cfg.headers, typ); err != nil {
-		return nil, err
+		return nil, &localRefusal{err}
 	}
 	if cfg.timeout < 0 {
-		return nil, fmt.Errorf("snodra: the Timeout of %s must not be negative, got %v", typ, cfg.timeout)
+		return nil, &localRefusal{fmt.Errorf("snodra: the Timeout of %s must not be negative, got %v", typ, cfg.timeout)}
 	}
 	policy := noRetry
 	switch {
@@ -194,7 +202,7 @@ func prepareTyped(ctx context.Context, app *App, typ string, kind hubpb.RequestK
 		policy = *app.cfg.retry
 	}
 	if err := policy.validate(); err != nil {
-		return nil, fmt.Errorf("%w (sending %s)", err, typ)
+		return nil, &localRefusal{fmt.Errorf("%w (sending %s)", err, typ)}
 	}
 	payload, err := app.cfg.codec.Marshal(m)
 	if err != nil {

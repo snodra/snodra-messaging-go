@@ -7,6 +7,7 @@ import (
 	"maps"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/snodra/snodra-messaging-go/internal/hubpb"
@@ -51,6 +52,9 @@ type App struct {
 	identity                                   *identityResolver
 	tokens                                     *tokenProvider // the access tokens towards the hubs; nil without JWT
 	tel                                        *telemetry     // what the library reports; never nil
+	gaugesEnded                                atomic.Bool    // Shutdown finished: the gauges read zeros
+	certMu                                     sync.Mutex
+	certFP                                     string // the client certificate any hub saw last, for the rotation count
 
 	drainMu    sync.Mutex
 	drainUntil time.Time // when the shutdown's handler drain ends; zero before it
@@ -138,6 +142,15 @@ func (a *App) Start(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if err := a.start(); err != nil {
+		return err
+	}
+	a.tel.observeGauges(a.gauges) // no lock held: the implementation may read at once
+	return nil
+}
+
+// start is Start's work under the app's lock.
+func (a *App) start() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	switch {
@@ -153,12 +166,27 @@ func (a *App) Start(ctx context.Context) error {
 	a.started = true
 	a.pool = newPool(a)
 	a.pool.start(a)
-	a.tel.observeGauges(a.gauges)
 	return nil
+}
+
+// certPresented notes that a stream went live presenting the client certificate with fingerprint
+// fp: one rotation is counted when it is not the certificate the app presented last, whichever
+// hub presents it first (one renewal is one rotation, however many hubs roll over to it).
+func (a *App) certPresented(fp string) {
+	a.certMu.Lock()
+	prev := a.certFP
+	a.certFP = fp
+	a.certMu.Unlock()
+	if prev != "" && prev != fp {
+		a.tel.certificateRotated()
+	}
 }
 
 // gauges are the library's gauges now, read from memory.
 func (a *App) gauges() Gauges {
+	if a.gaugesEnded.Load() {
+		return Gauges{}
+	}
 	g := Gauges{HandlersInFlight: int64(a.inflight.count())}
 	a.mu.Lock()
 	p := a.pool
@@ -231,6 +259,10 @@ func (a *App) Shutdown(ctx context.Context) error {
 	if p == nil {
 		return nil
 	}
+	defer func() { // before closed is closed
+		a.gaugesEnded.Store(true)
+		a.tel.stopGauges()
+	}()
 	conns := p.closeMembership()
 	err := a.leave(ctx, conns)
 	a.kill()

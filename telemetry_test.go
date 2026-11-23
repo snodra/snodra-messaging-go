@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -32,8 +33,8 @@ func TestRequestOutcomeLabels(t *testing.T) {
 	is(t, requestOutcome(ErrNeverSent), "unavailable")
 	is(t, requestOutcome(&Error{Code: Code(77)}), "handler_error") // an unknown code reads as HANDLER_ERROR
 	is(t, requestOutcome(&undecodableReply{typ: "t", err: errors.New("x")}), "invalid_request")
-	// The caller's own context: not "unavailable", whatever else the error wraps.
-	is(t, requestOutcome(errors.Join(ErrNeverSent, context.Canceled)), "cancelled")
+	// The caller's own deadline: not "unavailable", whatever else the error wraps.
+	is(t, requestOutcome(&localRefusal{ErrReservedHeader}), "invalid_request")
 	is(t, requestOutcome(errors.Join(ErrOutcomeUnknown, context.DeadlineExceeded)), "timeout")
 }
 
@@ -146,7 +147,7 @@ func TestOneRequestRecordPerCall(t *testing.T) {
 	is(t, errors.Is(err, ErrReservedHeader), true)
 	reqs, _ = rec.snapshot()
 	is(t, len(reqs), 3) // a refused call is a call
-	is(t, reqs[2].outcome, "error")
+	is(t, reqs[2].outcome, "invalid_request")
 }
 
 func TestAnUndecodableReplyIsInvalidRequest(t *testing.T) {
@@ -396,4 +397,212 @@ func TestWithoutTelemetryNothingIsAllocatedOrRead(t *testing.T) {
 	c, done := nop.StartHandling(context.Background(), Handling{})
 	done(nil)
 	is(t, c, context.Background())
+}
+
+// readingInside reads the gauges inside ObserveGauges, as an implementation primed on
+// registration would.
+type readingInside struct {
+	NopInstrumentation
+	got chan Gauges
+}
+
+func (r *readingInside) ObserveGauges(read func() Gauges) { r.got <- read() }
+
+func TestStartDoesNotHoldItsLockWhileTheImplementationReadsTheGauges(t *testing.T) {
+	rec := &readingInside{got: make(chan Gauges, 1)}
+	hub := fakehub.Start(t)
+	app := newApp(t, Hubs(hub.Addr()), Telemetry(rec))
+	started := make(chan error, 1)
+	go func() { started <- app.Start(context.Background()) }()
+	select {
+	case err := <-started:
+		is(t, err, nil)
+	case <-time.After(3 * time.Second):
+		t.Fatal("Start did not return: ObserveGauges is called with the app's lock held")
+	}
+	is(t, (<-rec.got).ConnectedHubs, 0)
+}
+
+func TestACallersCancellationRecordsNothing(t *testing.T) {
+	rec := &recorder{}
+	app, _, s := sending(t, fakehub.Ack("hub-1"), Telemetry(rec))
+	ctx, cancel := context.WithCancel(context.Background())
+	sent := async(func() (Empty, error) { return Send[Empty](ctx, app, PlaceOrder{}) })
+	s.RecvRequest(t)
+	cancel() // written, unanswered
+	is(t, errors.Is(await(t, sent).err, context.Canceled), true)
+
+	// Cancelled while waiting to retry after a NO_HANDLER: still the caller's cancel.
+	policy := RetryPolicy{MaxAttempts: 3, InitialBackoff: 2 * time.Second, Multiplier: 2, MaxBackoff: 4 * time.Second}
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	sent2 := async(func() (Empty, error) {
+		return Send[Empty](ctx2, app, PlaceOrder{}, Retry(policy), Timeout(30*time.Second))
+	})
+	s.Send(t, fakehub.HubError(s.RecvRequest(t).GetId(), hubpb.ErrorCode_NO_HANDLER, "nobody"))
+	time.AfterFunc(100*ms, cancel2)
+	is(t, errors.Is(await(t, sent2).err, context.Canceled), true)
+	reqs, _ := rec.snapshot()
+	is(t, len(reqs), 0)
+
+	// The hub's own CANCELLED is recorded, and a deadline is a timeout.
+	q := async(func() (Receipt, error) { return Query[Receipt](ctxWithin(t, 5*time.Second), app, GetOrder{}) })
+	s.Send(t, fakehub.HubError(s.RecvRequest(t).GetId(), hubpb.ErrorCode_CANCELLED, "x"))
+	await(t, q)
+	reqs, _ = rec.snapshot()
+	is(t, len(reqs), 1)
+	is(t, reqs[0].outcome, "cancelled")
+}
+
+func TestALocalRefusalIsInvalidRequest(t *testing.T) {
+	rec := &recorder{}
+	app, _, _ := sending(t, fakehub.Ack("hub-1"), Telemetry(rec))
+	for _, c := range []SendOption{Header("traceparent", "x"), Timeout(-time.Second)} {
+		_, err := Send[Empty](context.Background(), app, PlaceOrder{}, c)
+		is(t, err != nil, true)
+	}
+	reqs, _ := rec.snapshot()
+	is(t, len(reqs), 2)
+	for _, r := range reqs {
+		is(t, r.outcome, "invalid_request")
+	}
+}
+
+// panickingCodec panics decoding.
+type panickingCodec struct{}
+
+func (panickingCodec) Marshal(any) ([]byte, error) { return []byte("{}"), nil }
+func (panickingCodec) Unmarshal([]byte, any) error { panic("codec") }
+
+func TestAPanicAfterPrepareIsNotRecordedAsOK(t *testing.T) {
+	rec := &recorder{}
+	app, _, s := sending(t, fakehub.Ack("hub-1"), Telemetry(rec), Codec(panickingCodec{}))
+	done := make(chan any, 1)
+	go func() {
+		defer func() { done <- recover() }()
+		_, _ = Send[Receipt](ctxWithin(t, 5*time.Second), app, PlaceOrder{})
+	}()
+	s.Send(t, replyTo(s.RecvRequest(t).GetId(), `{}`))
+	is(t, <-done, any("codec")) // the panic goes on
+	reqs, _ := rec.snapshot()
+	for _, r := range reqs {
+		is(t, r.outcome == "ok", false)
+	}
+}
+
+func TestACertificateRenewalIsOneRotationWithSeveralHubs(t *testing.T) {
+	ca := newTestCA(t, "operator CA")
+	a := fakehub.Start(t, fakehub.WithTLS(ca.server(t, "hub.test"), ca.pool()))
+	b := fakehub.Start(t, fakehub.WithTLS(ca.server(t, "hub.test"), ca.pool()))
+	dir := t.TempDir()
+	certFile, keyFile := pairFiles(t, dir, ca.client(t, "orders-service", time.Now().Add(time.Hour)))
+	tm := scaled()
+	tm.certCheckInterval, tm.rollDelayMax = 50*ms, 0
+	rec := &recorder{}
+	app := newApp(t, Hubs(a.Addr(), b.Addr()), TLS(TLSConfig{CAFile: ca.caFile(t), ServerName: "hub.test"}),
+		ClientCertificate(certFile, keyFile), withTimings(tm), Telemetry(rec))
+	is(t, app.Start(context.Background()), nil)
+	streams := map[*fakehub.Hub]*fakehub.Stream{}
+	for i, h := range []*fakehub.Hub{a, b} {
+		s := h.Next(t)
+		s.RecvRegister(t)
+		s.Ack(t, fakehub.Ack([]string{"hub-a", "hub-b"}[i]))
+		streams[h] = s
+	}
+	poll(t, func() bool { return len(app.pool.live()) == 2 })
+	var before []string
+	for _, c := range app.pool.all() {
+		before = append(before, c.presented().fingerprint)
+	}
+	pairFiles(t, dir, ca.client(t, "orders-service", time.Now().Add(2*time.Hour)))
+	for _, h := range []*fakehub.Hub{a, b} {
+		s := streams[h]
+		nextRegister(t, s) // out of the routing first
+		s.HalfClosed(t, 2*time.Second)
+		s.Close(codes.OK, "")
+		s2 := h.Next(t)
+		nextRegister(t, s2)
+		s2.Ack(t, fakehub.Ack(map[*fakehub.Hub]string{a: "hub-a", b: "hub-b"}[h]))
+	}
+	poll(t, func() bool { // every connection presents the renewed pair
+		for i, c := range app.pool.all() {
+			if p := c.presented(); p == nil || p.fingerprint == before[i] {
+				return false
+			}
+		}
+		return true
+	})
+	is(t, rec.count(func(r *recorder) int { return r.rotated }), 1)
+}
+
+// minAllocs is the fewest allocations of f in five measurements: the count is process wide, and
+// background goroutines of earlier tests add to one run.
+func minAllocs(f func()) float64 {
+	best := testing.AllocsPerRun(50, f)
+	for range 4 {
+		best = min(best, testing.AllocsPerRun(50, f))
+	}
+	return best
+}
+
+func TestNoOpTelemetryAddsNoAllocationToRequestAndRun(t *testing.T) {
+	build := func(opts ...Option) *App {
+		app := newApp(t, append([]Option{Hubs("hub:7000")}, opts...)...)
+		is(t, HandleCommand(app, func(context.Context, PlaceOrder) (Empty, error) { return Empty{}, nil }), nil)
+		return app
+	}
+	for name, opt := range map[string]Option{"value": Telemetry(NopInstrumentation{}), "pointer": Telemetry(&NopInstrumentation{}), "none": Telemetry(nil)} {
+		app := build(opt)
+		is(t, app.tel.enabled(), false)
+		h := app.handlers["orders.PlaceOrder"]
+		req := &hubpb.Request{Id: "r-1", Type: "orders.PlaceOrder", Kind: hubpb.RequestKind_COMMAND, Payload: []byte(`{}`)}
+		scope := &handling{info: MessageInfo{ID: "r-1", Type: "orders.PlaceOrder"}}
+		ctx := context.Background()
+		base := minAllocs(func() { _, _ = h.invoke(withHandling(ctx, scope), app.cfg.codec, req.GetPayload()) })
+		run := minAllocs(func() { _, _ = app.run(ctx, h, req, scope) })
+		if run > base {
+			t.Errorf("%s: run allocates %v, the bare handler call %v", name, run, base)
+		}
+		// request: a refused call (nil message) goes through the same wrapper.
+		var nilMsg Message
+		fresh := minAllocs(func() { _, _ = request[Empty](ctx, app, hubpb.RequestKind_COMMAND, nilMsg, nil) })
+		bare := minAllocs(func() { _, _, _ = doRequest[Empty](ctx, app, hubpb.RequestKind_COMMAND, nilMsg, nil) })
+		if fresh > bare {
+			t.Errorf("%s: request allocates %v, doRequest %v", name, fresh, bare)
+		}
+	}
+}
+
+// nextRegister returns the next Register on s, skipping the frames between (permits, heartbeats).
+func nextRegister(t *testing.T, s *fakehub.Stream) *hubpb.Register {
+	t.Helper()
+	for range 50 {
+		if r := s.Recv(t).GetRegister(); r != nil {
+			return r
+		}
+	}
+	t.Fatal("no Register")
+	return nil
+}
+
+// stopping is an Instrumentation that is told when its gauges end.
+type stopping struct {
+	NopInstrumentation
+	read    func() Gauges
+	stopped atomic.Int32
+}
+
+func (s *stopping) ObserveGauges(read func() Gauges) { s.read = read }
+func (s *stopping) StopObservingGauges()             { s.stopped.Add(1) }
+
+func TestShutdownEndsTheGauges(t *testing.T) {
+	rec := &stopping{}
+	hub := fakehub.Start(t)
+	app, _ := serving(t, hub, func(*App) {}, Telemetry(rec))
+	poll(t, func() bool { return rec.read().ConnectedHubs == 1 })
+	is(t, rec.stopped.Load(), int32(0))
+	is(t, app.Shutdown(ctxWithin(t, 5*time.Second)), nil)
+	is(t, rec.stopped.Load(), int32(1))
+	is(t, rec.read(), Gauges{})
+	is(t, app.Shutdown(ctxWithin(t, 5*time.Second)), nil)
+	is(t, rec.stopped.Load(), int32(1)) // once
 }

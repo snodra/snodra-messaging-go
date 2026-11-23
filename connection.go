@@ -723,7 +723,9 @@ func (c *hubConn) wentLive(ref *streamRef, ack *hubpb.RegisterAck, interval time
 		c.log.Info("presenting the client certificate", "fingerprint", id.fingerprint, "not_after", id.notAfter)
 	case before.fingerprint != id.fingerprint:
 		c.log.Info("presenting a renewed client certificate", "fingerprint", id.fingerprint, "not_after", id.notAfter)
-		c.app.tel.certificateRotated()
+	}
+	if id != nil {
+		c.app.certPresented(id.fingerprint)
 	}
 	c.app.connLive()
 	c.changed()

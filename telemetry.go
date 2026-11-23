@@ -23,9 +23,10 @@ import (
 // id. Embed [NopInstrumentation] to implement only some of the methods.
 type Instrumentation interface {
 	// RequestDone records one Send or Query call of msgType, from the call to its result with
-	// every retry included. kind is "command" or "query"; outcome is "ok", "no_handler",
+	// every retry included; a call its caller cancels (context.Canceled) is not reported. kind is "command" or "query"; outcome is "ok", "no_handler",
 	// "timeout", "handler_disconnected", "resource_exhausted", "handler_error", "denied",
-	// "invalid_request" (also an answer that does not decode), "cancelled", "unavailable" (no
+	// "invalid_request" (also an answer that does not decode, and a call refused locally), "cancelled" (the
+	// hub's CANCELLED), "unavailable" (no
 	// hub took the request, or its stream broke before the answer) or "error".
 	RequestDone(kind, msgType, outcome string, took time.Duration)
 	// TokenFetched records one fetch of an access token by [NewClientCredentials]: result is
@@ -51,6 +52,13 @@ type Instrumentation interface {
 	// about to be sent: it may set "traceparent" and "tracestate" in headers. Any other key,
 	// and a "traceparent" that is not a valid W3C one, is ignored.
 	Inject(ctx context.Context, headers map[string]string)
+}
+
+// A GaugesStopper is an Instrumentation that wants to know when the gauges it was given by
+// ObserveGauges end: [App.Shutdown] calls StopObservingGauges once, as it finishes, and the
+// read function it was given reads zeros from then on. One Instrumentation serves one App.
+type GaugesStopper interface {
+	StopObservingGauges()
 }
 
 // Gauges are the library's gauges at one moment.
@@ -107,7 +115,8 @@ type telemetry struct {
 }
 
 func newTelemetry(i Instrumentation, log *slog.Logger) *telemetry {
-	if _, nop := i.(NopInstrumentation); nop {
+	switch i.(type) {
+	case NopInstrumentation, *NopInstrumentation:
 		i = nil
 	}
 	return &telemetry{i: i, log: log}
@@ -134,8 +143,8 @@ func (t *telemetry) now() time.Time {
 
 // requestDone reports a Send or Query of typ that began at started (from now) and ended with err.
 func (t *telemetry) requestDone(kind, typ string, started time.Time, err error) {
-	if !t.enabled() || started.IsZero() {
-		return
+	if !t.enabled() || started.IsZero() || errors.Is(err, context.Canceled) {
+		return // the caller's own cancellation is not a result: nothing is recorded
 	}
 	defer t.guard("RequestDone")
 	t.i.RequestDone(kind, typ, requestOutcome(err), time.Since(started))
@@ -175,6 +184,17 @@ func (t *telemetry) observeGauges(read func() Gauges) {
 		defer func() { _ = recover() }()
 		return read()
 	})
+}
+
+// stopGauges tells the implementation, when it asks to know, that the app is shut down.
+func (t *telemetry) stopGauges() {
+	if !t.enabled() {
+		return
+	}
+	if s, ok := t.i.(GaugesStopper); ok {
+		defer t.guard("StopObservingGauges")
+		s.StopObservingGauges()
+	}
 }
 
 // startHandling starts the handling of a request: the handler's context, and the function to
@@ -238,9 +258,10 @@ const tracestateHeader = "tracestate"
 
 // requestOutcome is the outcome label of a call that ended with err (nil: "ok"). It is the
 // hub's outcome names for an [*Error], "unavailable" when no hub took the request or its stream
-// broke before the answer, "invalid_request" for an answer that does not decode, "cancelled" or
-// "timeout" for the caller's own context, and "error" for anything else.
-// TODO(spec-gap): SG-24 (the outcome labels of the caller's own context).
+// broke before the answer, "invalid_request" for an answer that does not decode and for a call
+// refused locally (a reserved header, an invalid option), "timeout" for the caller's own
+// deadline, and "error" for anything else. The caller's own cancellation is not an outcome: a
+// call it ends records nothing (see requestDone).
 func requestOutcome(err error) string {
 	if err == nil {
 		return "ok"
@@ -268,11 +289,12 @@ func requestOutcome(err error) string {
 		return "handler_error"
 	}
 	var u *undecodableReply
+	var r *localRefusal
 	switch {
 	case errors.As(err, &u):
 		return "invalid_request"
-	case errors.Is(err, context.Canceled):
-		return "cancelled"
+	case errors.As(err, &r):
+		return "invalid_request"
 	case errors.Is(err, context.DeadlineExceeded):
 		return "timeout"
 	case errors.Is(err, ErrOutcomeUnknown), errors.Is(err, ErrNeverSent):
@@ -280,6 +302,13 @@ func requestOutcome(err error) string {
 	}
 	return "error"
 }
+
+// localRefusal is the error of a call refused before anything was built or sent: a reserved
+// header, a negative timeout, an invalid retry policy.
+type localRefusal struct{ err error }
+
+func (e *localRefusal) Error() string { return e.err.Error() }
+func (e *localRefusal) Unwrap() error { return e.err }
 
 // undecodableReply is the error of a call whose answer does not decode as the wanted type.
 type undecodableReply struct {

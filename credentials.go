@@ -360,7 +360,7 @@ func (cc *clientCredentials) fetch(ctx context.Context) (AccessToken, string, er
 		return AccessToken{}, fetchIOError, mask.error("OAuth2 token endpoint: " + err.Error())
 	}
 	if len(raw) > maxTokenResponse {
-		return AccessToken{}, fetchIOError, mask.error(fmt.Sprintf("OAuth2 token endpoint answered with more than %d bytes", maxTokenResponse))
+		return AccessToken{}, fetchBadResponse, mask.error(fmt.Sprintf("OAuth2 token endpoint answered with more than %d bytes", maxTokenResponse))
 	}
 	var doc map[string]any
 	parsed := json.Unmarshal(raw, &doc) == nil && doc != nil
