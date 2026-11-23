@@ -279,9 +279,9 @@ spot.
   (`RESOURCE_EXHAUSTED`; for a subscription the hub's own reason after the colon, a subscriber buffer overflow or an
   instance's subscription limit), the hub's message for `CANCELLED` ("cancelled by the hub" when it gave none), and
   the hub's message for an unknown code (read as `HANDLER_ERROR`). A handler side answers a type it does not serve
-  with `NO_HANDLER` "no handler for type <type>". The Rust library still prefixes `CANCELLED` with the type
-  and has no suffix for `RESOURCE_EXHAUSTED` (`Handler for '<type>' is busy`); its change to these texts is not committed
-  yet, and until it is the Kotlin library's texts are the specified behaviour.
+  with `NO_HANDLER` "no handler for type <type>". Every official library reads these texts:
+  the Rust library once prefixed `CANCELLED` with the type and had no suffix for `RESOURCE_EXHAUSTED`
+  (`Handler for '<type>' is busy`).
 - **This library:** does what the Kotlin library does (`errors.go`, `dispatch.go`); before, it followed the Rust
   library. The reasons of the `Cancel` it writes are the Kotlin library's too ("collector cancelled", "subscriber
   cancelled", "no part within the local guard", "no initial result within the local guard", "<stream or
