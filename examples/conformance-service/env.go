@@ -115,7 +115,7 @@ func (e env) options() []snodra.Option {
 		snodra.MaxConcurrent(e.capacity),
 		// The runner checks what reaches the hub: a send to one of the service's own types must
 		// go through it, not be answered in-process.
-		snodra.AlwaysThroughHub(true),
+		snodra.AlwaysRouteThroughHub(true),
 	}
 	if e.retry != nil {
 		opts = append(opts, snodra.DefaultRetry(*e.retry))

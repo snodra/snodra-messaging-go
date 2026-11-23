@@ -11,12 +11,12 @@ import (
 
 // localHandler is the handler of this instance that answers a call of kind (a [Send] or a
 // [Query]) of m in-process, and m's type; nil when the call goes through a hub: with
-// [AlwaysThroughHub], for a type this instance does not handle in that kind, and for a [Shared]
+// [AlwaysRouteThroughHub], for a type this instance does not handle in that kind, and for a [Shared]
 // query type (the hub spreads it over every owner, this instance included). The handler of a
 // query type may be a streaming or a subscription query's: it answers INVALID_REQUEST, as through
 // the hub.
 func (a *App) localHandler(kind hubpb.RequestKind, m Message) (*handler, string) {
-	if a == nil || a.cfg.alwaysThroughHub || m == nil {
+	if a == nil || a.cfg.alwaysRouteThroughHub || m == nil {
 		return nil, ""
 	}
 	typ, err := messageName(m)

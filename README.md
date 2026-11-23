@@ -146,8 +146,9 @@ order, err := snodra.Query[Receipt](ctx, app, GetOrder{OrderID: receipt.OrderID}
   It sees a fresh request id, the caller's `snodra.Header`s and the correlation id, and acts for the caller of the
   request being handled (anonymous outside a handler); routing key, timeout, priority and retry do not apply (the
   caller's context bounds it), nothing goes to the telemetry, and its errors are those a hub would have relayed.
-  `snodra.AlwaysThroughHub(true)` (`SNODRA_ALWAYS_THROUGH_HUB=true`) sends every request through a hub. Streams,
-  scatter-gathers and subscriptions always go through a hub.
+  `snodra.AlwaysRouteThroughHub(true)` (`SNODRA_SERVER_ALWAYS_ROUTE_THROUGH_HUB=true`, the variable the other Snodra
+  libraries read too) sends every request through a hub. Streams, scatter-gathers and subscriptions always go through
+  a hub.
 
 ## Streams, scatter-gather and subscriptions
 
@@ -241,7 +242,7 @@ defaults, is in the documentation of `FromEnv` (`go doc snodra.FromEnv`) and at
 | `SNODRA_SERVER_TLS`, `SNODRA_SERVER_TLS_CA`, `SNODRA_SERVER_TLS_SERVER_NAME` | `TLS` | false |
 | `SNODRA_SERVER_TLS_CLIENT_CERT`, `SNODRA_SERVER_TLS_CLIENT_KEY` | `ClientCertificate` | none (implies TLS) |
 | `SNODRA_JWKS_URL`, `SNODRA_ISSUER` | `JWKS` | none (no caller is verified; guards need it) |
-| `SNODRA_ALWAYS_THROUGH_HUB` | `AlwaysThroughHub` | false (own types answered in-process) |
+| `SNODRA_SERVER_ALWAYS_ROUTE_THROUGH_HUB` | `AlwaysRouteThroughHub` | false (own types answered in-process) |
 
 - An instance opens one stream to every hub it is given and registers the same types on each. A second address that
   answers a hub id already served is parked, and takes over if the first goes away. An `https://` hub address implies

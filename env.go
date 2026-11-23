@@ -42,7 +42,7 @@ const defaultHubAddress = "static://snodra-server:7000"
 //     no token is an identity, and a guarded handler cannot be registered)
 //   - SNODRA_SECURITY_ROLES_CLAIM: [RolesClaim] (default "roles")
 //   - SNODRA_FORWARD_JWT: [ForwardJWT], true or false (default true)
-//   - SNODRA_ALWAYS_THROUGH_HUB: [AlwaysThroughHub], true or false (default false)
+//   - SNODRA_SERVER_ALWAYS_ROUTE_THROUGH_HUB: [AlwaysRouteThroughHub], true or false (default false)
 //   - SNODRA_SERVER_TOKEN, SNODRA_SERVER_TOKEN_FILE: [Token], [TokenFile]
 //   - SNODRA_SERVER_OAUTH2_TOKEN_URI: [JWT] with [NewClientCredentials], from
 //     SNODRA_SERVER_OAUTH2_CLIENT_ID (default the service name), SNODRA_SERVER_OAUTH2_CLIENT_SECRET
@@ -204,12 +204,12 @@ func (c *config) applySecurityEnv(get func(string) (string, bool)) error {
 		}
 		c.forwardJWT = on
 	}
-	if v, ok := get("SNODRA_ALWAYS_THROUGH_HUB"); ok {
-		on, err := envFlag("SNODRA_ALWAYS_THROUGH_HUB", v)
+	if v, ok := get("SNODRA_SERVER_ALWAYS_ROUTE_THROUGH_HUB"); ok {
+		on, err := envFlag("SNODRA_SERVER_ALWAYS_ROUTE_THROUGH_HUB", v)
 		if err != nil {
 			return err
 		}
-		c.alwaysThroughHub = on
+		c.alwaysRouteThroughHub = on
 	}
 	return nil
 }

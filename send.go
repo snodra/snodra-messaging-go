@@ -86,7 +86,7 @@ func MaxResults(n uint32) SendOption { return func(c *sendConfig) { c.maxResults
 // https://snodra.damoreira.com/library-authors/protocol/ (Requests).
 //
 // A command of a type this instance handles itself is answered in-process, unless
-// [AlwaysThroughHub] is on: its handler runs on the caller's goroutine under ctx, with no hub, no
+// [AlwaysRouteThroughHub] is on: its handler runs on the caller's goroutine under ctx, with no hub, no
 // permit and no handler slot ([MaxConcurrent] does not count it), also before [App.Start] and
 // after [App.Shutdown]. The handler sees a request with a fresh id, the call's [Header]s and the
 // correlation id (that of the request ctx is handling, else a new one); it acts for the caller of

@@ -82,12 +82,12 @@ func TestAQueryThisInstanceHandlesIsAnsweredInProcessUnlessShared(t *testing.T) 
 	is(t, receive(t, done), nil)
 }
 
-func TestAlwaysThroughHubSendsEveryRequestToTheHub(t *testing.T) {
+func TestAlwaysRouteThroughHubSendsEveryRequestToTheHub(t *testing.T) {
 	hub := fakehub.Start(t)
 	app, s := serving(t, hub, func(app *App) {
 		is(t, HandleCommand(app, place), nil)
 		is(t, HandleQuery(app, get), nil)
-	}, AlwaysThroughHub(true))
+	}, AlwaysRouteThroughHub(true))
 	for _, m := range []Message{PlaceOrder{OrderID: "o-1"}, GetOrder{OrderID: "o-1"}} {
 		done := make(chan error, 1)
 		go func() {
