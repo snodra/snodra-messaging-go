@@ -54,7 +54,7 @@ type App struct {
 	tel                                        *telemetry     // what the library reports; never nil
 	gaugesEnded                                atomic.Bool    // Shutdown finished: the gauges read zeros
 	certMu                                     sync.Mutex
-	certFP                                     string // the client certificate any hub saw last, for the rotation count
+	certSeen                                   map[string]struct{} // the client certificates any hub presented, for the rotation count
 
 	drainMu    sync.Mutex
 	drainUntil time.Time // when the shutdown's handler drain ends; zero before it
@@ -170,14 +170,21 @@ func (a *App) start() error {
 }
 
 // certPresented notes that a stream went live presenting the client certificate with fingerprint
-// fp: one rotation is counted when it is not the certificate the app presented last, whichever
-// hub presents it first (one renewal is one rotation, however many hubs roll over to it).
+// fp: one rotation is counted when no hub presented this certificate before and another one was
+// presented already. One renewal is one rotation, however many hubs roll over to it, and a hub
+// reconnecting with an older pair (or acks arriving in reverse order) counts nothing.
 func (a *App) certPresented(fp string) {
 	a.certMu.Lock()
-	prev := a.certFP
-	a.certFP = fp
+	_, seen := a.certSeen[fp]
+	first := len(a.certSeen) == 0
+	if !seen {
+		if a.certSeen == nil {
+			a.certSeen = map[string]struct{}{}
+		}
+		a.certSeen[fp] = struct{}{}
+	}
 	a.certMu.Unlock()
-	if prev != "" && prev != fp {
+	if !seen && !first {
 		a.tel.certificateRotated()
 	}
 }

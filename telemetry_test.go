@@ -406,7 +406,18 @@ type readingInside struct {
 	got chan Gauges
 }
 
-func (r *readingInside) ObserveGauges(read func() Gauges) { r.got <- read() }
+func (r *readingInside) ObserveGauges(read func() Gauges) {
+	// Read in a goroutine and give up after a while: a read that waits for a lock the caller
+	// holds fails the test at once instead of hanging it until the test timeout.
+	res := make(chan Gauges, 1)
+	go func() { res <- read() }()
+	select {
+	case g := <-res:
+		r.got <- g
+	case <-time.After(2 * time.Second):
+		r.got <- Gauges{ConnectedHubs: -1} // sentinel: the read did not return
+	}
+}
 
 func TestStartDoesNotHoldItsLockWhileTheImplementationReadsTheGauges(t *testing.T) {
 	rec := &readingInside{got: make(chan Gauges, 1)}
@@ -420,7 +431,45 @@ func TestStartDoesNotHoldItsLockWhileTheImplementationReadsTheGauges(t *testing.
 	case <-time.After(3 * time.Second):
 		t.Fatal("Start did not return: ObserveGauges is called with the app's lock held")
 	}
-	is(t, (<-rec.got).ConnectedHubs, 0)
+	got := <-rec.got
+	if got.ConnectedHubs == -1 {
+		t.Fatal("the gauges read did not return: ObserveGauges is called with the app's lock held")
+	}
+	is(t, got.ConnectedHubs, 0)
+}
+
+func TestAShutdownBeforeTheRegistrationRegistersNothing(t *testing.T) {
+	rec := &stopping{}
+	tel := newTelemetry(rec, slog.New(slog.DiscardHandler))
+	tel.stopGauges() // Shutdown completed between start and observeGauges
+	tel.observeGauges(func() Gauges { return Gauges{} })
+	is(t, rec.read == nil, true)
+	is(t, rec.stopped.Load(), int32(0))
+
+	// The usual order: registered, then ended once.
+	rec2 := &stopping{}
+	tel2 := newTelemetry(rec2, slog.New(slog.DiscardHandler))
+	tel2.observeGauges(func() Gauges { return Gauges{} })
+	tel2.stopGauges()
+	tel2.stopGauges()
+	is(t, rec2.read != nil, true)
+	is(t, rec2.stopped.Load(), int32(1))
+}
+
+func TestAnOlderCertificateComingBackIsNotARotation(t *testing.T) {
+	rec := &recorder{}
+	app := newApp(t, Hubs("127.0.0.1:1"), Telemetry(rec))
+	rotations := func() int { return rec.count(func(r *recorder) int { return r.rotated }) }
+	app.certPresented("aaaa") // the first pair: no rotation
+	is(t, rotations(), 0)
+	app.certPresented("bbbb") // renewed
+	is(t, rotations(), 1)
+	app.certPresented("bbbb") // a second hub rolls over to it
+	app.certPresented("aaaa") // a hub reconnects with the older pair
+	app.certPresented("bbbb")
+	is(t, rotations(), 1)
+	app.certPresented("cccc") // renewed again
+	is(t, rotations(), 2)
 }
 
 func TestACallersCancellationRecordsNothing(t *testing.T) {

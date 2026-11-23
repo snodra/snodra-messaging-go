@@ -368,7 +368,7 @@ reference library departs from it. In each case this library follows the referen
   `otel` module). Differences visible to a dashboard: the instrumentation scope is the Go import path
   `github.com/snodra/snodra-messaging-go`; a handled request gets a server span named after its message type, a child of its
   valid `traceparent`; the three counters are synchronous instead of observable, exported as the same monotonic sums with
-  every series at 0 from the start; a call ended by the caller's own deadline (`context.DeadlineExceeded`) is `timeout`,
-  and a call the caller cancels records nothing (as in both libraries).
+  every series at 0 from the start; a call ended by the caller's own deadline (`context.DeadlineExceeded`) is `timeout`.
+  A call the caller cancels records nothing, as in both libraries.
 - **Question:** should the specification name the instruments and their labels as part of the library contract, and should
   every library name its scope after its package and create the handler span?

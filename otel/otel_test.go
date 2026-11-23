@@ -178,7 +178,7 @@ func TestWithoutAPropagatorTheTraceContextIsStillUsed(t *testing.T) {
 	is(t, h["traceparent"] != "", true)
 }
 
-func TestTheDefaultsAreTheGlobalProvidersAndCostNothingWithoutAnSDK(t *testing.T) {
+func TestWithoutAnSDKEveryCallIsSafeAndRecordsNothing(t *testing.T) {
 	i := snodraotel.New() // no SDK installed: the API's no-op providers
 	i.RequestDone("command", "t", "ok", time.Millisecond)
 	i.TokenFetched("ok")

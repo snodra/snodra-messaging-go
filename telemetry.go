@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"runtime/debug"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -23,11 +24,12 @@ import (
 // id. Embed [NopInstrumentation] to implement only some of the methods.
 type Instrumentation interface {
 	// RequestDone records one Send or Query call of msgType, from the call to its result with
-	// every retry included; a call its caller cancels (context.Canceled) is not reported. kind is "command" or "query"; outcome is "ok", "no_handler",
-	// "timeout", "handler_disconnected", "resource_exhausted", "handler_error", "denied",
-	// "invalid_request" (also an answer that does not decode, and a call refused locally), "cancelled" (the
-	// hub's CANCELLED), "unavailable" (no
-	// hub took the request, or its stream broke before the answer) or "error".
+	// every retry included; a call its caller cancels (context.Canceled) is not reported.
+	// kind is "command" or "query"; outcome is "ok", "no_handler", "timeout",
+	// "handler_disconnected", "resource_exhausted", "handler_error", "denied",
+	// "invalid_request" (also an answer that does not decode, and a call refused locally),
+	// "cancelled" (the hub's CANCELLED), "unavailable" (no hub took the request, or its
+	// stream broke before the answer) or "error".
 	RequestDone(kind, msgType, outcome string, took time.Duration)
 	// TokenFetched records one fetch of an access token by [NewClientCredentials]: result is
 	// "ok", "http_error" (a non-success status without an OAuth2 error body), "oauth_error" (an
@@ -112,6 +114,10 @@ type telemetry struct {
 	i      Instrumentation // nil: nothing is reported
 	log    *slog.Logger
 	logged atomic.Bool
+
+	gmu          sync.Mutex // orders ObserveGauges and StopObservingGauges
+	gaugesObsd   bool       // ObserveGauges was called
+	gaugesStoppd bool       // the app is shut down: no registration after this
 }
 
 func newTelemetry(i Instrumentation, log *slog.Logger) *telemetry {
@@ -174,11 +180,20 @@ func (t *telemetry) credentialsRefreshSent() {
 	t.i.CredentialsRefreshSent()
 }
 
-// observeGauges hands the implementation read; a read that panics reads zeros.
+// observeGauges hands the implementation read; a read that panics reads zeros. After the
+// app's shutdown it hands nothing: a registration made then would never be ended. The ordering
+// lock is held while the implementation runs, so a Shutdown racing this call waits for it and
+// then ends the registration it made; read does not take that lock.
 func (t *telemetry) observeGauges(read func() Gauges) {
 	if !t.enabled() {
 		return
 	}
+	t.gmu.Lock()
+	defer t.gmu.Unlock()
+	if t.gaugesStoppd {
+		return
+	}
+	t.gaugesObsd = true
 	defer t.guard("ObserveGauges")
 	t.i.ObserveGauges(func() Gauges {
 		defer func() { _ = recover() }()
@@ -190,6 +205,15 @@ func (t *telemetry) observeGauges(read func() Gauges) {
 func (t *telemetry) stopGauges() {
 	if !t.enabled() {
 		return
+	}
+	t.gmu.Lock()
+	defer t.gmu.Unlock()
+	if t.gaugesStoppd {
+		return
+	}
+	t.gaugesStoppd = true
+	if !t.gaugesObsd {
+		return // never registered: nothing to end
 	}
 	if s, ok := t.i.(GaugesStopper); ok {
 		defer t.guard("StopObservingGauges")
