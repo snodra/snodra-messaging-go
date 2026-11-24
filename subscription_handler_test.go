@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -330,10 +331,27 @@ func TestShutdownEndsServedSubscriptions(t *testing.T) {
 }
 
 func TestConcurrentEmitCancelAndComplete(t *testing.T) {
-	updates, app, s := watching(t, fakehub.Start(t), nil)
-	const subs = 40
+	// The emitters stop once the library has read every request and Cancel below: the handler of
+	// the command sent after them runs then. And they keep at most about backlog parts unread:
+	// the reply to that command comes after the parts emitted before it, which a slow machine
+	// would otherwise read for longer than the test waits.
+	const backlog = 2000
+	var unread atomic.Int64 // parts emitted (to the subscriptions reached) and not read yet
 	stop := make(chan struct{})
+	halt := sync.OnceFunc(func() { close(stop) })
+	var updates *Updates[WatchOrders, OrderUpdate]
+	app, s := serving(t, fakehub.Start(t), func(app *App) {
+		u, err := HandleSubscription[WatchOrders, OrderView, OrderUpdate](app, watchOrders)
+		is(t, err, nil)
+		updates = u
+		is(t, HandleCommand(app, func(ctx context.Context, p PlaceOrder) (Receipt, error) {
+			halt()
+			return place(ctx, p)
+		}), nil)
+	})
+	const subs = 40
 	var emitters sync.WaitGroup
+	t.Cleanup(func() { halt(); emitters.Wait() }) // never left spinning by a failure
 	for g := range 8 {
 		emitters.Add(1)
 		go func() {
@@ -344,8 +362,12 @@ func TestConcurrentEmitCancelAndComplete(t *testing.T) {
 					return
 				default:
 				}
-				updates.Emit(nil, OrderUpdate{Value: g})
-				updates.Emit(func(q WatchOrders) bool { return strings.HasSuffix(q.Topic, strconv.Itoa(g)) }, OrderUpdate{Value: g})
+				if unread.Load() >= backlog {
+					time.Sleep(ms) // until the test reads
+					continue
+				}
+				unread.Add(int64(updates.Emit(nil, OrderUpdate{Value: g})))
+				unread.Add(int64(updates.Emit(func(q WatchOrders) bool { return strings.HasSuffix(q.Topic, strconv.Itoa(g)) }, OrderUpdate{Value: g})))
 			}
 		}()
 	}
@@ -361,8 +383,9 @@ func TestConcurrentEmitCancelAndComplete(t *testing.T) {
 			updates.Complete(topic("t" + strconv.Itoa(i)))
 		}
 	}
-	// The read loop takes frames in order: once this command is answered, every request and
-	// Cancel above was read. Then the emitters stop and every subscription left completes.
+	// The read loop takes frames in order: once this command is handled, every request and
+	// Cancel above was read, and the emitters stop. Once it is answered, every subscription
+	// left completes.
 	s.Send(t, command("r-sync", "orders.PlaceOrder", `{"orderId":"o-1"}`))
 
 	// Per subscription: parts numbered 1, 2, 3, ... and nothing after its one end, which
@@ -380,10 +403,10 @@ func TestConcurrentEmitCancelAndComplete(t *testing.T) {
 		switch {
 		case m.GetReply() != nil:
 			is(t, m.GetReply().GetRequestId(), "r-sync")
-			close(stop)
 			emitters.Wait()
 			updates.Complete(nil)
 		case m.GetPart() != nil:
+			unread.Add(-1)
 			p := m.GetPart()
 			id := p.GetRequestId()
 			if ends[id] > 0 {
