@@ -52,25 +52,23 @@ type ArchiveOrder struct {
 
 func (ArchiveOrder) MessageType() string { return "orders.ArchiveOrder" }
 
-// serveOrders is the README's handler.
-func serveOrders(ctx context.Context) error {
-	// snippet:begin handler
-	app, err := snodra.New(snodra.Service("orders-service"), snodra.FromEnv())
-	if err != nil {
-		return err
-	}
-	err = snodra.HandleCommand(app, func(ctx context.Context, cmd PlaceOrder) (Receipt, error) {
-		return Receipt{OrderID: cmd.OrderID, Total: cmd.Cents}, nil
-	})
-	if err != nil {
-		return err
-	}
-	return app.Run(ctx) // connects to every hub, serves until ctx ends, then shuts down in order
-	// snippet:end
-}
-
 func Example_handler() {
-	_ = serveOrders
+	serve := func(ctx context.Context) error {
+		// snippet:begin handler
+		app, err := snodra.New(snodra.Service("orders-service"), snodra.FromEnv())
+		if err != nil {
+			return err
+		}
+		err = snodra.HandleCommand(app, func(ctx context.Context, cmd PlaceOrder) (Receipt, error) {
+			return Receipt{OrderID: cmd.OrderID, Total: cmd.Cents}, nil
+		})
+		if err != nil {
+			return err
+		}
+		return app.Run(ctx) // connects to every hub, serves until ctx ends, then shuts down in order
+		// snippet:end
+	}
+	_ = serve
 }
 
 func Example_send() {

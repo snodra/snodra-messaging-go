@@ -72,23 +72,24 @@ func TestReadmeInstallLinesNameNoVersion(t *testing.T) {
 }
 
 // snippets are the regions between "// snippet:begin <name>" and "// snippet:end" of the
-// example files, one tab of indentation removed.
+// example files, the indentation of their begin marker removed.
 func snippets(t *testing.T, path string) []string {
 	t.Helper()
 	var out []string
 	var cur []string
-	in := false
+	in, indent := false, ""
 	for _, line := range strings.Split(readText(t, path), "\n") {
 		switch trimmed := strings.TrimSpace(line); {
 		case strings.HasPrefix(trimmed, "// snippet:begin"):
 			in, cur = true, nil
+			indent = line[:len(line)-len(strings.TrimLeft(line, " \t"))]
 		case trimmed == "// snippet:end":
 			if in {
 				out = append(out, strings.Join(cur, "\n"))
 			}
 			in = false
 		case in:
-			cur = append(cur, strings.TrimPrefix(line, "\t"))
+			cur = append(cur, strings.TrimPrefix(line, indent))
 		}
 	}
 	return out

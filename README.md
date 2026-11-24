@@ -30,8 +30,9 @@ retries and timeouts.
   `snodra.AlwaysRouteThroughHub(true)` sends it through the hub like any other request.
 - **Every query mode**: point, scatter-gather, streaming and subscription; streams and updates are `iter.Seq2`.
 - **The hub connection**: registration, heartbeats, reconnects, flow control, several hubs and an ordered shutdown.
-- **Credentials and identity**: a token, an OAuth2 JWT or a client certificate, each renewed; the caller's token
-  verified against the issuer's keys, and guards on handlers.
+- **Credentials and identity**: a token (static, or a file read again), an OAuth2 JWT (renewed) or a client
+  certificate (rolled over to a renewed pair); the caller's token verified against the issuer's keys, and guards on
+  handlers.
 - **Telemetry** behind an interface, with an OpenTelemetry implementation in the separate `observability` module.
 - **Feature level 1**, proved by the 33 checks of the conformance runner. Events, stores, event processors and sagas
   (levels 2 to 4) are not in it yet: the Kotlin and Rust libraries have them.
@@ -62,8 +63,9 @@ if err != nil {
 return app.Run(ctx) // connects to every hub, serves until ctx ends, then shuts down in order
 ```
 
-A message is a Go type with a `MessageType() string` method; its payload is JSON. Settings are options, and
-`snodra.FromEnv()` reads the same `SNODRA_*` variables as the Rust library; options given after it win.
+A message is a Go type with a `MessageType() string` method; its payload is JSON by default (see `snodra.Codec`).
+Settings are options, and `snodra.FromEnv()` reads the same `SNODRA_*` variables as the Rust library; options given
+after it win.
 
 ## Documentation
 
