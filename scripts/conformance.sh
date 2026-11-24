@@ -3,10 +3,10 @@
 #
 #   scripts/conformance.sh [--hubs 1|2] [--report text|json] [runner args...]
 #
-# Builds bin/conformance-service, fetches the runner (snodra-conformance v0.2.0) into bin/
+# Builds bin/conformance-service, fetches the runner (snodra-conformance v0.3.0) into bin/
 # unless SNODRA_CONFORMANCE_BIN names one (the download is checked against the sha256 pinned in
 # scripts/conformance-runner.sha256, as in CI), starts snodra/snodra-server:${SNODRA_SERVER_VERSION}
-# (default 0.5.4) on 127.0.0.1:7000 (and 127.0.0.1:7100 with --hubs 2), runs the runner with the
+# (default 0.6.0) on 127.0.0.1:7000 (and 127.0.0.1:7100 with --hubs 2), runs the runner with the
 # remaining arguments (for example --only L1-REGISTER-FIRST) and removes the hubs on exit.
 #
 # --report json prints the runner's JSON report instead of the text one (CI uses it). With
@@ -17,8 +17,8 @@
 # the AirPlay Receiver holds port 7000, so run there with, say, SNODRA_HUB_PORT=17000.
 set -euo pipefail
 
-runner_version=v0.2.0
-server_image="snodra/snodra-server:${SNODRA_SERVER_VERSION:-0.5.4}"
+runner_version=v0.3.0
+server_image="snodra/snodra-server:${SNODRA_SERVER_VERSION:-0.6.0}"
 base_port="${SNODRA_HUB_PORT:-7000}"
 port_error="SNODRA_HUB_PORT must be a port number from 1 to 65435, got '$base_port'"
 if ! [[ "$base_port" =~ ^0*[0-9]{1,5}$ ]]; then

@@ -1,7 +1,7 @@
 # sha256 of the snodra-conformance release archives this repository pins, one per platform, in the
 # format of `sha256sum`. scripts/conformance.sh and the CI conformance job check every download
 # against it: change the runner version there and these lines here together.
-4d8402f21c84f4e39a504f9c98eabce6c1818464d7ffb5995df760dbee9f154a  snodra-conformance-v0.2.0-x86_64-unknown-linux-musl.tar.gz
-324fda8156fa086973142e862ba94bff97300e2d5792c6cc3addbbc184c0e163  snodra-conformance-v0.2.0-aarch64-unknown-linux-musl.tar.gz
-bfeb40752b892f06b72451047bcd1d5258e00ecaba50987060744760f306826f  snodra-conformance-v0.2.0-x86_64-apple-darwin.tar.gz
-9373769d33e2b7684a9854110693bd566a754c7541012b1bfdb20e4bc953af53  snodra-conformance-v0.2.0-aarch64-apple-darwin.tar.gz
+f542ae5e7b48bd61e88e908cb8e12599eec9c680c3d83ebbc2c53d2038e0aa04  snodra-conformance-v0.3.0-x86_64-unknown-linux-musl.tar.gz
+c8e9ba1f088fb9289c395a050af02bb9f5acdd62a2c33ec28c6007eec3a3f564  snodra-conformance-v0.3.0-aarch64-unknown-linux-musl.tar.gz
+c3350ffb876bccc4737c79bcc79b16a03a6c7f3e4d28f284042f58e90fe5a839  snodra-conformance-v0.3.0-x86_64-apple-darwin.tar.gz
+3c4af9e2fa26f81508b588dd127cabc3b310c2d0d9b45a6f2c37f24956273adc  snodra-conformance-v0.3.0-aarch64-apple-darwin.tar.gz

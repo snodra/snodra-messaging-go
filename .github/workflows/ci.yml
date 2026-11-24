@@ -109,8 +109,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      SNODRA_CONFORMANCE_VERSION: v0.2.0
-      SNODRA_SERVER_VERSION: ${{ vars.SNODRA_SERVER_VERSION || '0.5.4' }}
+      SNODRA_CONFORMANCE_VERSION: v0.3.0
+      SNODRA_SERVER_VERSION: ${{ vars.SNODRA_SERVER_VERSION || '0.6.0' }}
       SNODRA_CONFORMANCE_REPORT_DIR: ${{ github.workspace }}/conformance-reports
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
