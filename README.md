@@ -231,7 +231,8 @@ answered UNAUTHENTICATED.
 ## Configuration
 
 Every setting is an option (`snodra.Service`, `snodra.Hubs`, `snodra.MaxConcurrent`, ...), and `snodra.FromEnv()` reads
-the same `SNODRA_*` variables the other Snodra libraries read; options given after it win. The full list, with
+the same `SNODRA_*` variables as the Rust library (the Kotlin library is configured with Spring properties); options
+given after it win. The full list, with
 defaults, is in the documentation of `FromEnv` (`go doc snodra.FromEnv`) and at
 <https://snodra.damoreira.com/messaging/go/configuration/>. The common ones:
 

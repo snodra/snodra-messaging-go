@@ -12,8 +12,8 @@ import (
 // defaultHubAddress is the hub of SNODRA_SERVER_ADDRESS when the variable is not set.
 const defaultHubAddress = "static://snodra-server:7000"
 
-// FromEnv reads the settings from the environment, the same variables the other Snodra
-// libraries read. A variable that is not set, or blank, changes nothing; a later option
+// FromEnv reads the settings from the environment, the same variables the Rust library
+// reads (the Kotlin library is configured with Spring properties). A variable that is not set, or blank, changes nothing; a later option
 // overrides what FromEnv set.
 //
 //   - SNODRA_SERVICE_NAME: [Service]
