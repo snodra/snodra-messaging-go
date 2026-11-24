@@ -68,7 +68,7 @@ Settings are options, and `snodra.FromEnv()` reads the `SNODRA_*` variables; opt
 
 ## Documentation
 
-Quick start, the settings map, the API and testing: **<https://snodra.damoreira.com/messaging/go/>**, and
+Quick start, the settings map, the API and testing: **<https://snodra.damoreira.com/docs/messaging/go/>**, and
 `go doc -all` for the package. A complete service is [`examples/quickstart`](examples/quickstart/main.go). The
 library speaks the Snodra protocol (`snodra.hub.v1`). Where the specification is silent, [SPEC-GAPS.md](SPEC-GAPS.md)
 records what this library does. Other languages: <https://snodra.damoreira.com/>.
