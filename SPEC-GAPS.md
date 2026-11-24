@@ -157,13 +157,14 @@ spot.
   (each hop is guarded by the full bound), and so does the walk over the hubs that answer a unary request
   `NO_HANDLER`. One deadline bounds the call: when no hub can take the request it waits for one, and it starts no new
   hop, once its chosen timeout (5 s without one) has passed since it began; so a call lasts at most that plus one
-  hop's guard. Unary requests, scatter-gathers, streams and subscriptions move alike. This is what the Kotlin library
-  and the Rust library do. A unary request that reaches the deadline after a `NO_HANDLER` with a live hub still
-  untried fails as never sent too, as in the Kotlin library (the Rust library returns that `NO_HANDLER`); when every
-  live hub declined, the last answer comes back, also after the deadline. A hub that did not take the request (its
-  stream was gone before the request was queued, or was lost while it was queued) is not tried again in that call
-  either, until the live hubs change while no other hub can take it, as in the Kotlin library (from one hop to the next,
-  the Rust library skips only the hubs that declined).
+  hop's guard. Unary requests, scatter-gathers, streams and subscriptions move alike. A unary request that reaches
+  the deadline after a `NO_HANDLER` with a live hub still untried fails as never sent too; when every live hub
+  declined, the last answer comes back, also after the deadline. This is what the Kotlin library and the Rust library
+  do. A hub that did not take the request (its stream was gone before the request was queued, or was lost while it
+  was queued) is not tried again in that call either, until the live hubs change while no other hub can take it, as
+  in the Kotlin library. The Rust library counts a hub that did not take the write as tried within that write (after
+  a `NO_HANDLER`, with no other hub taking it, the last answer comes back at once), but from one hop to the next it
+  carries only the hubs that declined: a hub that lost the request while it was queued can be tried again.
 - **This library:** does so (`send.go`, `stream_client.go`), failing with `ErrNeverSent`. Before, it failed at once
   when no hub was acknowledged (outside a client certificate rollover), and later each move waited for a hub anew;
   it returned the last `NO_HANDLER` at the deadline whether or not a live hub was still untried, and it skipped only
@@ -315,8 +316,8 @@ spot.
   "must drop a stream that brought no echo for three heartbeat intervals"; it does not say when the library looks, nor
   how far past three intervals the drop may come.
 - **Settled:** a library looks on each heartbeat tick from the `RegisterAck` on and drops the stream when more than
-  three heartbeat intervals have passed since the last echo (or since the ack) and the three heartbeats sent since
-  that echo are all unanswered: the drop comes on the tick after the third unanswered heartbeat, between three and
+  three heartbeat intervals have passed since the last echo (or since the ack) and at least three heartbeats sent
+  since that echo are unanswered: the drop comes on the tick after the third unanswered heartbeat, between three and
   four intervals after the last echo, never before three full intervals. Before the `RegisterAck` it does not look:
   the 10 s handshake timeout closes a stream that brings neither an ack nor an echo. The Kotlin library and the Rust
   library now do so too; before, the Rust library also looked before the ack (dropping such a stream at about 9 s)
@@ -324,7 +325,7 @@ spot.
   unanswered heartbeat was more than three intervals old. The heartbeats counted are all those written since the
   last echo: the Kotlin library follows every `Register` with a heartbeat, the later ones too (a re-registration, the
   empty `Register` at shutdown, at a client certificate rollover or when an address leaves the DNS answer), and those
-  count with the ticks' (the Rust library writes no heartbeat after a later `Register`).
+  count with the ticks', as they do in the Rust library.
 - **This library:** does so (`connection.go`, `hubSilent`), the heartbeat after every later `Register` written and
   counted as in the Kotlin library. Before, it wrote no heartbeat after a later `Register`.
 - **Question:** settled.
@@ -405,3 +406,18 @@ spot.
   header, an invalid option) or one answered in-process, as in the Kotlin library.
 - **Question:** should the specification name the instruments and their labels as part of the library contract, and should
   every library name its scope after its package and create the handler span?
+
+### SG-25: the next hub of an unkeyed request after a hub did not take it
+
+- **Specification:** [protocol.md, Several hubs](https://snodra.damoreira.com/library-authors/protocol/) says a request
+  that moves goes to the other live hubs "in the same order the request chose its first hub by (... an unkeyed one:
+  round-robin order from its hub)"; with three or more hubs it does not say which hub comes next when the shared
+  round-robin counter has moved meanwhile, as it does at every hop.
+- **Kotlin library:** takes `untried[rr % size]`: the next turn of the counter, as an index into the shortened list of
+  the live hubs not tried yet.
+- **Rust library:** rotates over all live hubs from its next turn and takes the first one not tried yet.
+- **This library:** does as the Rust library (`pool.go`, `order`, and `send.go`, `writeOnce`). With hubs A, B and C
+  and the request declined by A, this library and the Rust library go to B next unless another call moved the
+  counter meanwhile, and the Kotlin library to B or C, by the counter's value. The owner accepted the
+  difference: the protocol does not fix this order, and a caller must not rely on it.
+- **Question:** settled: the order is the library's.

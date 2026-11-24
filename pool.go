@@ -202,6 +202,7 @@ func (p *pool) ranked(key string) []*hubConn {
 }
 
 // order is ranked; an unkeyed request takes a round-robin turn only when turn is set.
+// TODO(spec-gap): SG-25 (the next hub of an unkeyed request after one did not take it).
 func (p *pool) order(key string, turn bool) []*hubConn {
 	hubs := p.routable()
 	if len(hubs) == 0 {
