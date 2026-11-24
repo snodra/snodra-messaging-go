@@ -501,11 +501,23 @@ func (c *hubConn) serve(sr *streamRun) (reached bool, err error) {
 	tick := ticker.C
 	// The silent-hub check, armed once the stream is acknowledged: on each heartbeat tick,
 	// before its heartbeat (see hubSilent). The last sign of life is the ack, then each echo;
-	// unanswered counts the heartbeats sent since it.
+	// unanswered counts the heartbeats written since it: the ticks' and those that follow a
+	// later Register, as in the reference library.
 	// See https://snodra.damoreira.com/library-authors/protocol/ (Heartbeats).
 	watchSilence := false
 	var lastEcho time.Time
 	unanswered := 0
+	beat := func() {
+		if watchSilence {
+			unanswered++
+		}
+		_ = ref.send(heartbeat())
+	}
+	// reRegister writes a later Register, followed by a heartbeat as every Register is.
+	reRegister := func(r *hubpb.Register) {
+		_ = ref.send(&hubpb.ClientMessage{Message: &hubpb.ClientMessage_Register{Register: r}})
+		beat()
+	}
 	closeTimer := time.NewTimer(time.Hour)
 	closeTimer.Stop()
 	defer closeTimer.Stop()
@@ -608,9 +620,8 @@ func (c *hubConn) serve(sr *streamRun) (reached bool, err error) {
 				if hubSilent(time.Since(lastEcho), unanswered, interval, c.t.silentIntervals) {
 					return reached, status.Errorf(codes.Unavailable, "no heartbeat echo for %v", time.Since(lastEcho).Round(time.Millisecond))
 				}
-				unanswered++
 			}
-			_ = ref.send(heartbeat())
+			beat()
 			if reached && !rolling {
 				c.followTokenFile(ref)
 			}
@@ -626,7 +637,7 @@ func (c *hubConn) serve(sr *streamRun) (reached bool, err error) {
 			}
 			rolling = true
 			registers++
-			_ = ref.send(&hubpb.ClientMessage{Message: &hubpb.ClientMessage_Register{Register: c.emptyRegister(permits.offeredNow())}})
+			reRegister(c.emptyRegister(permits.offeredNow()))
 			rollUntil = time.Now().Add(c.t.rollIdleLimit)
 			rollTimer.Reset(rollSettle)
 			rollCheck = rollTimer.C
@@ -653,13 +664,13 @@ func (c *hubConn) serve(sr *streamRun) (reached bool, err error) {
 			c.setState(stateDraining)
 			registers++
 			deregisterAt = registers
-			_ = ref.send(&hubpb.ClientMessage{Message: &hubpb.ClientMessage_Register{Register: c.emptyRegister(permits.offeredNow())}})
+			reRegister(c.emptyRegister(permits.offeredNow()))
 		case <-c.reregReq:
 			if !reached || halfClosed || rolling || stopping == nil {
 				break // nothing acknowledged to change, or the stream is leaving anyway
 			}
 			registers++
-			_ = ref.send(&hubpb.ClientMessage{Message: &hubpb.ClientMessage_Register{Register: c.register(permits.offeredNow())}})
+			reRegister(c.register(permits.offeredNow()))
 		case <-closing:
 			// A request this stream forwarded after the shutdown's drain found no handler
 			// running is still answered: the half-close waits for the handlers in flight, until
@@ -977,10 +988,11 @@ func codeName(code codes.Code) string {
 
 // hubSilent decides, on a heartbeat tick, whether an acknowledged stream is silent: more than
 // intervals heartbeat intervals since the last echo (the reference library's comparison), and
-// intervals heartbeats sent since that echo all unanswered. The second condition keeps a tick
-// that fires a little late, nominally exactly three intervals after the last echoed heartbeat,
-// from dropping the stream one tick early: the drop comes on the tick after the third
-// unanswered heartbeat, between three and four intervals after the last echo.
+// intervals heartbeats sent since that echo all unanswered (the ticks' and those that follow a
+// later Register). The second condition keeps a tick that fires a little late, nominally
+// exactly three intervals after the last echoed heartbeat, from dropping the stream one tick
+// early: the drop comes on the tick after the third unanswered heartbeat, between three and
+// four intervals after the last echo.
 // TODO(spec-gap): SG-19 (the drop moment within "no echo for three heartbeat intervals").
 func hubSilent(since time.Duration, unanswered int, interval time.Duration, intervals int) bool {
 	return unanswered >= intervals && since > interval*time.Duration(intervals)

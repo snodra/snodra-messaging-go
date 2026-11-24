@@ -152,6 +152,80 @@ func TestASilentHubIsDroppedOnTheTickAfterThreeIntervals(t *testing.T) {
 	hub.Next(t).RecvRegister(t) // and the library reconnects
 }
 
+// liveWithSlowTicks is an app on one hub whose ack sets a 10 s heartbeat interval: no tick
+// heartbeat comes during the test, so any heartbeat is one the library wrote for another reason.
+func liveWithSlowTicks(t *testing.T) (*App, *hubConn, *fakehub.Stream) {
+	t.Helper()
+	hub := fakehub.Start(t)
+	app := startApp(t, Hubs(hub.Addr()))
+	s := hub.Next(t)
+	s.RecvRegister(t)
+	s.Ack(t, ackEvery("hub-1", 10*s_))
+	is(t, app.Ready(ctxWithin(t, time.Second)), nil)
+	return app, app.pool.conns[0], s
+}
+
+// nextAfterRegister reads up to the next Register and returns it and the frame after it,
+// InstanceStatus frames skipped.
+func nextAfterRegister(t *testing.T, s *fakehub.Stream) (*hubpb.Register, *hubpb.ClientMessage) {
+	t.Helper()
+	r := s.RecvRegister(t)
+	for {
+		if m := s.Recv(t); m.GetStatus() == nil {
+			return r, m
+		}
+	}
+}
+
+func TestEveryLaterRegisterIsFollowedByAHeartbeat(t *testing.T) {
+	t.Run("re-registration", func(t *testing.T) {
+		_, c, s := liveWithSlowTicks(t)
+		c.reregister()
+		r, next := nextAfterRegister(t, s)
+		is(t, r.GetServiceName(), "orders-service")
+		is(t, next.GetHeartbeat() != nil, true)
+	})
+	t.Run("the empty Register at shutdown", func(t *testing.T) {
+		app, _, s := liveWithSlowTicks(t)
+		done := make(chan error, 1)
+		go func() { done <- app.Shutdown(ctxWithin(t, 5*time.Second)) }()
+		r, next := nextAfterRegister(t, s)
+		is(t, len(r.GetCommandTypes())+len(r.GetQueryTypes())+len(r.GetSharedQueryTypes()), 0)
+		is(t, next.GetHeartbeat() != nil, true)
+		s.Ack(t, fakehub.Ack("hub-1"))
+		s.HalfClosed(t, time.Second)
+		s.Close(codes.OK, "")
+		is(t, <-done, nil)
+	})
+	t.Run("the empty Register of a rollover", func(t *testing.T) {
+		_, c, s := liveWithSlowTicks(t)
+		c.rollReq <- c.stream()
+		r, next := nextAfterRegister(t, s)
+		is(t, len(r.GetCommandTypes())+len(r.GetQueryTypes())+len(r.GetSharedQueryTypes()), 0)
+		is(t, next.GetHeartbeat() != nil, true)
+	})
+}
+
+func TestTheHeartbeatAfterALaterRegisterCountsTowardTheSilentHub(t *testing.T) {
+	// The ack resets the heartbeat ticker. Its third tick comes a little more than three
+	// intervals after the ack, the last sign of life, when only two tick heartbeats were
+	// written: the hub is silent then only if the heartbeat after the later Register counted.
+	const interval = 500 * ms
+	hub := fakehub.Start(t)
+	app := startApp(t, Hubs(hub.Addr()))
+	s := hub.Next(t)
+	s.RecvRegister(t)
+	s.EchoHeartbeats(false)
+	acked := time.Now()
+	s.Ack(t, ackEvery("hub-1", interval))
+	is(t, app.Ready(ctxWithin(t, time.Second)), nil)
+	app.pool.conns[0].reregister()
+	at := s.Ended(t, 10*interval)
+	// On the third tick (without the count, the fourth: four intervals).
+	within(t, at.Sub(acked), 3*interval, 3*interval+interval/2)
+	hub.Next(t).RecvRegister(t) // and the library reconnects
+}
+
 func TestTheBackoffResetsAfterAnAck(t *testing.T) {
 	hub := fakehub.Start(t)
 	startApp(t, Hubs(hub.Addr()))

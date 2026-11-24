@@ -317,8 +317,12 @@ spot.
   the 10 s handshake timeout closes a stream that brings neither an ack nor an echo. The Kotlin library and the Rust
   library now do so too; before, the Rust library also looked before the ack (dropping such a stream at about 9 s)
   and could drop exactly three intervals after the last echo, and the Kotlin library dropped when the oldest
-  unanswered heartbeat was more than three intervals old.
-- **This library:** does so (`connection.go`, `hubSilent`).
+  unanswered heartbeat was more than three intervals old. The heartbeats counted are all those written since the
+  last echo: the Kotlin library follows every `Register` with a heartbeat, the later ones too (a re-registration, the
+  empty `Register` at shutdown, at a client certificate rollover or when an address leaves the DNS answer), and those
+  count with the ticks' (the Rust library writes no heartbeat after a later `Register`).
+- **This library:** does so (`connection.go`, `hubSilent`), the heartbeat after every later `Register` written and
+  counted as in the Kotlin library. Before, it wrote no heartbeat after a later `Register`.
 - **Question:** settled.
 
 ### SG-20: the static token file
