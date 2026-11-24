@@ -1,6 +1,6 @@
 # Specification gaps
 
-Places where the [library specification](https://snodra.damoreira.com/library-authors/) is silent or ambiguous. Each
+Places where the [library specification](https://snodra.damoreira.com/docs/library-authors/) is silent or ambiguous. Each
 entry says what the specification says, what this library does where it leaves a choice, and whether the question is
 settled; where an entry is settled its behaviour is the specification. The code carries a
 `// TODO(spec-gap): SG-<n>` comment at the spot.
@@ -18,7 +18,7 @@ settled; where an entry is settled its behaviour is the specification. The code 
 
 ### SG-1: the backoff after a stream closed with UNAVAILABLE
 
-- **Specification:** [protocol.md, Connect and register](https://snodra.damoreira.com/library-authors/protocol/)
+- **Specification:** [protocol.md, Connect and register](https://snodra.damoreira.com/docs/library-authors/protocol/)
   says a stream the hub closes with `UNAVAILABLE` "is an ordinary closure: reconnect from the backoff floor".
 - **This library:** goes back to the floor (500 ms) only after an attempt that reached the `RegisterAck`; an
   `UNAVAILABLE` close before the ack keeps doubling the wait like any other failure (`connection.go`).
@@ -27,7 +27,7 @@ settled; where an entry is settled its behaviour is the specification. The code 
 
 ### SG-2: the retry budget when the caller chose no timeout
 
-- **Specification:** [protocol.md, Never sent or outcome unknown](https://snodra.damoreira.com/library-authors/protocol/)
+- **Specification:** [protocol.md, Never sent or outcome unknown](https://snodra.damoreira.com/docs/library-authors/protocol/)
   says that when a library retries, "all attempts share the caller's time budget, and each attempt sends what is left
   of it as `Request.timeout_ms`, never 0"; it does not say what the budget is when the caller chose no timeout, nor
   how little of it may be left for a retry to start.
@@ -40,7 +40,7 @@ settled; where an entry is settled its behaviour is the specification. The code 
 
 ### SG-3: the local guards of a stream
 
-- **Specification:** [protocol.md, Timeouts](https://snodra.damoreira.com/library-authors/protocol/) sizes the
+- **Specification:** [protocol.md, Timeouts](https://snodra.damoreira.com/docs/library-authors/protocol/) sizes the
   client-side request guard of a request as "the hub's bound for the request + 1 s"; for a streaming query, whose
   answer is many parts, it names the hub's idle timeout ("no part within `Request.timeout_ms`", from the forward, reset
   by every part) but not how long the sender's own guard waits for the first part and between parts.
@@ -53,9 +53,9 @@ settled; where an entry is settled its behaviour is the specification. The code 
 
 ### SG-4: the low-water mark of a stream that was topped up
 
-- **Specification:** [protocol.md, Flow control](https://snodra.damoreira.com/library-authors/protocol/) gives a
+- **Specification:** [protocol.md, Flow control](https://snodra.damoreira.com/docs/library-authors/protocol/) gives a
   finished request's permit back at once when the hub holds at most `min(16, initial_permits / 2)` of the stream's
-  permits; with several hubs ([Several hubs](https://snodra.damoreira.com/library-authors/protocol/)) a stream is
+  permits; with several hubs ([Several hubs](https://snodra.damoreira.com/docs/library-authors/protocol/)) a stream is
   topped up with `Permits{count, grant}` when another hub leaves, and the page does not say whether the mark follows.
 - **Settled:** the mark is the stream's `Register.initial_permits` alone; a top-up raises what the hub holds (and its
   cap on the session), not the mark.
@@ -64,7 +64,7 @@ settled; where an entry is settled its behaviour is the specification. The code 
 
 ### SG-5: when a JWT is renewed
 
-- **Specification:** [protocol.md, Credentials](https://snodra.damoreira.com/library-authors/protocol/) says "both
+- **Specification:** [protocol.md, Credentials](https://snodra.damoreira.com/docs/library-authors/protocol/) says "both
   official libraries renew at 80 % of its lifetime", and the timing summary says "JWT renewal: at 80 % of the token's
   lifetime".
 - **This library:** renews when a margin of a fifth of the lifetime, at least 5 s and at most half the lifetime,
@@ -74,7 +74,7 @@ settled; where an entry is settled its behaviour is the specification. The code 
 
 ### SG-6: forwarded tokens without a JWKS
 
-- **Specification:** [messages.md, Forwarded identity](https://snodra.damoreira.com/library-authors/messages/) says a
+- **Specification:** [messages.md, Forwarded identity](https://snodra.damoreira.com/docs/library-authors/messages/) says a
   library "must validate the token before it runs a handler that requires an authenticated caller, exactly as the
   service validates a REST call (signature against the issuer's JWKS, expiry, issuer)"; it does not say what a
   service configured without a JWKS does.
@@ -93,7 +93,7 @@ settled; where an entry is settled its behaviour is the specification. The code 
 
 ### SG-7: a token endpoint that fails before any stream
 
-- **Specification:** [protocol.md, Credentials](https://snodra.damoreira.com/library-authors/protocol/) says what to
+- **Specification:** [protocol.md, Credentials](https://snodra.damoreira.com/docs/library-authors/protocol/) says what to
   do after the hub closed a JWT session; it says nothing of an access token that cannot be had at all (the endpoint
   refuses, answers an error or cannot be reached) when a stream is about to open.
 - **This library:** opens no stream (a token past its renewal margin is never presented), keeps the endpoint's
@@ -107,7 +107,7 @@ settled; where an entry is settled its behaviour is the specification. The code 
 
 ### SG-8: the client certificate rollover
 
-- **Specification:** [writing-a-library.md, Credentials](https://snodra.damoreira.com/library-authors/writing-a-library/)
+- **Specification:** [writing-a-library.md, Credentials](https://snodra.damoreira.com/docs/library-authors/writing-a-library/)
   says the official libraries "watch the files, wait a random delay so replicas do not all leave at once, and roll
   their hubs over one at a time"; it names no period, no bound of the delay and no limit of a hub's rollover.
 - **This library:** reads the files every 3 s; for a valid pair (past its notBefore, before its notAfter, for
@@ -123,7 +123,7 @@ settled; where an entry is settled its behaviour is the specification. The code 
 
 ### SG-9: the bounds of a shutdown
 
-- **Specification:** [protocol.md, Shutting down](https://snodra.damoreira.com/library-authors/protocol/) fixes one
+- **Specification:** [protocol.md, Shutting down](https://snodra.damoreira.com/docs/library-authors/protocol/) fixes one
   bound, 1 s for the acks of the empty `Register`; the handler drain and the wait for the hub to finish its side after
   the half-close are "bounded" without a value.
 - **This library:** waits at most 1 s for the acks, then ends every subscription it serves, then waits at most 5 s for
@@ -134,7 +134,7 @@ settled; where an entry is settled its behaviour is the specification. The code 
 
 ### SG-10: how often an unwritten request moves to another hub
 
-- **Specification:** [protocol.md, Several hubs](https://snodra.damoreira.com/library-authors/protocol/) says a
+- **Specification:** [protocol.md, Several hubs](https://snodra.damoreira.com/docs/library-authors/protocol/) says a
   request never handed to a stream's transport "goes to the next hub with the same id"; it does not say how often,
   should the next stream be lost too before it writes the request.
 - **Settled:** such a request moves at most 8 times; the ninth loss fails the call as never sent ("'<type>' not
@@ -156,7 +156,7 @@ settled; where an entry is settled its behaviour is the specification. The code 
 
 ### SG-11: which refusal a library keeps
 
-- **Specification:** [protocol.md, Connect and register](https://snodra.damoreira.com/library-authors/protocol/) says
+- **Specification:** [protocol.md, Connect and register](https://snodra.damoreira.com/docs/library-authors/protocol/) says
   the official libraries log a refusal once per distinct message "and keep it as the connection's last rejection".
 - **This library:** keeps two: a per-connection last rejection that a later accepted `Register` clears, and an
   application-wide latest rejection (over every hub) that only a newer refusal replaces. It exposes the
@@ -165,9 +165,9 @@ settled; where an entry is settled its behaviour is the specification. The code 
 
 ### SG-12: a request in a mode the handler does not serve
 
-- **Specification:** [protocol.md, Handling a request](https://snodra.damoreira.com/library-authors/protocol/) says
+- **Specification:** [protocol.md, Handling a request](https://snodra.damoreira.com/docs/library-authors/protocol/) says
   a request in the wrong mode for the handler ("a unary request to a streaming handler, for example") is
-  `INVALID_REQUEST`; [Streaming](https://snodra.damoreira.com/library-authors/protocol/) also lists what the hub does
+  `INVALID_REQUEST`; [Streaming](https://snodra.damoreira.com/docs/library-authors/protocol/) also lists what the hub does
   with "a unary `Reply` to the target (a handler that does not stream)": it relays it as one part and an end, which
   reads as if a unary query handler could answer a streaming request.
 - **Settled:** a library answers as the table says. After the token check (SG-18), whatever the handler:
@@ -198,9 +198,9 @@ settled; where an entry is settled its behaviour is the specification. The code 
 
 ### SG-13: the initial request of a subscription and scatter-gather target ids
 
-- **Specification:** [protocol.md, Subscription](https://snodra.damoreira.com/library-authors/protocol/) says the
+- **Specification:** [protocol.md, Subscription](https://snodra.damoreira.com/docs/library-authors/protocol/) says the
   handler of a subscription type "recognises the initial request by its `#0` id and answers any other unary request
-  with `ErrorCode.INVALID_REQUEST`"; [Scatter-gather](https://snodra.damoreira.com/library-authors/protocol/) numbers
+  with `ErrorCode.INVALID_REQUEST`"; [Scatter-gather](https://snodra.damoreira.com/docs/library-authors/protocol/) numbers
   the targets `<id>#0`, `<id>#1`, ... too, so a scatter-gather of a subscription type would have its target `<id>#0`
   answered with an initial result.
 - **Settled:** a service declares the types its subscription handlers serve in `Register.subscription_query_types`
@@ -215,7 +215,7 @@ settled; where an entry is settled its behaviour is the specification. The code 
 
 ### SG-14: the http:// and https:// prefixes of a hub address
 
-- **Specification:** [protocol.md, Several hubs](https://snodra.damoreira.com/library-authors/protocol/) says a hub
+- **Specification:** [protocol.md, Several hubs](https://snodra.damoreira.com/docs/library-authors/protocol/) says a hub
   whose `RegisterAck.hub_id` is empty is known by its target as `host:port`, "with a `static://` prefix (and
   `http://` or `https://`, for a library that accepts them) stripped"; it says nothing else of those two prefixes.
 - **This library:** accepts `http://` and `https://` (after an optional `static://`) in the hub address list and
@@ -242,9 +242,9 @@ settled; where an entry is settled its behaviour is the specification. The code 
 
 ### SG-16: a configured reconnect backoff outside the specified range
 
-- **Specification:** [protocol.md, Connect and register](https://snodra.damoreira.com/library-authors/protocol/)
+- **Specification:** [protocol.md, Connect and register](https://snodra.damoreira.com/docs/library-authors/protocol/)
   says that after a refused `Register` a library "waits at least 1 s, and at most its backoff cap of at most 5 s"
-  before the next attempt; [Reconnect and backoff](https://snodra.damoreira.com/library-authors/protocol/) caps the
+  before the next attempt; [Reconnect and backoff](https://snodra.damoreira.com/docs/library-authors/protocol/) caps the
   backoff at 5 s.
 - **This library:** refuses only a minimum or maximum of 0 and a minimum above the maximum. A maximum above
   5 s is accepted, and a refused `Register` waits 80 to 100 % of the configured maximum, without a 1 s floor (so a
@@ -254,7 +254,7 @@ settled; where an entry is settled its behaviour is the specification. The code 
 
 ### SG-17: the message of the error codes no handler produces
 
-- **Specification:** [protocol.md, Replies and errors](https://snodra.damoreira.com/library-authors/protocol/) says a
+- **Specification:** [protocol.md, Replies and errors](https://snodra.damoreira.com/docs/library-authors/protocol/) says a
   library must "keep `Error.message` for the codes a handler produces" (`HANDLER_ERROR`, `UNAUTHENTICATED`,
   `PERMISSION_DENIED`, `INVALID_REQUEST`); it says nothing of the message of the other codes.
 - **Settled:** the caller reads these texts: "No handler registered for '<type>'" (`NO_HANDLER`),
@@ -272,7 +272,7 @@ settled; where an entry is settled its behaviour is the specification. The code 
 
 ### SG-18: a forwarded token that fails, for a handler without a guard
 
-- **Specification:** [messages.md, Forwarded identity](https://snodra.damoreira.com/library-authors/messages/) asks a
+- **Specification:** [messages.md, Forwarded identity](https://snodra.damoreira.com/docs/library-authors/messages/) asks a
   library to validate the token "before it runs a handler that requires an authenticated caller"; it says nothing of
   a request that carries a token that fails (unreadable, expired, wrongly signed) to a handler that requires no
   caller, nor of such a request to a type the instance does not serve.
@@ -284,7 +284,7 @@ settled; where an entry is settled its behaviour is the specification. The code 
 
 ### SG-19: when a silent hub is dropped
 
-- **Specification:** [protocol.md, Heartbeats](https://snodra.damoreira.com/library-authors/protocol/) says a library
+- **Specification:** [protocol.md, Heartbeats](https://snodra.damoreira.com/docs/library-authors/protocol/) says a library
   "must drop a stream that brought no echo for three heartbeat intervals"; it does not say when the library looks, nor
   how far past three intervals the drop may come.
 - **Settled:** a library looks on each heartbeat tick from the `RegisterAck` on and drops the stream when more than
@@ -301,7 +301,7 @@ settled; where an entry is settled its behaviour is the specification. The code 
 
 ### SG-20: the static token file
 
-- **Specification:** [writing-a-library.md, Credentials](https://snodra.damoreira.com/library-authors/writing-a-library/)
+- **Specification:** [writing-a-library.md, Credentials](https://snodra.damoreira.com/docs/library-authors/writing-a-library/)
   says a token file "is read again before every connect, and an empty file after a good read is a rotation caught
   half way: keep the last good token"; it says nothing of a file that cannot be read or is empty when the service
   starts, nor of a token that changes in the file while a stream is registered.
@@ -313,7 +313,7 @@ settled; where an entry is settled its behaviour is the specification. The code 
 
 ### SG-21: retrying a stream
 
-- **Specification:** [protocol.md, Never sent or outcome unknown](https://snodra.damoreira.com/library-authors/protocol/)
+- **Specification:** [protocol.md, Never sent or outcome unknown](https://snodra.damoreira.com/docs/library-authors/protocol/)
   says that when a library retries, "all attempts share the caller's time budget, and each attempt sends what is left
   of it as `Request.timeout_ms`"; it says nothing of a streaming query, whose `Request.timeout_ms` is an idle timeout
   (the longest wait for the next part), nor of when a stream stops being retried.
@@ -327,7 +327,7 @@ settled; where an entry is settled its behaviour is the specification. The code 
 
 ### SG-22: a second target answering a hub id already served
 
-- **Specification:** [protocol.md, Several hubs](https://snodra.damoreira.com/library-authors/protocol/) says a later
+- **Specification:** [protocol.md, Several hubs](https://snodra.damoreira.com/docs/library-authors/protocol/) says a later
   target answering a `hub_id` another target owns "is closed and parked [...] and is retried only once the owner is
   gone".
 - **This library:** follows the specification (`pool.go`, `connection.go`): the
@@ -340,7 +340,7 @@ settled; where an entry is settled its behaviour is the specification. The code 
 
 ### SG-23: the permit split during a client certificate rollover with several hubs
 
-- **Specification:** [protocol.md, Several hubs](https://snodra.damoreira.com/library-authors/protocol/) counts in N
+- **Specification:** [protocol.md, Several hubs](https://snodra.damoreira.com/docs/library-authors/protocol/) counts in N
   the hubs that are live or on their first connect attempt, and says "a hub that joins or returns gets
   `ceil(max / N)` on its new stream".
 - **This library:** keeps counting a hub being rolled over to a renewed client certificate: its new `Register` offers
@@ -367,7 +367,7 @@ settled; where an entry is settled its behaviour is the specification. The code 
 
 ### SG-25: the next hub of an unkeyed request after a hub did not take it
 
-- **Specification:** [protocol.md, Several hubs](https://snodra.damoreira.com/library-authors/protocol/) says a request
+- **Specification:** [protocol.md, Several hubs](https://snodra.damoreira.com/docs/library-authors/protocol/) says a request
   that moves goes to the other live hubs "in the same order the request chose its first hub by (... an unkeyed one:
   round-robin order from its hub)"; with three or more hubs it does not say which hub comes next when the shared
   round-robin counter has moved meanwhile, as it does at every hop.

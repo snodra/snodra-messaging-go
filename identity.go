@@ -16,7 +16,7 @@ import (
 // Caller is who sent a request: the acting user of its forwarded token (the authorization
 // header, "Bearer <JWT>"), verified against the issuer's keys ([JWKS]). Without a JWKS no token
 // is an identity: every caller is anonymous. See
-// https://snodra.damoreira.com/library-authors/messages/ (Forwarded identity).
+// https://snodra.damoreira.com/docs/library-authors/messages/ (Forwarded identity).
 type Caller struct {
 	// Subject is the token's sub claim.
 	Subject string

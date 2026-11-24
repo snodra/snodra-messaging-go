@@ -31,7 +31,7 @@ type HandlerOption func(*handlerConfig)
 // too, and so may a subscription query ([HandleSubscription]): a subscription then reaches every
 // instance of every owner. Commands are never shared: [HandleCommand] with Shared returns an
 // error.
-// See https://snodra.damoreira.com/library-authors/protocol/ (Shared query types).
+// See https://snodra.damoreira.com/docs/library-authors/protocol/ (Shared query types).
 func Shared() HandlerOption { return func(c *handlerConfig) { c.shared = true } }
 
 // handlerKind is the request kind a handler serves.
@@ -96,7 +96,7 @@ func (e *decodeError) Unwrap() error { return e.err }
 // [ErrRegistrationClosed]; a type registered twice, as a command and a query, an empty type name,
 // an interface type parameter, a nil handler, a [RequireCaller] without a function, a guard without
 // [JWKS], a command with [Shared]) is returned, and also kept: Start returns every one of them,
-// joined, and does not start. See https://snodra.damoreira.com/library-authors/protocol/ (Handling
+// joined, and does not start. See https://snodra.damoreira.com/docs/library-authors/protocol/ (Handling
 // a request).
 func HandleCommand[C Message, R any](app *App, h func(context.Context, C) (R, error), opts ...HandlerOption) error {
 	return register(app, kindCommand, h, opts)

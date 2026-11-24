@@ -19,7 +19,7 @@ type MessageInfo struct {
 }
 
 // correlationIDHeader is the header that carries the correlation id
-// (https://snodra.damoreira.com/library-authors/messages/).
+// (https://snodra.damoreira.com/docs/library-authors/messages/).
 const correlationIDHeader = "correlationId"
 
 // handling is what the dispatcher puts in a handler's context: the request being handled, what

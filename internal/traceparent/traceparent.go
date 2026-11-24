@@ -1,5 +1,5 @@
 // Package traceparent reads W3C trace context headers. Only a valid traceparent is forwarded: see
-// https://snodra.damoreira.com/library-authors/messages/ (Trace context).
+// https://snodra.damoreira.com/docs/library-authors/messages/ (Trace context).
 package traceparent
 
 import "strings"

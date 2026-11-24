@@ -1,5 +1,5 @@
 // Package jwt checks the callers' forwarded tokens: RS256 signatures against a JWKS, the issuer
-// and the expiry. See https://snodra.damoreira.com/library-authors/messages/ (Forwarded identity).
+// and the expiry. See https://snodra.damoreira.com/docs/library-authors/messages/ (Forwarded identity).
 package jwt
 
 import (

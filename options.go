@@ -103,7 +103,7 @@ func Instance(id string) Option {
 // instance opens one stream to every hub, each with the identical registration, and knows a hub
 // by its RegisterAck.hub_id: a second address answering an id already served is closed and
 // parked until that hub has no other address. See
-// https://snodra.damoreira.com/library-authors/protocol/ (Several hubs). Required (or
+// https://snodra.damoreira.com/docs/library-authors/protocol/ (Several hubs). Required (or
 // SNODRA_SERVER_ADDRESS with [FromEnv]).
 func Hubs(addresses ...string) Option {
 	return func(c *config) error {
@@ -186,7 +186,7 @@ func Tags(tags map[string]string) Option {
 
 // Codec is the payload codec of every handler and send; the default is [JSON]. Every library
 // of the suite reads and writes JSON payloads
-// (https://snodra.damoreira.com/library-authors/messages/): change it only for a codec that
+// (https://snodra.damoreira.com/docs/library-authors/messages/): change it only for a codec that
 // writes the same JSON.
 func Codec(c PayloadCodec) Option {
 	return func(cfg *config) error {

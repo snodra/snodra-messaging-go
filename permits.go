@@ -8,7 +8,7 @@ import (
 )
 
 // permitLedger is the permit accounting of one stream
-// (https://snodra.damoreira.com/library-authors/protocol/, Flow control). The hub holds
+// (https://snodra.damoreira.com/docs/library-authors/protocol/, Flow control). The hub holds
 // offered - received + returned of the stream's permits; a finished request's grant goes back
 // at once when that is at or below min(permitBatch, initial/2) (with one permit: every
 // completion) or when permitBatch grants are pending, else when the timer fires. The mark is the

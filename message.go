@@ -8,7 +8,7 @@ import (
 // Message is a typed message of the Snodra messaging suite. Its wire name
 // (for example "orders.PlaceOrder") is the type every handler registers for
 // and every sender addresses. The method may have a value or a pointer
-// receiver. See https://snodra.damoreira.com/library-authors/messages/.
+// receiver. See https://snodra.damoreira.com/docs/library-authors/messages/.
 type Message interface{ MessageType() string }
 
 // PayloadCodec turns message values into payload bytes and back.
@@ -23,7 +23,7 @@ func (jsonCodec) Marshal(v any) ([]byte, error)      { return json.Marshal(v) }
 func (jsonCodec) Unmarshal(data []byte, v any) error { return json.Unmarshal(data, v) }
 
 // JSON is the default payload codec: encoding/json, with unknown fields
-// ignored on read. See https://snodra.damoreira.com/library-authors/messages/.
+// ignored on read. See https://snodra.damoreira.com/docs/library-authors/messages/.
 var JSON PayloadCodec = jsonCodec{}
 
 // Empty is the result type of a command, which answers without a result. It

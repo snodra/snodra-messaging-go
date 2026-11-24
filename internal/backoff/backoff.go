@@ -1,6 +1,6 @@
 // Package backoff computes the jittered exponential waits of reconnects, retries and token
 // refreshes: a wait doubles from a floor up to a cap, and each wait is spread by ±20 % without
-// ever exceeding the cap. See https://snodra.damoreira.com/library-authors/protocol/ (Reconnect
+// ever exceeding the cap. See https://snodra.damoreira.com/docs/library-authors/protocol/ (Reconnect
 // and backoff).
 package backoff
 

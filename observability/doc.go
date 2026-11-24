@@ -43,5 +43,5 @@
 // tracestate. A request sent outside any handler carries the trace context of the context it
 // is sent with.
 //
-// See https://snodra.damoreira.com/library-authors/messages/ (Trace context).
+// See https://snodra.damoreira.com/docs/library-authors/messages/ (Trace context).
 package observability

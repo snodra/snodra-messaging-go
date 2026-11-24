@@ -23,7 +23,7 @@ import (
 // returns. The request holds its handler slot and its permit until h returns.
 //
 // Registration errors are those of [HandleCommand].
-// See https://snodra.damoreira.com/library-authors/protocol/ (Streaming).
+// See https://snodra.damoreira.com/docs/library-authors/protocol/ (Streaming).
 func HandleStream[Q Message, T any](app *App, h func(context.Context, Q, *StreamWriter[T]) error, opts ...HandlerOption) error {
 	if app == nil {
 		return errors.New("snodra: registration on a nil App")

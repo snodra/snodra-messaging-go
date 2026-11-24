@@ -27,7 +27,7 @@ const (
 )
 
 // pool is the connections of an App, one per hub
-// (https://snodra.damoreira.com/library-authors/protocol/, Several hubs), all sending the
+// (https://snodra.damoreira.com/docs/library-authors/protocol/, Several hubs), all sending the
 // identical Register:
 //
 //   - Dedupe. A hub is its RegisterAck.hub_id (for an empty one, its target as host:port). The
@@ -406,7 +406,7 @@ func (p *pool) reportStatusEvery(interval time.Duration) {
 // handlers in flight over all hubs, and no processor. A hub being rolled over to a renewed
 // client certificate is out of both while another live hub is not (a hub is taken out of the routing for a
 // rollover only then).
-// See https://snodra.damoreira.com/library-authors/protocol/ (Instance status).
+// See https://snodra.damoreira.com/docs/library-authors/protocol/ (Instance status).
 func (p *pool) reportStatus() {
 	var hubs []liveHub
 	var ids []string

@@ -29,7 +29,7 @@ import (
 
 // The instance's credentials towards the hubs: a static token, a JWT renewed before it expires,
 // or a client certificate (tls.go). One kind per instance.
-// See https://snodra.damoreira.com/library-authors/protocol/ (Credentials).
+// See https://snodra.damoreira.com/docs/library-authors/protocol/ (Credentials).
 
 // secret holds a credential behind a closure: fmt prints a func as an address, so the value
 // does not show even where fmt prints struct fields raw (unexported ones, or after a verb that

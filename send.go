@@ -83,7 +83,7 @@ func MaxResults(n uint32) SendOption { return func(c *sendConfig) { c.maxResults
 // the handler's ctx, or one derived from it), the request carries that request's correlation id,
 // its authorization header (see [ForwardJWT]) and its valid traceparent; outside any handling it
 // carries a new correlation id. See
-// https://snodra.damoreira.com/library-authors/protocol/ (Requests).
+// https://snodra.damoreira.com/docs/library-authors/protocol/ (Requests).
 //
 // A command of a type this instance handles itself is answered in-process, unless
 // [AlwaysRouteThroughHub] is on: its handler runs on the caller's goroutine under ctx, with no
@@ -310,7 +310,7 @@ func messageName(m Message) (name string, err error) {
 // that sent ack, when the caller chose chosen (0: none). It sends the chosen timeout (at least
 // 1 ms) or 0, so that the hub applies its per-type override or its default; the guard is the
 // hub's bound for the request plus 1 s: min(chosen, override or max) or, when 0 is sent, the
-// override or max. See https://snodra.damoreira.com/library-authors/protocol/ (Timeouts).
+// override or max. See https://snodra.damoreira.com/docs/library-authors/protocol/ (Timeouts).
 func requestTiming(ack *hubpb.RegisterAck, typ string, chosen time.Duration) (timeoutMS uint32, guard time.Duration) {
 	if chosen > 0 {
 		timeoutMS = uint32(min(max(chosen, minTimeout).Milliseconds(), math.MaxUint32))
@@ -462,7 +462,7 @@ func (p *pendingCalls) end(e *hubpb.ReplyEnd) {
 // answer may carry the hub's or the handler's error; the error is the attempt's own failure.
 //
 // Within the attempt the request keeps its id while it goes from hub to hub
-// (https://snodra.damoreira.com/library-authors/protocol/, Several hubs): when the stream it
+// (https://snodra.damoreira.com/docs/library-authors/protocol/, Several hubs): when the stream it
 // was queued on is lost before the request was written, it goes to the next hub, at most
 // maxUnwrittenMoves times; and a unary request a hub answers with NO_HANDLER (never delivered)
 // goes to each other live hub in turn, at most once each; when every live hub declined, the last

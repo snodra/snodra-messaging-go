@@ -8,7 +8,7 @@
 // wait for something the script expects, never a pause for synchronisation.
 //
 // Where it matters the hub behaves as the reference hub does (see the "How the runner's hub
-// differs" section of https://snodra.damoreira.com/library-authors/conformance/): a first frame
+// differs" section of https://snodra.damoreira.com/docs/library-authors/conformance/): a first frame
 // that is not a Register closes the stream with FAILED_PRECONDITION; a Register with an empty
 // identity, without permits, or with a reserved name closes it with INVALID_ARGUMENT; the
 // RegisterAck is written only when the script sends it and heartbeat echoes only follow it.

@@ -31,7 +31,7 @@ import (
 // [App.Shutdown], which completes every one of them.
 //
 // Registration errors are those of [HandleCommand]; the Updates is nil then.
-// See https://snodra.damoreira.com/library-authors/protocol/ (Subscription).
+// See https://snodra.damoreira.com/docs/library-authors/protocol/ (Subscription).
 func HandleSubscription[Q Message, I, U any](app *App, initial func(context.Context, Q) (I, error), opts ...HandlerOption) (*Updates[Q, U], error) {
 	if app == nil {
 		return nil, errors.New("snodra: registration on a nil App")

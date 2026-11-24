@@ -71,7 +71,7 @@ type Subscription[I, U any] struct {
 // the initial result it counts as the timeout when it comes sooner, and when it passes it ends
 // the subscription, as above. [InitialCredit] is the credit window; [MaxResults] ends the
 // subscription after that many updates. [RoutingKey] is ignored.
-// See https://snodra.damoreira.com/library-authors/protocol/ (Subscription).
+// See https://snodra.damoreira.com/docs/library-authors/protocol/ (Subscription).
 func Subscribe[I, U any](ctx context.Context, app *App, q Message, opts ...SendOption) (*Subscription[I, U], error) {
 	out, err := prepare(ctx, app, hubpb.RequestKind_QUERY, hubpb.RequestMode_SUBSCRIPTION, q, opts)
 	if err != nil {

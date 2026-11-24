@@ -50,7 +50,7 @@ type Gathered[R any] struct {
 // come within the hub's bound plus 1 s),
 // [ErrNeverSent], [ErrOutcomeUnknown] (the hub stream broke before the end: the parts received
 // are dropped), the context's error, or a local failure.
-// See https://snodra.damoreira.com/library-authors/protocol/ (Scatter-gather).
+// See https://snodra.damoreira.com/docs/library-authors/protocol/ (Scatter-gather).
 func Gather[R any](ctx context.Context, app *App, q Message, opts ...SendOption) (*Gathered[R], error) {
 	out, err := prepare(ctx, app, hubpb.RequestKind_QUERY, hubpb.RequestMode_SCATTER_GATHER, q, opts)
 	if err != nil {

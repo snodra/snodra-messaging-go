@@ -6,5 +6,5 @@
 //	import snodra "github.com/snodra/snodra-messaging-go"
 //
 // The protocol and the behaviour a library must have are described at
-// https://snodra.damoreira.com/library-authors/.
+// https://snodra.damoreira.com/docs/library-authors/.
 package snodra

@@ -21,7 +21,7 @@ import (
 // request its parts and one ReplyEnd) and gives the permit back to ref's hub once the request is
 // finished: a streaming request holds it until its end. No user code runs on the read loop, and
 // a defect that panics there or on the request's goroutine fails that request alone (lastResort).
-// See https://snodra.damoreira.com/library-authors/protocol/ (Handling a request).
+// See https://snodra.damoreira.com/docs/library-authors/protocol/ (Handling a request).
 func (a *App) dispatch(req *hubpb.Request, ref *streamRef, permits *streamPermits) {
 	defer a.lastResort(req, func(werr *hubpb.Error) { failRequest(req, ref, werr) })
 	if req.GetMode() == hubpb.RequestMode_SUBSCRIPTION {
@@ -125,7 +125,7 @@ func failRequest(req *hubpb.Request, ref *streamRef, werr *hubpb.Error) {
 // back once the handler returned (at once for a handler that watches its context, or one still
 // waiting for a handler slot). A subscription target (<id>#n) is removed: nothing more is
 // emitted to it. A Cancel for an id that is not running (it already ended) is ignored.
-// See https://snodra.damoreira.com/library-authors/protocol/ (Cancel).
+// See https://snodra.damoreira.com/docs/library-authors/protocol/ (Cancel).
 func (a *App) cancelRequest(id, reason string) {
 	if run := a.running.take(id); run != nil {
 		a.log.Debug("request cancelled by the hub", "request", id, "reason", reason)

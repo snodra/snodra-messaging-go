@@ -3,7 +3,7 @@ package snodra
 import "time"
 
 // timings are the library's clocks. The shipped values are those of
-// https://snodra.damoreira.com/library-authors/protocol/ (Timing summary); the unit tests run on
+// https://snodra.damoreira.com/docs/library-authors/protocol/ (Timing summary); the unit tests run on
 // shortened ones through withTimings.
 type timings struct {
 	// heartbeatBeforeAck is the heartbeat period until the RegisterAck names the hub's.
@@ -53,7 +53,7 @@ type timings struct {
 // min(permitBatch, initial_permits/2) at or below which a grant goes back at once.
 const permitBatch uint32 = 16
 
-// The sender's clocks (https://snodra.damoreira.com/library-authors/protocol/, Timeouts and
+// The sender's clocks (https://snodra.damoreira.com/docs/library-authors/protocol/, Timeouts and
 // Never sent or outcome unknown).
 const (
 	// guardMargin is added to the hub's bound for a request: the local guard gives up only after
@@ -81,7 +81,7 @@ const (
 	defaultMaxSubscriptions = 1024
 )
 
-// Several hubs (https://snodra.damoreira.com/library-authors/protocol/, Several hubs).
+// Several hubs (https://snodra.damoreira.com/docs/library-authors/protocol/, Several hubs).
 const (
 	// maxUnwrittenMoves is how often one request may move to another hub because its stream was
 	// lost before the request was written; past that the call fails with [ErrNeverSent].
@@ -93,7 +93,7 @@ const (
 	dnsDrainPoll = 100 * time.Millisecond
 )
 
-// The checking of the callers' tokens (https://snodra.damoreira.com/library-authors/messages/,
+// The checking of the callers' tokens (https://snodra.damoreira.com/docs/library-authors/messages/,
 // Forwarded identity).
 const (
 	// jwksMinRefresh is how often, at most, a token with a key id the cached JWKS does not know
@@ -104,7 +104,7 @@ const (
 )
 
 // The instance's own credentials towards the hubs
-// (https://snodra.damoreira.com/library-authors/protocol/, Credentials).
+// (https://snodra.damoreira.com/docs/library-authors/protocol/, Credentials).
 const (
 	// tokenFetchTimeout bounds one request to the OAuth2 token endpoint (one TokenSource call).
 	tokenFetchTimeout = 10 * time.Second

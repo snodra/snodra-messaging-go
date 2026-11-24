@@ -1,7 +1,7 @@
 // Package rendezvous is the hub choice of a keyed request: the rendezvous score of a hub id and a
 // routing key, and the ranking of hubs by it. Every official library uses exactly this function,
 // so that a key goes through the same hub whatever language sends it
-// (https://snodra.damoreira.com/library-authors/protocol/, Several hubs).
+// (https://snodra.damoreira.com/docs/library-authors/protocol/, Several hubs).
 package rendezvous
 
 import (

@@ -11,7 +11,7 @@ import (
 )
 
 // The request headers the library sets itself
-// (https://snodra.damoreira.com/library-authors/messages/, Request headers).
+// (https://snodra.damoreira.com/docs/library-authors/messages/, Request headers).
 const (
 	authorizationHeader = "authorization"
 	traceparentHeader   = "traceparent"
@@ -63,7 +63,7 @@ func checkHeaders(own map[string]string, typ string) error {
 // outgoingHeaders are the headers of a request sent with ctx: the caller's own (already
 // checked), then the correlation id of the request ctx is handling (its correlationId, else its
 // id), a new UUID outside any handling; its authorization header, when forwardJWT; and its
-// traceparent, only when valid. See https://snodra.damoreira.com/library-authors/messages/
+// traceparent, only when valid. See https://snodra.damoreira.com/docs/library-authors/messages/
 // (Correlation id, Trace context, Forwarded identity).
 func outgoingHeaders(ctx context.Context, own map[string]string, forwardJWT bool) map[string]string {
 	out := make(map[string]string, len(own)+3)

@@ -9,7 +9,7 @@ import (
 )
 
 // Code is a protocol error code, with the numbers of the hub protocol. See
-// https://snodra.damoreira.com/library-authors/messages/.
+// https://snodra.damoreira.com/docs/library-authors/messages/.
 type Code int32
 
 // The error codes a call can fail with.
@@ -35,7 +35,7 @@ func (c Code) String() string {
 
 // Error is an error answered by the hub or by a remote handler. Details holds
 // the handler's machine-readable details (JSON), only for CodeHandlerError.
-// See https://snodra.damoreira.com/library-authors/messages/.
+// See https://snodra.damoreira.com/docs/library-authors/messages/.
 type Error struct {
 	Code    Code
 	Message string

@@ -23,7 +23,7 @@ import (
 // all attempts share one time budget: the caller's timeout, else the hub's timeout for the type,
 // else 5 s. A retry starts only with at least max(InitialBackoff, 250 ms) of it left, and sends
 // what is left as the request's timeout. See
-// https://snodra.damoreira.com/library-authors/protocol/ (Never sent or outcome unknown).
+// https://snodra.damoreira.com/docs/library-authors/protocol/ (Never sent or outcome unknown).
 type RetryPolicy struct {
 	MaxAttempts    int
 	InitialBackoff time.Duration

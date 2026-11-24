@@ -251,7 +251,7 @@ func (a *App) Run(ctx context.Context) error {
 // Every wait is also bounded by ctx: when ctx ends first, the streams are dropped and ctx's
 // error is returned, at most 50 ms after ctx's deadline (the time given to the dropped streams'
 // goroutines to end). A second call waits for the first and returns its result.
-// See https://snodra.damoreira.com/library-authors/protocol/ (Shutting down).
+// See https://snodra.damoreira.com/docs/library-authors/protocol/ (Shutting down).
 func (a *App) Shutdown(ctx context.Context) error {
 	a.mu.Lock()
 	if a.stopping {

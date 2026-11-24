@@ -22,7 +22,7 @@ import (
 )
 
 // connState is where a connection to one hub stands, as drawn in "A connection to one hub" of
-// https://snodra.damoreira.com/library-authors/writing-a-library/.
+// https://snodra.damoreira.com/docs/library-authors/writing-a-library/.
 type connState int
 
 const (
@@ -503,7 +503,7 @@ func (c *hubConn) serve(sr *streamRun) (reached bool, err error) {
 	// before its heartbeat (see hubSilent). The last sign of life is the ack, then each echo;
 	// unanswered counts the heartbeats written since it: the ticks' and those that follow a
 	// later Register.
-	// See https://snodra.damoreira.com/library-authors/protocol/ (Heartbeats).
+	// See https://snodra.damoreira.com/docs/library-authors/protocol/ (Heartbeats).
 	watchSilence := false
 	var lastEcho time.Time
 	unanswered := 0

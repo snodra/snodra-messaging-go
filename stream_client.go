@@ -45,7 +45,7 @@ func InitialCredit(n uint32) SendOption { return func(c *sendConfig) { c.initial
 // [InitialCredit] is the credit window; [MaxResults] ends the stream after that many items; the
 // retry policy applies until the first item (a retry is a new stream with a fresh id), never
 // after it. [RoutingKey] is ignored: a stream goes to one hub, unkeyed.
-// See https://snodra.damoreira.com/library-authors/protocol/ (Streaming).
+// See https://snodra.damoreira.com/docs/library-authors/protocol/ (Streaming).
 func Stream[T any](ctx context.Context, app *App, q Message, opts ...SendOption) iter.Seq2[T, error] {
 	return func(yield func(T, error) bool) {
 		var zero T
@@ -180,7 +180,7 @@ func (a *App) openStream(ctx context.Context, tmpl *hubpb.Request, chosen time.D
 }
 
 // move writes the request, never written to its lost stream, to the next hub with the same id:
-// it was never sent (https://snodra.damoreira.com/library-authors/protocol/, Several hubs), at
+// it was never sent (https://snodra.damoreira.com/docs/library-authors/protocol/, Several hubs), at
 // most maxUnwrittenMoves times, and none after the deadline of its open (as a unary request).
 // The hub that lost it is not tried again (see triedHubs).
 // TODO(spec-gap): SG-10 (at most 8 moves).
