@@ -501,8 +501,7 @@ func TestACallersCancellationRecordsNothing(t *testing.T) {
 	is(t, reqs[0].outcome, "cancelled")
 }
 
-// A call its options refuse is no call: nothing is recorded, as in the reference library,
-// whose options refuse themselves before any call.
+// A call its options refuse is no call: nothing is recorded.
 func TestALocalRefusalRecordsNothing(t *testing.T) {
 	rec := &recorder{}
 	app, _, _ := sending(t, fakehub.Ack("hub-1"), Telemetry(rec))

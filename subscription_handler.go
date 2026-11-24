@@ -374,8 +374,7 @@ func (s *servedSubscriptions) matches(match func(any) bool, sub *servedSubscript
 // ref. Called from the stream's read loop: it is registered at once, pending its admission, so
 // that a hub Cancel or a lost stream that follows finds it and an update emitted after the
 // request was read reaches it (Emit waits for its query), unless one with its id is open here
-// (INVALID_REQUEST) or the instance serves its limit (RESOURCE_EXHAUSTED), refused at once as in
-// the reference library; its query is decoded, and its admission decided, on its own goroutine,
+// (INVALID_REQUEST) or the instance serves its limit (RESOURCE_EXHAUSTED), refused at once; its query is decoded, and its admission decided, on its own goroutine,
 // so that no codec runs on the stream's loop.
 func (a *App) subscribe(req *hubpb.Request, ref *streamRef) {
 	id := req.GetId()
@@ -403,7 +402,7 @@ func (a *App) subscribe(req *hubpb.Request, ref *streamRef) {
 }
 
 // admitSubscription decodes the query of the registered subscription sub (h's, when it has a
-// handler) and decides its admission, in the reference library's order: the caller's token, then a
+// handler) and decides its admission in this order: the caller's token, then a
 // type not served here, then an anonymous caller of a guarded handler (before the decoding's
 // verdict: it cannot probe the query's shape), then the decoding (a decoding that panics is
 // HANDLER_ERROR "handler panicked", as for a unary handler), then the guards. Admitted, what was
@@ -459,7 +458,7 @@ func (a *App) decodeQuery(h *handler, req *hubpb.Request) (query any, werr *hubp
 }
 
 // lookupSubscription is the subscription handler of req, or the error code and message to
-// answer, as the reference library answers: whatever the request's kind, INVALID_REQUEST "no
+// answer: whatever the request's kind, INVALID_REQUEST "no
 // subscription handler for <type> on this instance" for a type without a query handler (a
 // command type, a type not served), and INVALID_REQUEST for a query handler of another mode.
 // TODO(spec-gap): SG-12 (the answers to a request in a mode its handler does not serve).

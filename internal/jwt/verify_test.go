@@ -183,7 +183,7 @@ func TestInvalidTokensAreRefusedWithAShortReason(t *testing.T) {
 	}
 }
 
-func TestExpiryAllowsAMinuteOfClockSkew(t *testing.T) { // as the reference libraries' decoders
+func TestExpiryAllowsAMinuteOfClockSkew(t *testing.T) {
 	key, _ := keys(t)
 	j := newJWKS(t, jwk("k1", key))
 	v := jwt.NewVerifier(j.URL, issuer, nil, time.Minute)
@@ -248,7 +248,7 @@ func TestConcurrentFirstLoadsOfAHangingJWKSFailTogether(t *testing.T) {
 			t.Fatalf("a verify returned after %v, want within about one fetch timeout (%v)", r.elapsed, timeout)
 		}
 	}
-	// A failed first load is not remembered: the next token fetches again, as in the reference.
+	// A failed first load is not remembered: the next token fetches again.
 	before := fetches.Load()
 	_, err := v.Verify(context.Background(), token)
 	is(t, reason(err), "signing keys unavailable")

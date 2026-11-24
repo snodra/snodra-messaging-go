@@ -344,7 +344,7 @@ func TestIdentitySettings(t *testing.T) {
 }
 
 // An anonymous caller is refused before the payload is decoded; a caller a guard refuses after
-// it, as in the reference library (whose guard may look at the message): a payload that does not
+// it (its guard may look at the message): a payload that does not
 // decode is INVALID_REQUEST for an authenticated caller, whoever it is.
 func TestTheGuardsRunAfterTheDecoding(t *testing.T) {
 	key, _ := testKeys(t)
@@ -369,8 +369,7 @@ func TestTheGuardsRunAfterTheDecoding(t *testing.T) {
 	is(t, nextEnd(t, ws).GetError().GetCode(), hubpb.ErrorCode_PERMISSION_DENIED)
 }
 
-// The scheme of the authorization header is read in any letter case, as the reference library
-// reads it.
+// The scheme of the authorization header is read in any letter case.
 func TestTheBearerSchemeInAnyCase(t *testing.T) {
 	key, _ := testKeys(t)
 	srv, _ := testJWKS(t)

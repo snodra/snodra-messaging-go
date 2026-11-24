@@ -505,7 +505,7 @@ func shutdownLeavesNoGoroutineBehind(t *testing.T, budget time.Duration) {
 	}
 }
 
-func TestARefusalCodeOnAnAcknowledgedStreamIsARefusal(t *testing.T) { // SG-15, as the reference library
+func TestARefusalCodeOnAnAcknowledgedStreamIsARefusal(t *testing.T) { // SG-15
 	hub := fakehub.Start(t)
 	app := startApp(t, Hubs(hub.Addr()))
 	s := hub.Next(t)

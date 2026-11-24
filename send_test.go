@@ -283,7 +283,7 @@ func TestEveryErrorCodeReachesTheCaller(t *testing.T) { // SG-17 for the message
 		}
 		return e
 	}
-	library := map[Code]string{ // the reference library's own texts
+	library := map[Code]string{ // the texts of the caller's errors
 		CodeNoHandler:           "No handler registered for 'orders.PlaceOrder'",
 		CodeTimeout:             "Timed out waiting for reply to 'orders.PlaceOrder'",
 		CodeHandlerDisconnected: "Handler for 'orders.PlaceOrder' disconnected",
@@ -363,7 +363,7 @@ func TestContextDeadlineIsTheCallersTimeout(t *testing.T) {
 	is(t, aliveFrame(s.Recv(t)), true) // the stream is alive: nothing was written to it
 }
 
-func TestATimeoutPerCallWinsOverTheDefault(t *testing.T) { // as in the reference libraries
+func TestATimeoutPerCallWinsOverTheDefault(t *testing.T) {
 	app, _, s := sending(t, fakehub.Ack("hub-1"), DefaultTimeout(2*time.Second))
 	ctx := ctxWithin(t, 5*time.Second)
 	for _, c := range []struct {
@@ -515,8 +515,7 @@ func TestASendWaitingForRoomEndsWithShutdown(t *testing.T) {
 // aliveFrame is a heartbeat or an InstanceStatus: what a live stream sends unprompted.
 func aliveFrame(m *hubpb.ClientMessage) bool { return m.GetHeartbeat() != nil || m.GetStatus() != nil }
 
-// A call made while no hub is acknowledged waits for one, within its timeout (5 s without one),
-// as the reference library's calls do.
+// A call made while no hub is acknowledged waits for one, within its timeout (5 s without one).
 func TestACallWaitsForAHubWithinItsTimeout(t *testing.T) {
 	hub := fakehub.Start(t)
 	app := startApp(t, Hubs(hub.Addr()))
@@ -549,8 +548,7 @@ func TestACallWaitsForAHubWithinItsTimeout(t *testing.T) {
 }
 
 // A request whose streams keep breaking before they write it moves from hub to hub only while
-// its timeout lasts: one deadline for the whole call, no new hop after it, as in the reference
-// library. Each hop sends the full timeout.
+// its timeout lasts: one deadline for the whole call, no new hop after it. Each hop sends the full timeout.
 func TestMovesEndWithTheCallsTimeout(t *testing.T) {
 	t.Run("unary", func(t *testing.T) {
 		movesEnd(t, func(app *App) error {

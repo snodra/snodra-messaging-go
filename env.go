@@ -12,9 +12,8 @@ import (
 // defaultHubAddress is the hub of SNODRA_SERVER_ADDRESS when the variable is not set.
 const defaultHubAddress = "static://snodra-server:7000"
 
-// FromEnv reads the settings from the environment, the same variables the Rust library
-// reads (the Kotlin library is configured with Spring properties). A variable that is not set, or blank, changes nothing; a later option
-// overrides what FromEnv set.
+// FromEnv reads the settings from the environment. A variable that is not set, or blank,
+// changes nothing; a later option overrides what FromEnv set.
 //
 //   - SNODRA_SERVICE_NAME: [Service]
 //   - SNODRA_INSTANCE_ID: [Instance] (default: a fresh random UUID)
@@ -43,8 +42,7 @@ const defaultHubAddress = "static://snodra-server:7000"
 //   - SNODRA_SECURITY_ROLES_CLAIM: [RolesClaim] (default "roles")
 //   - SNODRA_FORWARD_JWT: [ForwardJWT], true or false (default true)
 //   - SNODRA_SERVER_ALWAYS_ROUTE_THROUGH_HUB: [AlwaysRouteThroughHub], true or false (default
-//     false); the Rust library reads it too, the Kotlin library has the Spring property
-//     snodra.messaging.hub.always-route-through-hub instead
+//     false)
 //   - SNODRA_SERVER_TOKEN, SNODRA_SERVER_TOKEN_FILE: [Token], [TokenFile]
 //   - SNODRA_SERVER_OAUTH2_TOKEN_URI: [JWT] with [NewClientCredentials], from
 //     SNODRA_SERVER_OAUTH2_CLIENT_ID (default the service name), SNODRA_SERVER_OAUTH2_CLIENT_SECRET
@@ -135,8 +133,7 @@ func (c *config) applyEnv(getenv func(string) string) error {
 	return c.applySendEnv(get)
 }
 
-// applyCredentialsEnv reads the instance's credential towards the hubs, with the reference
-// library's rules.
+// applyCredentialsEnv reads the instance's credential towards the hubs.
 func (c *config) applyCredentialsEnv(get func(string) (string, bool)) error {
 	if v, ok := get("SNODRA_SERVER_TOKEN"); ok {
 		c.token = newSecret(v)

@@ -109,7 +109,7 @@ func WithDetails(err error, details any) error {
 // handler's e: its code (an unknown one, and ERROR_CODE_UNSPECIFIED, read as HANDLER_ERROR), the
 // details for HANDLER_ERROR only, and the message, except for NO_HANDLER, TIMEOUT,
 // HANDLER_DISCONNECTED and RESOURCE_EXHAUSTED, whose message is the library's own, naming typ, and
-// an empty CANCELLED, which reads "cancelled by the hub", as in the reference library.
+// an empty CANCELLED, which reads "cancelled by the hub".
 // TODO(spec-gap): SG-17 (the message of the codes no handler produces).
 func errorFromWire(typ string, e *hubpb.Error) *Error { return fromWire(typ, e, false) }
 
@@ -149,14 +149,13 @@ func fromWire(typ string, e *hubpb.Error, subscription bool) *Error {
 	return out
 }
 
-// noHandlerText is the message of NO_HANDLER for typ the caller reads, the reference library's.
+// noHandlerText is the message of NO_HANDLER for typ the caller reads.
 func noHandlerText(typ string) string { return "No handler registered for '" + typ + "'" }
 
-// noHandlerWireText is the message of the NO_HANDLER a handler side answers for typ, the
-// reference library's.
+// noHandlerWireText is the message of the NO_HANDLER a handler side answers for typ.
 func noHandlerWireText(typ string) string { return "no handler for type " + typ }
 
-// timeoutText is the message of TIMEOUT for typ, the reference library's.
+// timeoutText is the message of TIMEOUT for typ.
 func timeoutText(typ string) string { return "Timed out waiting for reply to '" + typ + "'" }
 
 var lineBreaks = strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ")

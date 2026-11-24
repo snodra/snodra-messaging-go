@@ -16,7 +16,7 @@ type target struct {
 	address string // host:port; for a DNS target the name and the port
 	dns     bool   // a dns:///name:port target, resolved again every dnsRefresh
 	// https is an https:// target: without a TLS configuration it is reached over TLS with the
-	// system's roots, as in the reference library (with one, every hub is).
+	// system's roots (with one, every hub is).
 	https bool
 }
 
@@ -41,8 +41,7 @@ const dnsScheme = "dns:///"
 
 // parseTargets reads the hub addresses ([Hubs], SNODRA_SERVER_ADDRESS): a list of host:port (a
 // static://, http:// or https:// prefix optional, static:// also before the other two), in order,
-// repeats removed (host:port, static:// and http:// name one target; https:// another, as in the
-// reference library); or exactly one dns:///name:port. It fails when they name no hub, when a DNS
+// repeats removed (host:port, static:// and http:// name one target; https:// another); or exactly one dns:///name:port. It fails when they name no hub, when a DNS
 // target is not alone, or when an entry lacks a host or a port.
 func parseTargets(addresses []string) ([]target, error) {
 	var entries []string
@@ -81,7 +80,7 @@ func parseTargets(addresses []string) ([]target, error) {
 	return out, nil
 }
 
-// parseDNSTarget reads dns:///name:port, with the reference library's rules: no DNS server
+// parseDNSTarget reads dns:///name:port, with these rules: no DNS server
 // authority, a name without a path, a port from 1 to 65535.
 func parseDNSTarget(entry string) (target, error) {
 	bad := func(why string) error {
@@ -110,7 +109,7 @@ func parseDNSTarget(entry string) (target, error) {
 
 // hubIDOf is the id of a hub: its RegisterAck.hub_id, or, when that is empty (a real hub always
 // names itself), its target as host:port without a static://, http:// or https:// prefix.
-// TODO(spec-gap): SG-14 (http:// and https:// are stripped too, as in the reference library).
+// TODO(spec-gap): SG-14 (http:// and https:// are stripped too).
 func hubIDOf(ackID, target string) string {
 	if ackID != "" {
 		return ackID

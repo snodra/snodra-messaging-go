@@ -48,7 +48,7 @@ func TestStreamSendsTheCreditAndRefills(t *testing.T) {
 	is(t, r.GetKind(), hubpb.RequestKind_QUERY)
 	is(t, r.GetType(), "orders.ListOrders")
 	is(t, r.GetInitialCredit(), uint32(4))
-	is(t, r.GetRoutingKey(), "") // unkeyed, as in the reference library
+	is(t, r.GetRoutingKey(), "") // unkeyed
 	is(t, r.GetTimeoutMs(), uint32(0))
 	is(t, string(r.GetPayload()), `{"count":12}`)
 	id := r.GetId()
@@ -113,7 +113,7 @@ func TestBreakingTheLoopCancelsAndLeaksNothing(t *testing.T) {
 	}
 	c := s.RecvCancel(t)
 	is(t, c.GetRequestId(), r.GetId())
-	is(t, c.GetReason(), "collector cancelled") // the reference library's reason
+	is(t, c.GetReason(), "collector cancelled")
 	o := await(t, read)
 	is(t, o.err, nil)
 	is(t, len(o.value), 2)
@@ -435,7 +435,7 @@ func TestTheRolloverIgnoresWhatThisInstanceConsumes(t *testing.T) {
 		c.on.Store(ref)
 		p.add(c)
 	}
-	is(t, p.writtenTo(ref, false), 2) // the rollover waits for these two only, as the reference library does
+	is(t, p.writtenTo(ref, false), 2) // the rollover waits for these two only
 	is(t, p.writtenTo(ref, true), 3)  // the drain of an address that left DNS waits for the stream too
 	p.remove("u")
 	p.remove("g")

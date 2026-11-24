@@ -64,7 +64,7 @@ func TestTheHandledIDStandsInForAMissingCorrelationID(t *testing.T) {
 	is(t, trace, false)
 }
 
-func TestAnEmptyCorrelationIDIsReplacedByAFreshOne(t *testing.T) { // as the reference library
+func TestAnEmptyCorrelationIDIsReplacedByAFreshOne(t *testing.T) {
 	s := relaying(t)
 	h := nested(t, s, "r-1", map[string]string{"correlationId": ""}).GetHeaders()
 	is(t, uuidV4.MatchString(h["correlationId"]), true) // not the handled id

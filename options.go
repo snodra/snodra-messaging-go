@@ -154,7 +154,7 @@ func MaxConcurrent(n int) Option {
 // ReconnectBackoff is the wait between two attempts to reach a hub: min, doubling up to max,
 // each wait jittered by ±20 % (never above max). A refused Register waits 80 to 100 % of max.
 // The default is 500 ms to 5 s. The specification caps max at 5 s and wants at least 1 s after
-// a refusal, so keep max between 1.25 s and 5 s; as in the reference libraries, values outside
+// a refusal, so keep max between 1.25 s and 5 s; values outside
 // that range are accepted (see SPEC-GAPS.md, SG-16).
 func ReconnectBackoff(min, max time.Duration) Option {
 	return func(c *config) error {
@@ -266,7 +266,7 @@ func Logger(l *slog.Logger) Option {
 }
 
 // checkBackoff refuses what cannot work: a minimum of 0 or less, a maximum below the minimum.
-// TODO(spec-gap): SG-16 (a maximum above 5 s, or below 1.25 s, is accepted, as by the others).
+// TODO(spec-gap): SG-16 (a maximum above 5 s, or below 1.25 s, is accepted).
 func checkBackoff(min, max time.Duration, setting string) error {
 	if min <= 0 {
 		return fmt.Errorf("snodra: the reconnect backoff minimum (%s) must be positive, got %v", setting, min)

@@ -149,7 +149,7 @@ func TestNoCreditWithinTheBoundEndsWithTimeout(t *testing.T) {
 	within(t, time.Since(start), 250*ms, 1500*ms)
 	is(t, end.GetRequestId(), "s#1")
 	is(t, end.GetError().GetCode(), hubpb.ErrorCode_TIMEOUT)
-	is(t, end.GetError().GetMessage(), "no credit within 300 ms") // the reference library's text
+	is(t, end.GetError().GetMessage(), "no credit within 300 ms")
 	if err := receive(t, sent); err == nil {
 		t.Fatal("Send returned no error at the credit timeout")
 	}

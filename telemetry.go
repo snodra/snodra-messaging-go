@@ -285,8 +285,7 @@ func (t *telemetry) inject(ctx context.Context, headers map[string]string) {
 const tracestateHeader = "tracestate"
 
 // refusedOrCancelled is true for an error that records no call: the caller's own cancellation,
-// and a call its options refused (a reserved header, an invalid option), as in the reference
-// library.
+// and a call its options refused (a reserved header, an invalid option).
 func refusedOrCancelled(err error) bool {
 	var refused *localRefusal
 	return errors.Is(err, context.Canceled) || errors.As(err, &refused)

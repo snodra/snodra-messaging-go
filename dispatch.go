@@ -283,7 +283,7 @@ func (a *App) admit(run *runningRequest, req *hubpb.Request, streaming bool) (*h
 		return nil, nil, fail(code, msg)
 	}
 	// Before decoding: an anonymous caller cannot probe the payload's shape. The guards
-	// themselves run after the decoding (callerCheck), as in the reference library.
+	// themselves run after the decoding (callerCheck).
 	if code, msg, refused := anonymousRefusal(h.cfg, caller); refused {
 		return nil, nil, fail(hubpb.ErrorCode(code), msg)
 	}
@@ -305,7 +305,7 @@ func (a *App) admit(run *runningRequest, req *hubpb.Request, streaming bool) (*h
 		caller:        caller,
 	}
 	// The id stands in only for a missing header: a present but empty one stays empty, and the
-	// requests sent while handling get a new correlation id, as in the reference library.
+	// requests sent while handling get a new correlation id.
 	if _, present := req.GetHeaders()[correlationIDHeader]; !present {
 		scope.info.CorrelationID = id
 	}
@@ -316,7 +316,7 @@ func (a *App) admit(run *runningRequest, req *hubpb.Request, streaming bool) (*h
 }
 
 // lookup is the handler of req in its mode (streaming or unary), or the error code and message
-// to answer, as the reference library answers. A unary request: NO_HANDLER for a type not served
+// to answer. A unary request: NO_HANDLER for a type not served
 // here in the request's kind, INVALID_REQUEST for an unknown kind and for a streaming or a
 // subscription query handler (the caller used the wrong call, which no retry fixes; a
 // subscription's initial request <id>#0 excepted). A streaming request is served by a streaming
@@ -374,8 +374,7 @@ func subscriptionQueryText(typ string) string {
 }
 
 // run runs h on req under recover: the answer's payload, or the error to answer. A panic, of
-// the handler or of its error, is HANDLER_ERROR "handler panicked", the reference library's
-// text: the panic value and the stack go to the log only.
+// the handler or of its error, is HANDLER_ERROR "handler panicked": the panic value and the stack go to the log only.
 func (a *App) run(ctx context.Context, h *handler, req *hubpb.Request, scope *handling) (payload []byte, werr *hubpb.Error) {
 	ctx, done := a.tel.startHandling(ctx, handlingOf(req, scope))
 	payload, werr = a.invoke(ctx, h, req, scope)
@@ -480,7 +479,7 @@ func (f *inflight) count() int {
 }
 
 // kindName is the name of a request kind in a refusal: the enum's own, and UNRECOGNIZED for a
-// value the protocol does not define, as the reference library writes it.
+// value the protocol does not define.
 func kindName(k hubpb.RequestKind) string {
 	if _, ok := hubpb.RequestKind_name[int32(k)]; !ok {
 		return "UNRECOGNIZED"

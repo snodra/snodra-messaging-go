@@ -94,8 +94,7 @@ func systemRootsWith(path string) (*x509.CertPool, error) {
 func (c *hubConn) transport(id *clientIdentity) (credentials.TransportCredentials, error) {
 	t := c.app.cfg.tls
 	if t == nil && c.https {
-		// An https:// address without a TLS configuration: TLS with the system's roots, as in
-		// the reference library.
+		// An https:// address without a TLS configuration: TLS with the system's roots.
 		// TODO(spec-gap): SG-14 (the https:// prefix of an address turns TLS on).
 		t = &TLSConfig{}
 	}
@@ -121,7 +120,7 @@ func (c *hubConn) transport(id *clientIdentity) (credentials.TransportCredential
 // warnPlainTextCredential warns, once, at the app's start, when its own credential (a token, a
 // token file, an access token) goes to hubs reached without TLS: it travels unencrypted. It
 // names those hubs and the kind of credential, never the credential. Nothing changes on the
-// wire: the reference libraries send the credential the same way, without a warning.
+// wire: the credential is sent the same way, only the warning is new.
 func (a *App) warnPlainTextCredential() {
 	var kind string
 	switch {
@@ -445,7 +444,7 @@ func (w *certWatch) check() {
 			return
 		}
 		if c.memberRole() != roleActive {
-			continue // a parked duplicate or a drained address: only kept hubs are rolled, as in the reference library
+			continue // a parked duplicate or a drained address: only kept hubs are rolled
 		}
 		if c.presentsOther(disk.digest) && !c.rollOver(disk.fingerprint) {
 			w.refused = disk.digest

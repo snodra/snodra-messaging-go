@@ -122,7 +122,7 @@ func TestACommandIsNeverRetriedAfterAnUnknownOutcome(t *testing.T) {
 }
 
 // A request still in the buffer when its stream broke waits for the next stream, within its
-// timeout, and goes out on it with its id: a move, not a retry, as in the reference library.
+// timeout, and goes out on it with its id: a move, not a retry.
 func TestARequestNeverWrittenMovesToTheNextStream(t *testing.T) {
 	held := make(chan *hubpb.Request, 2)
 	release := make(chan struct{})

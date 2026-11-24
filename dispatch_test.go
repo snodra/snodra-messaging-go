@@ -198,7 +198,7 @@ func TestOutcomesAreMessagesNeverADroppedStream(t *testing.T) {
 		}
 		is(t, e.GetRequestId(), c.req.Id)
 		if c.name == "a panic" {
-			is(t, e.GetMessage(), "handler panicked") // the reference library's text; the value goes to the log
+			is(t, e.GetMessage(), "handler panicked") // the value goes to the log
 		}
 		ok := "ok-" + string(rune('a'+i))
 		s.Send(t, command(ok, "orders.PlaceOrder", `{"orderId":"o-1"}`)) // the stream is still up
@@ -512,8 +512,7 @@ func TestALastResortFailsOnlyTheRequest(t *testing.T) {
 
 // TestEveryModeAgainstEveryHandler pins what a request in each mode (unary, streaming,
 // subscription) is answered with by a handler of each kind (command, query, streaming query,
-// subscription query) and for a type not served: the code and the frame it rides in, as the
-// reference library answers. The kind of a streaming or subscription request is not looked at:
+// subscription query) and for a type not served: the code and the frame it rides in. The kind of a streaming or subscription request is not looked at:
 // only query handlers serve those modes.
 func TestEveryModeAgainstEveryHandler(t *testing.T) {
 	hub := fakehub.Start(t)
@@ -560,9 +559,9 @@ func TestEveryModeAgainstEveryHandler(t *testing.T) {
 		{"u-10", cmd, "orders.ListOrders", unary, reply, hubpb.ErrorCode_NO_HANDLER, "no handler for type orders.ListOrders"},
 		{"u-11", cmd, "orders.WatchOrders", unary, reply, hubpb.ErrorCode_NO_HANDLER, "no handler for type orders.WatchOrders"},
 		{"u-12", hubpb.RequestKind_REQUEST_KIND_UNSPECIFIED, "orders.GetOrder", unary, reply, hubpb.ErrorCode_INVALID_REQUEST,
-			"unsupported request kind REQUEST_KIND_UNSPECIFIED"}, // the enum's name, as the reference library writes it
+			"unsupported request kind REQUEST_KIND_UNSPECIFIED"}, // the enum's name
 		{"u-13", hubpb.RequestKind(99), "orders.GetOrder", unary, reply, hubpb.ErrorCode_INVALID_REQUEST,
-			"unsupported request kind UNRECOGNIZED"}, // an undefined value: the reference library's word for it
+			"unsupported request kind UNRECOGNIZED"}, // an undefined value
 		// Streaming requests: a ReplyEnd (after the parts, when served).
 		{"s-1#1", qry, "orders.PlaceOrder", strm, end, hubpb.ErrorCode_NO_HANDLER, ""},
 		{"s-2#1", qry, "orders.GetOrder", strm, end, hubpb.ErrorCode_INVALID_REQUEST,

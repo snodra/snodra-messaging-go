@@ -243,13 +243,11 @@ func prepareTyped(ctx context.Context, app *App, typ string, kind hubpb.RequestK
 	}
 	switch mode {
 	case hubpb.RequestMode_SCATTER_GATHER:
-		// Every target is asked: a gather goes to a hub unkeyed and carries no routing key, as in
-		// the reference library.
+		// Every target is asked: a gather goes to a hub unkeyed and carries no routing key.
 		tmpl.RoutingKey = ""
 		tmpl.MaxResults = cfg.maxResults
 	case hubpb.RequestMode_STREAMING, hubpb.RequestMode_SUBSCRIPTION:
-		// A stream or a subscription goes to a hub unkeyed and carries no routing key, as in the
-		// reference library.
+		// A stream or a subscription goes to a hub unkeyed and carries no routing key.
 		tmpl.RoutingKey = ""
 		tmpl.MaxResults = cfg.maxResults
 		tmpl.InitialCredit = cfg.initialCredit
@@ -380,8 +378,7 @@ func (p *pendingCalls) remove(id string) {
 
 // writtenTo counts the calls written to ref that await their answer. Without consumers it
 // leaves out the streams and subscriptions this instance reads: they end when their owners
-// decide, so a certificate rollover does not wait for them (it cuts them), as in the reference
-// library; the drain of an address that left the DNS answer waits for them.
+// decide, so a certificate rollover does not wait for them (it cuts them); the drain of an address that left the DNS answer waits for them.
 func (p *pendingCalls) writtenTo(ref *streamRef, consumers bool) int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -470,8 +467,8 @@ func (p *pendingCalls) end(e *hubpb.ReplyEnd) {
 // maxUnwrittenMoves times; and a unary request a hub answers with NO_HANDLER (never delivered)
 // goes to each other live hub in turn, at most once each; when every live hub declined, the last
 // answer is the attempt's. A hub that did not take the request (see triedHubs) is not tried again
-// either, until the live hubs change while no other hub can take it. Every hop sends chosen unchanged, and one deadline bounds them all, as
-// in the reference library: chosen (5 s without one) after the attempt began, no hop starts and
+// either, until the live hubs change while no other hub can take it. Every hop sends chosen unchanged, and one deadline bounds them all:
+// chosen (5 s without one) after the attempt began, no hop starts and
 // the wait for a hub ends, so the attempt lasts at most that plus one hop's guard. A live hub
 // still untried then fails the attempt as never sent, also after a NO_HANDLER.
 func (a *App) attempt(ctx context.Context, tmpl *hubpb.Request, chosen time.Duration) (answer, error) {
@@ -520,8 +517,8 @@ func (a *App) attempt(ctx context.Context, tmpl *hubpb.Request, chosen time.Dura
 	}
 }
 
-// triedHubs are the hubs one call's request went to and is not sent to again, as in the reference
-// library: those that answered a unary request NO_HANDLER (declined) and those that did not take
+// triedHubs are the hubs one call's request went to and is not sent to again:
+// those that answered a unary request NO_HANDLER (declined) and those that did not take
 // it (its stream was gone before it was queued, or was lost while it was queued).
 type triedHubs struct {
 	hubs     []*hubConn
@@ -616,7 +613,7 @@ func (a *App) write(ctx context.Context, tmpl *hubpb.Request, chosen time.Durati
 		}
 		// No hub took it (none is acknowledged, the hubs are reconnecting or rolled over to a
 		// renewed client certificate, the streams broke before they took it): wait for a hub, and
-		// try again, until the call's deadline (hubWait), as the reference library does.
+		// try again, until the call's deadline (hubWait).
 		left := time.Until(deadline)
 		if left <= 0 {
 			return ref, guard, conn, err

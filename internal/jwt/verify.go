@@ -18,8 +18,7 @@ import (
 	"time"
 )
 
-// leeway is the clock skew allowed on exp and nbf, the default of the reference libraries'
-// token decoders.
+// leeway is the clock skew allowed on exp and nbf.
 const leeway = 60 * time.Second
 
 // fetchTimeout bounds a JWKS fetch when NewVerifier is given no HTTP client.

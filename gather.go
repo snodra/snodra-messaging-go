@@ -72,7 +72,7 @@ func Gather[R any](ctx context.Context, app *App, q Message, opts ...SendOption)
 }
 
 // assemble is a gather's result from its parts (in arrival order) and its end; Failed is
-// counted from the parts, as in the reference library, so a part that does not decode counts.
+// counted from the parts, so a part that does not decode counts.
 func assemble[R any](codec PayloadCodec, ans answer) *Gathered[R] {
 	g := &Gathered[R]{Parts: make([]Part[R], 0, len(ans.parts))}
 	for _, p := range ans.parts {
@@ -95,8 +95,8 @@ func assemble[R any](codec PayloadCodec, ans answer) *Gathered[R] {
 }
 
 // partError is a target's failure as the caller sees it: its code (an unknown one reads as
-// HANDLER_ERROR) and the message the target or the hub gave, unchanged, as in the reference
-// library; the details only for HANDLER_ERROR, as for any error.
+// HANDLER_ERROR) and the message the target or the hub gave, unchanged; the details only
+// for HANDLER_ERROR, as for any error.
 func partError(e *hubpb.Error) *Error {
 	code := Code(e.GetCode())
 	if code < CodeNoHandler || code > CodeCancelled {

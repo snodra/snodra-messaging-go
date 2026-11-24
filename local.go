@@ -41,7 +41,7 @@ func (a *App) localHandler(kind hubpb.RequestKind, m Message) (*handler, string)
 }
 
 // local is a call of m, of type typ, answered by this instance's handler h on the caller's
-// goroutine, as the reference library answers a request for a type its instance handles: no
+// goroutine, the way a request for a type its instance handles is answered: no
 // hub, no permit, no handler slot, no retry, no timeout of its own (the handler runs under ctx),
 // nothing to the telemetry. The handler sees a request with a fresh id, the caller's [Header]s
 // and the correlation id; it acts for the caller the hub path would carry: that of the request

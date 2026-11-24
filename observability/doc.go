@@ -15,8 +15,8 @@
 //
 // # Metrics
 //
-// The instrument names, units and attributes are those of the Rust and Kotlin libraries, so a
-// dashboard works for every library. A Prometheus export turns the dots into underscores, adds
+// The instrument names, units and attributes are the same for every Snodra library, so a
+// dashboard works for services written with any of them. A Prometheus export turns the dots into underscores, adds
 // the unit (s becomes _seconds) and _total to a counter.
 //
 //   - snodra.hub.client.request.duration (histogram, s; kind, type, outcome): a Send or Query,

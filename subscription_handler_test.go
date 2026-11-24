@@ -189,7 +189,7 @@ func TestBeyondTheLimitIsResourceExhausted(t *testing.T) {
 	end := nextEnd(t, s)
 	is(t, end.GetRequestId(), "w3#1")
 	is(t, end.GetError().GetCode(), hubpb.ErrorCode_RESOURCE_EXHAUSTED)
-	is(t, end.GetError().GetMessage(), "subscription limit (2) reached") // the reference library's text
+	is(t, end.GetError().GetMessage(), "subscription limit (2) reached")
 	is(t, app.SubscriptionsServed(), 2)
 	is(t, updates.Emit(topic("c"), OrderUpdate{}), 0)
 	// A subscription that ends frees its place.
@@ -641,8 +641,7 @@ func TestUpdatesAreTyped(t *testing.T) {
 	is(t, string(nextPart(t, s).GetPayload()), `{"value":4}`)
 }
 
-// A subscription request with the id of one open here is refused, the open one kept, as in the
-// reference library.
+// A subscription request with the id of one open here is refused, the open one kept.
 func TestASecondSubscriptionWithAnOpenIDIsRefused(t *testing.T) {
 	updates, app, s := watching(t, fakehub.Start(t), nil)
 	open(t, updates, s, "w#1", "t")
@@ -670,7 +669,7 @@ func TestTheLimitIsDecidedFirst(t *testing.T) {
 }
 
 // The subscribers are told at once: the served subscriptions end before the handlers in flight
-// are waited for, as in the reference library.
+// are waited for.
 func TestShutdownEndsTheSubscriptionsBeforeTheHandlerDrain(t *testing.T) {
 	release := make(chan struct{})
 	started := make(chan struct{})

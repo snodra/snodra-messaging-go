@@ -20,7 +20,7 @@ import (
 // ScopeName is the instrumentation scope of the library's instruments and spans.
 const ScopeName = "github.com/snodra/snodra-messaging-go/observability"
 
-// The instrument names of the library, the Rust and Kotlin libraries' ones.
+// The instrument names of the library.
 const (
 	requestDuration      = "snodra.hub.client.request.duration"
 	handlersInFlight     = "snodra.hub.client.handlers.in.flight"
@@ -85,8 +85,7 @@ type instrumentation struct {
 // that off, pass WithPropagator(propagation.NewCompositeTextMapPropagator()), which is used as
 // given.
 //
-// Every counter series the library can report exists at 0 from the start, as in the Rust and
-// Kotlin libraries, so a rate or increase sees the first event.
+// Every counter series the library can report exists at 0 from the start, so a rate or increase sees the first event.
 func New(opts ...Option) snodra.Instrumentation {
 	var o options
 	for _, opt := range opts {
@@ -209,7 +208,7 @@ func (i *instrumentation) StopObservingGauges() {
 
 // StartHandling starts a server span named after the message type, a child of the request's
 // traceparent.
-// TODO(spec-gap): SG-24 (the reference libraries create no handler span).
+// TODO(spec-gap): SG-24 (a handled request gets a server span).
 func (i *instrumentation) StartHandling(ctx context.Context, h snodra.Handling) (context.Context, func(error)) {
 	if h.Traceparent != "" {
 		carrier := propagation.MapCarrier{"traceparent": h.Traceparent}

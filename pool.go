@@ -290,8 +290,7 @@ func (p *pool) initialPermits(c *hubConn) uint32 {
 
 // changed is called when the set of live hubs (or of hubs on their first attempt) may have
 // changed: every live stream is topped up to ceil(MaxConcurrent / N) (more hubs change nothing:
-// permits are never revoked), and every live hub gets an InstanceStatus at once, as in the
-// reference library.
+// permits are never revoked), and every live hub gets an InstanceStatus at once.
 func (p *pool) changed() {
 	defer p.signal()
 	defer p.reportStatus()
@@ -405,8 +404,8 @@ func (p *pool) reportStatusEvery(interval time.Duration) {
 
 // reportStatus sends one InstanceStatus to every live hub: the ids of the live hubs, the
 // handlers in flight over all hubs, and no processor. A hub being rolled over to a renewed
-// client certificate is out of both while another live hub is not, as in the reference library
-// (which takes a hub out of the routing for a rollover only then).
+// client certificate is out of both while another live hub is not (a hub is taken out of the routing for a
+// rollover only then).
 // See https://snodra.damoreira.com/library-authors/protocol/ (Instance status).
 func (p *pool) reportStatus() {
 	var hubs []liveHub

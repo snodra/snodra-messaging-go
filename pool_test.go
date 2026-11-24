@@ -214,7 +214,7 @@ func TestAParkedAddressComesBackWhenItsOwnerLeavesDNS(t *testing.T) { // SG-22
 func TestAnHTTPSAddressIsReachedOverTLS(t *testing.T) {
 	targets, err := parseTargets([]string{"https://hub-1:7000", "hub-1:7000", "static://https://hub-1:7000", "http://hub-1:7000"})
 	is(t, err, nil)
-	is(t, len(targets), 2) // https:// is another target than host:port, as in the reference library
+	is(t, len(targets), 2) // https:// is another target than host:port
 	is(t, targets[0], target{address: "hub-1:7000", https: true})
 	is(t, targets[1], target{address: "hub-1:7000"})
 	is(t, targets[0].String(), "https://hub-1:7000")

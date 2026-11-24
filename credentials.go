@@ -809,7 +809,7 @@ func (c *hubConn) resolveToken() error {
 }
 
 // followTokenFile sends a static token that changed in its file to the registered stream as a
-// credentials refresh (a rotation without a reconnect), as the reference libraries do. A file
+// credentials refresh (a rotation without a reconnect). A file
 // that cannot be read or is empty changes nothing.
 // TODO(spec-gap): SG-20 (a rotated static token on a live stream).
 func (c *hubConn) followTokenFile(ref *streamRef) {

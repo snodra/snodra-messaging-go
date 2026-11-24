@@ -22,7 +22,7 @@
 ## What it is
 
 One package, `snodra`, that gives a Go service what it needs to send and serve requests in a Snodra system, with the
-same wire protocol as the Kotlin and Rust libraries: you write functions, the library keeps the hub streams, permits,
+same wire protocol as services written with any Snodra library: you write functions, the library keeps the hub streams, permits,
 retries and timeouts.
 
 - **Commands and queries** through Snodra Server, with deadlines, retries and routing keys. A command or a query that
@@ -35,7 +35,7 @@ retries and timeouts.
   handlers.
 - **Telemetry** behind an interface, with an OpenTelemetry implementation in the separate `observability` module.
 - **Feature level 1**, proved by the 33 checks of the conformance runner. Events, stores, event processors and sagas
-  (levels 2 to 4) are not in it yet: the Kotlin and Rust libraries have them.
+  (levels 2 to 4) are not in it yet.
 
 ## Install
 
@@ -64,17 +64,14 @@ return app.Run(ctx) // connects to every hub, serves until ctx ends, then shuts 
 ```
 
 A message is a Go type with a `MessageType() string` method; its payload is JSON by default (see `snodra.Codec`).
-Settings are options, and `snodra.FromEnv()` reads the same `SNODRA_*` variables as the Rust library; options given
-after it win.
+Settings are options, and `snodra.FromEnv()` reads the `SNODRA_*` variables; options given after it win.
 
 ## Documentation
 
 Quick start, the settings map, the API and testing: **<https://snodra.damoreira.com/messaging/go/>**, and
 `go doc -all` for the package. A complete service is [`examples/quickstart`](examples/quickstart/main.go). The
-counterparts are [`snodra-messaging`](https://github.com/snodra/snodra-messaging) (Kotlin, the reference) and
-[`snodra-messaging-rs`](https://github.com/snodra/snodra-messaging-rs) (Rust); all three speak the same protocol
-(`snodra.hub.v1`). Where the specification was silent, this library does what the Kotlin library does:
-[SPEC-GAPS.md](SPEC-GAPS.md) records each case.
+library speaks the Snodra protocol (`snodra.hub.v1`). Where the specification is silent, [SPEC-GAPS.md](SPEC-GAPS.md)
+records what this library does. Other languages: <https://snodra.damoreira.com/>.
 
 ## Contributing
 

@@ -9,7 +9,7 @@ import (
 )
 
 func TestEveryCodeReadsAsItself(t *testing.T) { // SG-17 for the messages
-	ownText := map[int32]string{ // the hub's message is replaced, as in the reference library
+	ownText := map[int32]string{ // the hub's message is replaced
 		1: "No handler registered for 'orders.PlaceOrder'",
 		2: "Timed out waiting for reply to 'orders.PlaceOrder'",
 		3: "Handler for 'orders.PlaceOrder' disconnected",

@@ -309,7 +309,7 @@ func (a *App) leave(ctx context.Context, conns []*hubConn) error {
 	if err := waitAll(ctx, a.cfg.timings.deregisterWait, deregistered(conns)); err != nil {
 		return err
 	}
-	// Every served subscription completes at once, as in the reference library: its subscribers
+	// Every served subscription completes at once: its subscribers
 	// are told now, not after a slow handler, and its end is written before the half-close.
 	refs := a.subs.endAll()
 	// The handlers in flight finish; their replies still go out. Requests the hubs forward

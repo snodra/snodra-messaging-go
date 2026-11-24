@@ -502,12 +502,12 @@ func (c *hubConn) serve(sr *streamRun) (reached bool, err error) {
 	// The silent-hub check, armed once the stream is acknowledged: on each heartbeat tick,
 	// before its heartbeat (see hubSilent). The last sign of life is the ack, then each echo;
 	// unanswered counts the heartbeats written since it: the ticks' and those that follow a
-	// later Register, as in the reference library.
+	// later Register.
 	// See https://snodra.damoreira.com/library-authors/protocol/ (Heartbeats).
 	watchSilence := false
 	var lastEcho time.Time
 	unanswered := 0
-	beat := func() { // counted only when the stream took it, as in the reference library
+	beat := func() { // counted only when the stream took it
 		if ref.send(heartbeat()) == nil && watchSilence {
 			unanswered++
 		}
@@ -989,7 +989,7 @@ func codeName(code codes.Code) string {
 }
 
 // hubSilent decides, on a heartbeat tick, whether an acknowledged stream is silent: more than
-// intervals heartbeat intervals since the last echo (the reference library's comparison), and
+// intervals heartbeat intervals since the last echo, and
 // intervals heartbeats sent since that echo all unanswered (the ticks' and those that follow a
 // later Register). The second condition keeps a tick that fires a little late, nominally
 // exactly three intervals after the last echoed heartbeat, from dropping the stream one tick

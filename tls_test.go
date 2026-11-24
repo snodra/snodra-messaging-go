@@ -230,7 +230,7 @@ func TestACertificateExpiredCloseIsAnOrdinaryReconnect(t *testing.T) { // SG-15'
 }
 
 // Only the hub's "certificate expired" close of a certificate session is an ordinary reconnect;
-// another UNAUTHENTICATED close of it is a refusal, as in the reference library.
+// another UNAUTHENTICATED close of it is a refusal.
 func TestAnotherUnauthenticatedCloseOfACertificateSessionIsARefusal(t *testing.T) { // SG-15
 	ca := newTestCA(t, "operator CA")
 	hub := fakehub.Start(t, fakehub.WithTLS(ca.server(t, "hub.test"), ca.pool()))

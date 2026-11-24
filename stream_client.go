@@ -374,7 +374,7 @@ func (s *streaming) fromWire(werr *hubpb.Error) *Error {
 	return errorFromWire(s.typ, werr)
 }
 
-// The reasons of the Cancel a sender writes, the reference library's.
+// The reasons of the Cancel a sender writes.
 
 // callerGone is the reason when the caller stopped reading or its context ended.
 func (s *streaming) callerGone() string {
@@ -395,8 +395,7 @@ func (s *streaming) guardFired() string {
 // collectorFailed is the reason when what was read could not be used.
 func collectorFailed(err error) string { return "collector failed: " + err.Error() }
 
-// lost is the error of n parts the hub sent (or counted) that never arrived, with the reference
-// library's text.
+// lost is the error of n parts the hub sent (or counted) that never arrived.
 func (s *streaming) lost(n uint64) error {
 	return fmt.Errorf("%w: %s %s lost %d part(s)", ErrLostParts, s.what, s.typ, n)
 }

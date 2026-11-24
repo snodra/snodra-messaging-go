@@ -55,9 +55,9 @@ func TestNewRefusesBadSettings(t *testing.T) {
 	refused("Instance", Service("orders-service"), Hubs(hub), Instance(""))
 }
 
-// The reference libraries accept any reconnect backoff with 0 < min <= max: neither refuses a
-// maximum above the specification's 5 s nor floors a refusal's wait at 1 s (SG-16).
-func TestABackoffOutsideTheSpecificationIsAcceptedAsByTheReferenceLibraries(t *testing.T) {
+// Any reconnect backoff with 0 < min <= max is accepted: a maximum above the specification's 5 s
+// is not refused, and a refusal's wait is not floored at 1 s (SG-16).
+func TestABackoffOutsideTheSpecificationIsAccepted(t *testing.T) {
 	app, err := New(Service("orders-service"), Hubs("127.0.0.1:7000"), ReconnectBackoff(1*s, 60*s))
 	is(t, err, nil)
 	is(t, app.cfg.timings.backoffMax, 60*s)

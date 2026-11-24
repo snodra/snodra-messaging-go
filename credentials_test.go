@@ -124,7 +124,7 @@ func TestTokenFileIsReadBeforeEveryConnect(t *testing.T) {
 	is(t, rec.count(slog.LevelWarn, warning), 1)
 }
 
-func TestAnEmptyOrMissingTokenFileIsRefusedAtStart(t *testing.T) { // as the reference libraries
+func TestAnEmptyOrMissingTokenFileIsRefusedAtStart(t *testing.T) {
 	dir := t.TempDir()
 	empty := filepath.Join(dir, "empty")
 	writeFile(t, empty, " \n")
@@ -138,7 +138,7 @@ func TestAnEmptyOrMissingTokenFileIsRefusedAtStart(t *testing.T) { // as the ref
 	}
 }
 
-func TestARotatedTokenFileReachesTheLiveStream(t *testing.T) { // as the reference libraries
+func TestARotatedTokenFileReachesTheLiveStream(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "token")
 	writeFile(t, path, "t-1")
 	hub := fakehub.Start(t)

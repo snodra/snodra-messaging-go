@@ -45,7 +45,7 @@ func TestSubscribeReturnsTheInitialThenTheUpdates(t *testing.T) {
 	is(t, r.GetType(), "orders.WatchOrders")
 	is(t, r.GetInitialCredit(), uint32(2))
 	is(t, r.GetMaxResults(), uint32(5))
-	is(t, r.GetRoutingKey(), "") // unkeyed, as in the reference library
+	is(t, r.GetRoutingKey(), "") // unkeyed
 	is(t, r.GetTimeoutMs(), uint32(0))
 	is(t, string(r.GetPayload()), `{"topic":"t"}`)
 	id := r.GetId()
@@ -146,9 +146,9 @@ func TestCloseWithoutRangingCancels(t *testing.T) {
 	sub.Close()
 	c := s.RecvCancel(t)
 	is(t, c.GetRequestId(), r.GetId())
-	is(t, c.GetReason(), "subscriber cancelled") // the reference library's reason
-	sub.Close()                                  // again: nothing more
-	got, err := collect(sub.Updates())           // ranged after Close: nothing
+	is(t, c.GetReason(), "subscriber cancelled")
+	sub.Close()                        // again: nothing more
+	got, err := collect(sub.Updates()) // ranged after Close: nothing
 	is(t, len(got), 0)
 	is(t, err, nil)
 	s.Send(t, update(r.GetId(), 2)) // late frames find nothing

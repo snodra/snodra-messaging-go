@@ -125,7 +125,7 @@ func TestTheLowWaterMarkUsesTheRegistersPermits(t *testing.T) { // SG-4
 	}
 	n, arm := l.finished()
 	// The hub holds 5 - 3 = 2, above the mark of the Register's 3, min(16, 3/2) = 1: the grant
-	// waits for the batch, as in the reference library (the top-ups do not move the mark).
+	// waits for the batch (the top-ups do not move the mark).
 	is(t, n, uint32(0))
 	is(t, arm, true)
 	for range 2 {

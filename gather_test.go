@@ -50,7 +50,7 @@ func TestGatherCollectsThePartsUntilTheEnd(t *testing.T) {
 	is(t, r.GetKind(), hubpb.RequestKind_QUERY)
 	is(t, r.GetType(), "orders.GetStock")
 	is(t, r.GetMaxResults(), uint32(0))
-	is(t, r.GetRoutingKey(), "") // a gather goes to every target: unkeyed, as in the reference library
+	is(t, r.GetRoutingKey(), "") // a gather goes to every target: unkeyed
 	is(t, r.GetTimeoutMs(), uint32(0))
 	is(t, string(r.GetPayload()), `{"sku":"sku-1"}`)
 	id := r.GetId()
@@ -182,7 +182,7 @@ func TestAPartThatDoesNotDecodeIsAFailedPart(t *testing.T) {
 	var e *Error
 	is(t, errors.As(o.value.Parts[0].Err, &e), false) // a local failure, not the target's error
 	is(t, o.value.Parts[1].Err, nil)
-	is(t, o.value.Failed, 1) // counted from the parts, as in the reference library
+	is(t, o.value.Failed, 1) // counted from the parts
 }
 
 func TestGatherWithoutTargetsIsNoHandler(t *testing.T) {
@@ -302,7 +302,7 @@ func TestASharedQueryAnswersPointQueries(t *testing.T) {
 }
 
 // An end that carries an error fails the whole gather, as an Error with that code does, also
-// after parts: the reference library throws it.
+// after parts.
 func TestAGatherEndWithAnErrorFailsTheGather(t *testing.T) {
 	app, _, s := sending(t, fakehub.Ack("hub-1"))
 	gathered := async(func() (*Gathered[Stock], error) { return Gather[Stock](context.Background(), app, GetStock{}) })

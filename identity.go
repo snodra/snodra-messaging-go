@@ -44,7 +44,7 @@ func RequireRole(role string) HandlerOption {
 
 // RequireCaller lets only a caller allow accepts run the handler: an anonymous caller is answered
 // UNAUTHENTICATED before the payload is decoded, a caller allow refuses PERMISSION_DENIED once it
-// decoded, as in the reference library. When a handler has several of these options, every one must
+// decoded. When a handler has several of these options, every one must
 // accept. The Caller is read from the token's verified claims; it needs [JWKS].
 func RequireCaller(allow func(Caller) bool) HandlerOption {
 	return func(c *handlerConfig) {
@@ -115,8 +115,8 @@ func (r *identityResolver) resolve(ctx context.Context, authorization string) (*
 	if strings.TrimSpace(authorization) == "" {
 		return nil, nil
 	}
-	// The scheme in any letter case and at the very start of the value, as the reference library
-	// reads it: leading whitespace makes the header malformed.
+	// The scheme in any letter case and at the very start of the value:
+	// leading whitespace makes the header malformed.
 	raw := authorization
 	const scheme = "Bearer "
 	ok := len(raw) >= len(scheme) && strings.EqualFold(raw[:len(scheme)], scheme)
