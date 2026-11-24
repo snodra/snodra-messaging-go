@@ -411,6 +411,40 @@ func TestNoHandlerIsTriedOnTheOtherHubs(t *testing.T) {
 	is(t, waiting(app), 0)
 }
 
+func TestNoHandlerAfterTheDeadlineWithAHubUntriedIsNeverSent(t *testing.T) {
+	app, _, st := twoHubs(t)
+	// hub-2 (the winner of the key) declines after the call's deadline (300 ms after it began):
+	// no hop starts then, and hub-1, still untried, makes the call fail as never sent.
+	key := keyFor(t, "hub-2")
+	sent := async(func() (Receipt, error) {
+		return Send[Receipt](ctxWithin(t, 5*s_), app, PlaceOrder{}, RoutingKey(key), Timeout(300*ms))
+	})
+	r := st[1].RecvRequest(t)
+	time.Sleep(500 * ms) // past the deadline, within the hop's guard (300 ms + 1 s)
+	st[1].Send(t, fakehub.HubError(r.GetId(), hubpb.ErrorCode_NO_HANDLER, "no handler"))
+	o := await(t, sent)
+	is(t, errors.Is(o.err, ErrNeverSent), true)
+	is(t, strings.Contains(o.err.Error(), "no hub took"), true)
+	var e *Error
+	is(t, errors.As(o.err, &e), false)
+	st[0].Nothing(t, 200*ms, "request")
+	is(t, waiting(app), 0)
+	// Every live hub declined, the last after the deadline: that answer comes back.
+	sent = async(func() (Receipt, error) {
+		return Send[Receipt](ctxWithin(t, 5*s_), app, PlaceOrder{}, RoutingKey(key), Timeout(300*ms))
+	})
+	r = st[1].RecvRequest(t)
+	st[1].Send(t, fakehub.HubError(r.GetId(), hubpb.ErrorCode_NO_HANDLER, "no handler"))
+	r1 := st[0].RecvRequest(t)
+	is(t, r1.GetId(), r.GetId())
+	time.Sleep(500 * ms)
+	st[0].Send(t, fakehub.HubError(r1.GetId(), hubpb.ErrorCode_NO_HANDLER, "no handler"))
+	o = await(t, sent)
+	is(t, errors.As(o.err, &e), true)
+	is(t, e.Code, CodeNoHandler)
+	is(t, waiting(app), 0)
+}
+
 func TestAGatherIsNotWalkedOverTheHubsOnNoHandler(t *testing.T) {
 	app, _, st := twoHubs(t)
 	got := async(func() (*Gathered[Receipt], error) { return Gather[Receipt](ctxWithin(t, 5*s_), app, GetOrder{}) })

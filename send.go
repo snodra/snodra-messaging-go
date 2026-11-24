@@ -468,10 +468,11 @@ func (p *pendingCalls) end(e *hubpb.ReplyEnd) {
 // (https://snodra.damoreira.com/library-authors/protocol/, Several hubs): when the stream it
 // was queued on is lost before the request was written, it goes to the next hub, at most
 // maxUnwrittenMoves times; and a unary request a hub answers with NO_HANDLER (never delivered)
-// goes to each other live hub in turn, at most once each; when every hub declined, the last
+// goes to each other live hub in turn, at most once each; when every live hub declined, the last
 // answer is the attempt's. Every hop sends chosen unchanged, and one deadline bounds them all, as
 // in the reference library: chosen (5 s without one) after the attempt began, no hop starts and
-// the wait for a hub ends, so the attempt lasts at most that plus one hop's guard.
+// the wait for a hub ends, so the attempt lasts at most that plus one hop's guard. A live hub
+// still untried then fails the attempt as never sent, also after a NO_HANDLER.
 func (a *App) attempt(ctx context.Context, tmpl *hubpb.Request, chosen time.Duration) (answer, error) {
 	typ := tmpl.GetType()
 	id := uuid.New()
@@ -483,8 +484,8 @@ func (a *App) attempt(ctx context.Context, tmpl *hubpb.Request, chosen time.Dura
 	var noHandler *answer   // the last of those answers
 	for {
 		if hops := moves + len(declined); hops > 0 && !time.Now().Before(deadline) {
-			if noHandler != nil {
-				return *noHandler, nil
+			if noHandler != nil && !a.untried(tmpl.GetRoutingKey(), declined) {
+				return *noHandler, nil // every live hub declined: that is the answer
 			}
 			return answer{}, fmt.Errorf("%w: no hub took '%s' within %v", ErrNeverSent, typ, hubWait(chosen))
 		}
@@ -515,6 +516,25 @@ func (a *App) attempt(ctx context.Context, tmpl *hubpb.Request, chosen time.Dura
 			return ans, nil
 		}
 	}
+}
+
+// untried is true while a live hub not in skip could take a request with key.
+func (a *App) untried(key string, skip []*hubConn) bool {
+	a.mu.Lock()
+	p := a.pool
+	a.mu.Unlock()
+	if p == nil {
+		return false
+	}
+	for _, conn := range p.order(key, false) {
+		if slices.Contains(skip, conn) {
+			continue
+		}
+		if ref, _ := conn.live(); ref != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // errNotWritten is the end of a request whose stream was lost before the request was written:

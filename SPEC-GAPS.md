@@ -158,9 +158,12 @@ spot.
   `NO_HANDLER`. One deadline bounds the call: when no hub can take the request it waits for one, and it starts no new
   hop, once its chosen timeout (5 s without one) has passed since it began; so a call lasts at most that plus one
   hop's guard. Unary requests, scatter-gathers, streams and subscriptions move alike. This is what the Kotlin library
-  and the Rust library do.
+  and the Rust library do. A unary request that reaches the deadline after a `NO_HANDLER` with a live hub still
+  untried fails as never sent too, as in the Kotlin library (the Rust library returns that `NO_HANDLER`); when every
+  live hub declined, the last answer comes back, also after the deadline.
 - **This library:** does so (`send.go`, `stream_client.go`), failing with `ErrNeverSent`. Before, it failed at once
-  when no hub was acknowledged (outside a client certificate rollover), and later each move waited for a hub anew.
+  when no hub was acknowledged (outside a client certificate rollover), and later each move waited for a hub anew;
+  and it returned the last `NO_HANDLER` at the deadline whether or not a live hub was still untried.
 - **Question:** settled.
 
 ### SG-11: which refusal a library keeps
