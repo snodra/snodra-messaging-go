@@ -445,6 +445,42 @@ func TestNoHandlerAfterTheDeadlineWithAHubUntriedIsNeverSent(t *testing.T) {
 	is(t, waiting(app), 0)
 }
 
+func TestAHubThatLostTheRequestIsNotTriedAgainInTheSameCall(t *testing.T) {
+	held := make(chan *hubpb.Request, 1)
+	ids := []string{"hub-1", "hub-2", "hub-3"}
+	h := [3]*fakehub.Hub{fakehub.Start(t), fakehub.Start(t), fakehub.Start(t)}
+	app := startApp(t, Hubs(h[0].Addr(), h[1].Addr(), h[2].Addr()), MaxConcurrent(1), blockFirstRequest(held))
+	st := [3]*fakehub.Stream{}
+	for i := range h {
+		st[i], _ = registered(t, h[i], ids[i])
+	}
+	hubIDsAre(t, app, ids...)
+	key := "order-42"
+	order := rendezvous.Rank(ids, key) // the hubs the request goes to, in turn
+	at := map[string]int{"hub-1": 0, "hub-2": 1, "hub-3": 2}
+	first, second, third := at[order[0]], at[order[1]], at[order[2]]
+	sent := async(func() (Receipt, error) {
+		return Send[Receipt](ctxWithin(t, 5*s_), app, PlaceOrder{}, RoutingKey(key), Timeout(3*s_))
+	})
+	id := receive(t, held).GetId() // in the first hub's outbound buffer, not written
+	st[first].Close(codes.Unavailable, "restart")
+	r := st[second].RecvRequest(t) // moved to the next hub
+	is(t, r.GetId(), id)
+	st[first], _ = registered(t, h[first], order[0]) // the first hub is back, live again
+	hubIDsAre(t, app, ids...)
+	// The second hub declines: the request goes to the third, not back to the first, which
+	// failed to take it in this call.
+	st[second].Send(t, fakehub.HubError(id, hubpb.ErrorCode_NO_HANDLER, "no handler"))
+	r = st[third].RecvRequest(t)
+	is(t, r.GetId(), id)
+	st[third].Send(t, replyTo(id, `{"total":3}`))
+	o := await(t, sent)
+	is(t, o.err, nil)
+	is(t, o.value.Total, 3)
+	st[first].Nothing(t, 200*ms, "request")
+	is(t, waiting(app), 0)
+}
+
 func TestAGatherIsNotWalkedOverTheHubsOnNoHandler(t *testing.T) {
 	app, _, st := twoHubs(t)
 	got := async(func() (*Gathered[Receipt], error) { return Gather[Receipt](ctxWithin(t, 5*s_), app, GetOrder{}) })

@@ -143,8 +143,10 @@ type streaming struct {
 	chosen   time.Duration  // the timeout the request is written with
 	deadline time.Time      // no move starts after it (hubWait from the open)
 	moves    int            // the moves to another hub of a request never written
+	tried    triedHubs      // the hubs that did not take it, not tried again
 	c        *call
 	ref      *streamRef
+	conn     *hubConn        // the hub of ref
 	what     string          // "stream" or "subscription", for the errors
 	closed   <-chan struct{} // a subscription's Close; nil for a stream
 	guard    time.Duration   // the hub's bound plus 1 s: a stream's idle guard, a subscription's for its initial part
@@ -164,7 +166,8 @@ type streaming struct {
 func (a *App) openStream(ctx context.Context, tmpl *hubpb.Request, chosen time.Duration) (*streaming, error) {
 	c := &call{id: uuid.New(), inbox: newStreamInbox()}
 	deadline := hubDeadline(chosen)
-	ref, guard, _, err := a.write(ctx, tmpl, chosen, deadline, c, nil)
+	var tried triedHubs
+	ref, guard, conn, err := a.write(ctx, tmpl, chosen, deadline, c, &tried)
 	if err != nil {
 		return nil, err
 	}
@@ -172,13 +175,14 @@ func (a *App) openStream(ctx context.Context, tmpl *hubpb.Request, chosen time.D
 	if tmpl.GetMode() == hubpb.RequestMode_SUBSCRIPTION {
 		what = "subscription"
 	}
-	return &streaming{app: a, typ: tmpl.GetType(), tmpl: tmpl, chosen: chosen, deadline: deadline, c: c, ref: ref, what: what, guard: guard,
+	return &streaming{app: a, typ: tmpl.GetType(), tmpl: tmpl, chosen: chosen, deadline: deadline, tried: tried, c: c, ref: ref, conn: conn, what: what, guard: guard,
 		refill: max(1, tmpl.GetInitialCredit()/2), first: true}, nil
 }
 
 // move writes the request, never written to its lost stream, to the next hub with the same id:
 // it was never sent (https://snodra.damoreira.com/library-authors/protocol/, Several hubs), at
 // most maxUnwrittenMoves times, and none after the deadline of its open (as a unary request).
+// The hub that lost it is not tried again (see triedHubs).
 // TODO(spec-gap): SG-10 (at most 8 moves).
 func (s *streaming) move(ctx context.Context) error {
 	s.moves++
@@ -190,12 +194,13 @@ func (s *streaming) move(ctx context.Context) error {
 	}
 	s.app.log.Debug("the hub stream was lost before the "+s.what+" was written; trying the next hub", "type", s.typ, "request", s.c.id)
 	c := &call{id: s.c.id, inbox: newStreamInbox()}
-	ref, guard, _, err := s.app.write(ctx, s.tmpl, s.chosen, s.deadline, c, nil)
+	s.tried.hubs = append(s.tried.hubs, s.conn)
+	ref, guard, conn, err := s.app.write(ctx, s.tmpl, s.chosen, s.deadline, c, &s.tried)
 	if err != nil {
 		return err
 	}
 	s.mu.Lock()
-	s.c, s.ref, s.guard = c, ref, guard
+	s.c, s.ref, s.guard, s.conn = c, ref, guard, conn
 	s.mu.Unlock()
 	return nil
 }

@@ -160,10 +160,14 @@ spot.
   hop's guard. Unary requests, scatter-gathers, streams and subscriptions move alike. This is what the Kotlin library
   and the Rust library do. A unary request that reaches the deadline after a `NO_HANDLER` with a live hub still
   untried fails as never sent too, as in the Kotlin library (the Rust library returns that `NO_HANDLER`); when every
-  live hub declined, the last answer comes back, also after the deadline.
+  live hub declined, the last answer comes back, also after the deadline. A hub that did not take the request (its
+  stream was gone before the request was queued, or was lost while it was queued) is not tried again in that call
+  either, until the live hubs change while no other hub can take it, as in the Kotlin library (from one hop to the next,
+  the Rust library skips only the hubs that declined).
 - **This library:** does so (`send.go`, `stream_client.go`), failing with `ErrNeverSent`. Before, it failed at once
   when no hub was acknowledged (outside a client certificate rollover), and later each move waited for a hub anew;
-  and it returned the last `NO_HANDLER` at the deadline whether or not a live hub was still untried.
+  it returned the last `NO_HANDLER` at the deadline whether or not a live hub was still untried, and it skipped only
+  the hubs that declined.
 - **Question:** settled.
 
 ### SG-11: which refusal a library keeps

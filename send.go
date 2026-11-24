@@ -469,7 +469,8 @@ func (p *pendingCalls) end(e *hubpb.ReplyEnd) {
 // was queued on is lost before the request was written, it goes to the next hub, at most
 // maxUnwrittenMoves times; and a unary request a hub answers with NO_HANDLER (never delivered)
 // goes to each other live hub in turn, at most once each; when every live hub declined, the last
-// answer is the attempt's. Every hop sends chosen unchanged, and one deadline bounds them all, as
+// answer is the attempt's. A hub that did not take the request (see triedHubs) is not tried again
+// either, until the live hubs change while no other hub can take it. Every hop sends chosen unchanged, and one deadline bounds them all, as
 // in the reference library: chosen (5 s without one) after the attempt began, no hop starts and
 // the wait for a hub ends, so the attempt lasts at most that plus one hop's guard. A live hub
 // still untried then fails the attempt as never sent, also after a NO_HANDLER.
@@ -480,17 +481,17 @@ func (a *App) attempt(ctx context.Context, tmpl *hubpb.Request, chosen time.Dura
 	unary := tmpl.GetMode() == hubpb.RequestMode_UNARY
 	deadline := hubDeadline(chosen)
 	moves := 0
-	var declined []*hubConn // the hubs that answered NO_HANDLER
-	var noHandler *answer   // the last of those answers
+	var tried triedHubs
+	var noHandler *answer // the last NO_HANDLER answer
 	for {
-		if hops := moves + len(declined); hops > 0 && !time.Now().Before(deadline) {
-			if noHandler != nil && !a.untried(tmpl.GetRoutingKey(), declined) {
+		if (moves > 0 || tried.declined) && !time.Now().Before(deadline) {
+			if noHandler != nil && !a.untried(tmpl.GetRoutingKey(), tried.hubs) {
 				return *noHandler, nil // every live hub declined: that is the answer
 			}
 			return answer{}, fmt.Errorf("%w: no hub took '%s' within %v", ErrNeverSent, typ, hubWait(chosen))
 		}
 		c := &call{id: id, answer: make(chan answer, 1), gather: tmpl.GetMode() == hubpb.RequestMode_SCATTER_GATHER}
-		ref, guard, conn, err := a.write(ctx, tmpl, chosen, deadline, c, declined)
+		ref, guard, conn, err := a.write(ctx, tmpl, chosen, deadline, c, &tried)
 		if err != nil {
 			if noHandler != nil && ctx.Err() == nil {
 				return *noHandler, nil // no other hub left to try
@@ -505,17 +506,26 @@ func (a *App) attempt(ctx context.Context, tmpl *hubpb.Request, chosen time.Dura
 			if moves > maxUnwrittenMoves {
 				return answer{}, fmt.Errorf("%w: '%s' not written: %d hub streams lost before it was", ErrNeverSent, typ, moves)
 			}
+			tried.hubs = append(tried.hubs, conn)
 			a.log.Debug("the hub stream was lost before the request was written; trying the next hub", "type", typ, "request", id)
 		case err != nil:
 			return answer{}, err
 		case unary && ans.failure.GetCode() == hubpb.ErrorCode_NO_HANDLER:
 			a.log.Debug("no handler on this hub; trying the others", "type", typ, "request", id, "hub", conn.address)
-			declined = append(declined, conn)
+			tried.hubs, tried.declined = append(tried.hubs, conn), true
 			noHandler = &ans
 		default:
 			return ans, nil
 		}
 	}
+}
+
+// triedHubs are the hubs one call's request went to and is not sent to again, as in the reference
+// library: those that answered a unary request NO_HANDLER (declined) and those that did not take
+// it (its stream was gone before it was queued, or was lost while it was queued).
+type triedHubs struct {
+	hubs     []*hubConn
+	declined bool // a NO_HANDLER is among them: with no other hub left, that answer is the call's
 }
 
 // untried is true while a live hub not in skip could take a request with key.
@@ -584,12 +594,13 @@ func hubWait(chosen time.Duration) time.Duration {
 func hubDeadline(chosen time.Duration) time.Time { return time.Now().Add(hubWait(chosen)) }
 
 // write queues tmpl as the request of c (with c's id and the timeout chosen) for the first hub
-// in the routing order of its key that takes it, skipping the hubs in skip, c recorded as
+// in the routing order of its key that takes it, skipping the hubs in tried, c recorded as
 // pending, and returns that stream, the request's local guard (the hub's bound plus 1 s) and
-// the hub. A hub whose stream is gone before the request is queued is passed over for the next
-// one (nothing was written); when no hub takes it, write waits for one until deadline. When it
-// fails, nothing was sent and c is not pending.
-func (a *App) write(ctx context.Context, tmpl *hubpb.Request, chosen time.Duration, deadline time.Time, c *call, skip []*hubConn) (*streamRef, time.Duration, *hubConn, error) {
+// the hub. A hub whose stream is gone before the request is queued is added to tried and passed
+// over for the next one (nothing was written). When no hub takes it, write fails at once if a
+// hub in tried declined it; else it waits for the live hubs to change (then every hub may be
+// tried again) until deadline. When it fails, nothing was sent and c is not pending.
+func (a *App) write(ctx context.Context, tmpl *hubpb.Request, chosen time.Duration, deadline time.Time, c *call, tried *triedHubs) (*streamRef, time.Duration, *hubConn, error) {
 	typ := tmpl.GetType()
 	a.mu.Lock()
 	p := a.pool
@@ -599,8 +610,8 @@ func (a *App) write(ctx context.Context, tmpl *hubpb.Request, chosen time.Durati
 	}
 	for {
 		changed := p.liveChange() // taken before the try: a change during it wakes the wait
-		ref, guard, conn, err := a.writeOnce(ctx, p, tmpl, chosen, c, skip)
-		if err == nil || ctx.Err() != nil || len(skip) > 0 {
+		ref, guard, conn, err := a.writeOnce(ctx, p, tmpl, chosen, c, tried)
+		if err == nil || ctx.Err() != nil || tried.declined {
 			return ref, guard, conn, err
 		}
 		// No hub took it (none is acknowledged, the hubs are reconnecting or rolled over to a
@@ -615,6 +626,7 @@ func (a *App) write(ctx context.Context, tmpl *hubpb.Request, chosen time.Durati
 		select {
 		case <-changed:
 			timer.Stop()
+			tried.hubs = nil // a hub that did not take it may have a new stream
 		case <-timer.C:
 		case <-ctx.Done():
 			timer.Stop()
@@ -626,23 +638,23 @@ func (a *App) write(ctx context.Context, tmpl *hubpb.Request, chosen time.Durati
 	}
 }
 
-// writeOnce is one try of write over the hubs routable now.
-func (a *App) writeOnce(ctx context.Context, p *pool, tmpl *hubpb.Request, chosen time.Duration, c *call, skip []*hubConn) (*streamRef, time.Duration, *hubConn, error) {
+// writeOnce is one try of write over the hubs routable now and not in tried.
+func (a *App) writeOnce(ctx context.Context, p *pool, tmpl *hubpb.Request, chosen time.Duration, c *call, tried *triedHubs) (*streamRef, time.Duration, *hubConn, error) {
 	typ := tmpl.GetType()
 	ranked := p.ranked(tmpl.GetRoutingKey())
 	if len(ranked) == 0 {
 		return nil, 0, nil, fmt.Errorf("%w: no hub has acknowledged the registration (sending %s)", ErrNeverSent, typ)
 	}
-	tried := false
+	offered := false
 	for _, conn := range ranked {
-		if slices.Contains(skip, conn) {
+		if slices.Contains(tried.hubs, conn) {
 			continue
 		}
 		ref, ack := conn.live()
 		if ref == nil {
 			continue
 		}
-		tried = true
+		offered = true
 		timeoutMS, guard := requestTiming(ack, typ, chosen)
 		req := &hubpb.Request{
 			Id:            c.id,
@@ -663,12 +675,13 @@ func (a *App) writeOnce(ctx context.Context, p *pool, tmpl *hubpb.Request, chose
 			if cerr := ctx.Err(); cerr != nil {
 				return nil, 0, nil, fmt.Errorf("%w: %w", ErrNeverSent, cerr)
 			}
+			tried.hubs = append(tried.hubs, conn)
 			a.log.Debug("not written, trying the next hub", "type", typ, "request", c.id, "hub", conn.address)
 			continue
 		}
 		return ref, guard, conn, nil
 	}
-	if !tried && len(skip) > 0 {
+	if !offered && len(tried.hubs) > 0 {
 		return nil, 0, nil, fmt.Errorf("%w: no other hub to send %s to", ErrNeverSent, typ)
 	}
 	return nil, 0, nil, fmt.Errorf("%w: the hub stream closed before %s was written", ErrNeverSent, typ)
