@@ -638,13 +638,29 @@ func TestWatchAndEmitServeSubscriptions(t *testing.T) {
 		t.Fatalf("end %v", e)
 	}
 	answered("e-2")
+	// w2#1 may not be admitted yet when Emit fails it (its query is decoded off the hub stream):
+	// its end is then held until the admission, and the answer to Emit can come first.
 	s.Send(t, watchRequest("w2#1", "b"))
 	emit("e-3", `{"topic":"b","values":[],"fail":"feed closed"}`)
-	if e := nextOf(t, s).GetEnd(); e.GetRequestId() != "w2#1" || e.GetError().GetCode() != hubpb.ErrorCode_HANDLER_ERROR ||
-		e.GetError().GetMessage() != "feed closed" {
-		t.Fatalf("end %v", e)
+	var end *hubpb.ReplyEnd
+	var reply *hubpb.Reply
+	for end == nil || reply == nil {
+		switch m := nextOf(t, s); {
+		case m.GetEnd() != nil && end == nil:
+			end = m.GetEnd()
+		case m.GetReply() != nil && reply == nil:
+			reply = m.GetReply()
+		default:
+			t.Fatalf("got %v, want the end of w2#1 and the answer to e-3", m)
+		}
 	}
-	answered("e-3")
+	if end.GetRequestId() != "w2#1" || end.GetError().GetCode() != hubpb.ErrorCode_HANDLER_ERROR ||
+		end.GetError().GetMessage() != "feed closed" {
+		t.Fatalf("end %v", end)
+	}
+	if reply.GetRequestId() != "e-3" || string(reply.GetPayload()) != "{}" {
+		t.Fatalf("Emit e-3: %v", reply)
+	}
 	// CONFORMANCE_MAX_SUBSCRIPTIONS 2: a third is refused.
 	for _, id := range []string{"w3#1", "w4#1", "w5#1"} {
 		s.Send(t, watchRequest(id, "c"))
