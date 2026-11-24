@@ -1,5 +1,3 @@
-// quickstart:begin
-
 package main
 
 import (
@@ -81,5 +79,3 @@ func run(ctx context.Context, opts ...snodra.Option) error {
 	// Run connects to every hub, serves until ctx ends, then shuts down in order.
 	return app.Run(ctx)
 }
-
-// quickstart:end

@@ -9,9 +9,10 @@ import (
 	snodra "github.com/snodra/snodra-messaging-go"
 )
 
-// The examples below are the README's snippets: they are compiled here (and only compiled: they
-// have no Output) so they cannot rot, and readme_test.go checks that the README shows exactly
-// the lines between the readme markers.
+// The examples below are the documentation's snippets (the README's and the site's Go pages'):
+// they are compiled here (and only compiled: they have no Output) so they cannot rot, and
+// readme_test.go checks that every Go block of the README is the lines between a pair of snippet
+// markers.
 
 type PlaceOrder struct {
 	OrderID string `json:"orderId"`
@@ -51,12 +52,33 @@ type ArchiveOrder struct {
 
 func (ArchiveOrder) MessageType() string { return "orders.ArchiveOrder" }
 
+// serveOrders is the README's handler.
+func serveOrders(ctx context.Context) error {
+	// snippet:begin handler
+	app, err := snodra.New(snodra.Service("orders-service"), snodra.FromEnv())
+	if err != nil {
+		return err
+	}
+	err = snodra.HandleCommand(app, func(ctx context.Context, cmd PlaceOrder) (Receipt, error) {
+		return Receipt{OrderID: cmd.OrderID, Total: cmd.Cents}, nil
+	})
+	if err != nil {
+		return err
+	}
+	return app.Run(ctx) // connects to every hub, serves until ctx ends, then shuts down in order
+	// snippet:end
+}
+
+func Example_handler() {
+	_ = serveOrders
+}
+
 func Example_send() {
 	var (
 		ctx context.Context
 		app *snodra.App
 	)
-	// readme:begin send
+	// snippet:begin send
 	receipt, err := snodra.Send[Receipt](ctx, app, PlaceOrder{OrderID: "o-1", Cents: 1250},
 		snodra.RoutingKey("o-1"), snodra.Timeout(3*time.Second))
 	if err != nil {
@@ -72,7 +94,7 @@ func Example_send() {
 		return
 	}
 	order, err := snodra.Query[Receipt](ctx, app, GetOrder{OrderID: receipt.OrderID})
-	// readme:end
+	// snippet:end
 	_, _ = order, err
 }
 
@@ -81,7 +103,7 @@ func Example_streams() {
 		ctx context.Context
 		app *snodra.App
 	)
-	// readme:begin streams
+	// snippet:begin streams
 	// Serving a stream: the items go out under the caller's credit.
 	_ = snodra.HandleStream(app, func(ctx context.Context, _ ListOrders, w *snodra.StreamWriter[Receipt]) error {
 		for _, r := range []Receipt{{OrderID: "o-1", Total: 1250}, {OrderID: "o-2", Total: 80}} {
@@ -105,7 +127,7 @@ func Example_streams() {
 	if err == nil {
 		fmt.Println(len(gathered.Parts), "answers from", gathered.Targets, "targets")
 	}
-	// readme:end
+	// snippet:end
 }
 
 func Example_subscriptions() {
@@ -113,7 +135,7 @@ func Example_subscriptions() {
 		ctx context.Context
 		app *snodra.App
 	)
-	// readme:begin subscriptions
+	// snippet:begin subscriptions
 	// Serving a subscription: the initial result now, updates whenever you emit them. The type
 	// arguments are the query, its initial result and its updates, as Subscribe[I, U] reads them.
 	updates, _ := snodra.HandleSubscription[WatchOrder, OrderStatus, OrderStatus](app, func(_ context.Context, q WatchOrder) (OrderStatus, error) {
@@ -134,23 +156,23 @@ func Example_subscriptions() {
 		}
 		fmt.Println(u.Status)
 	}
-	// readme:end
+	// snippet:end
 }
 
 func Example_guards() {
 	var app *snodra.App
-	// readme:begin guards
+	// snippet:begin guards
 	// An anonymous caller is refused before the payload is decoded; a guard needs snodra.JWKS.
 	_ = snodra.HandleCommand(app, func(ctx context.Context, cmd ArchiveOrder) (snodra.Empty, error) {
 		caller, _ := snodra.CallerFrom(ctx)
 		fmt.Println("archived by", caller.Subject)
 		return snodra.Empty{}, nil
 	}, snodra.RequireRole("orders-admin"))
-	// readme:end
+	// snippet:end
 }
 
 func Example_credentials() {
-	// readme:begin credentials
+	// snippet:begin credentials
 	app, err := snodra.New(
 		snodra.Service("orders-service"),
 		snodra.Hubs("https://hub.example.test:7000"), // https:// implies TLS
@@ -159,6 +181,6 @@ func Example_credentials() {
 			ClientSecretFile: "/run/secrets/orders-service-secret",
 		})),
 	)
-	// readme:end
+	// snippet:end
 	_, _ = app, err
 }
