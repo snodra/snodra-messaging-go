@@ -8,4 +8,4 @@ use (
 // Development and CI build observability/ against the root module next to it. Its go.mod requires
 // the last released root, the line a consumer resolves; this replaces exactly that version, and
 // scripts/bump-version.sh moves both at each release. Consumers never read this file.
-replace github.com/snodra/snodra-messaging-go v0.0.0 => ./
+replace github.com/snodra/snodra-messaging-go v0.1.0 => ./
