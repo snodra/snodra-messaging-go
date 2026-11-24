@@ -507,11 +507,10 @@ func (c *hubConn) serve(sr *streamRun) (reached bool, err error) {
 	watchSilence := false
 	var lastEcho time.Time
 	unanswered := 0
-	beat := func() {
-		if watchSilence {
+	beat := func() { // counted only when the stream took it, as in the reference library
+		if ref.send(heartbeat()) == nil && watchSilence {
 			unanswered++
 		}
-		_ = ref.send(heartbeat())
 	}
 	// reRegister writes a later Register, followed by a heartbeat as every Register is.
 	reRegister := func(r *hubpb.Register) {
@@ -568,6 +567,9 @@ func (c *hubConn) serve(sr *streamRun) (reached bool, err error) {
 					return false, nil
 				}
 				if !reached {
+					// The ack is the first sign of life, taken before the ticker is reset so that
+					// the third tick after it is strictly more than three intervals later.
+					ackedAt := time.Now()
 					reached, handshake = true, nil
 					if n := k.RegisterAck.GetHeartbeatIntervalMs(); n > 0 {
 						interval = time.Duration(n) * time.Millisecond
@@ -576,7 +578,7 @@ func (c *hubConn) serve(sr *streamRun) (reached bool, err error) {
 						}
 					}
 					if !halfClosed {
-						watchSilence, lastEcho, unanswered = true, time.Now(), 0
+						watchSilence, lastEcho, unanswered = true, ackedAt, 0
 					}
 					c.wentLive(ref, k.RegisterAck, interval, sr.identity)
 					if p := c.app.tokens; p != nil { // a token published since the Register
