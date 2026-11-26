@@ -5,12 +5,13 @@ use (
 	./kafka
 	./mongo
 	./observability
+	./rabbitmq
 	./sql
 )
 
-// Development builds kafka/, mongo/, observability/ and sql/ against the root module next to
-// them; CI adds the add-on jobs with the level-2 release. Their go.mod files require the last
-// released root, the line a consumer resolves; this replaces exactly that version with this
+// Development builds kafka/, mongo/, observability/, rabbitmq/ and sql/ against the root module
+// next to them; CI adds the add-on jobs with the level-2 release. Their go.mod files require the
+// last released root, the line a consumer resolves; this replaces exactly that version with this
 // checkout, so all build against the code here. Consumers never read this file.
 //
 // `go mod tidy` and `go get` ignore the workspace: in each add-on they resolve the root module at

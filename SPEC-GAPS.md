@@ -617,3 +617,82 @@ settled; where an entry is settled its behaviour is the specification. The code 
   index under an existing name with other options). The two reference add-ons have no schema check to compare with.
 - **Question:** should a retention change be a schema failure (the index must be dropped and recreated), or is the TTL
   a setting each instance may differ on?
+
+### SG-43: the Go stream client cannot carry `snodra-member`
+
+- **Specification:** [RabbitMQ Streams wire rules](https://snodra.damoreira.com/docs/library-authors/event-store-add-ons/#rabbitmq-streams-wire-rules)
+  says a subscription's consumer carries `snodra-member=<a random id per subscription instance>`, and that the
+  official add-ons "use each client's low-level client class: the high-level APIs can neither set `snodra-member` nor
+  answer a consumer update with a stored offset".
+- **This library:** the official Go client (`rabbitmq-stream-go-client` v1.10.0) exports no low-level client or raw
+  subscribe, and its consumer's subscribe properties are built inside `declareSubscriber` from fixed fields
+  (`github.com/rabbitmq/rabbitmq-stream-go-client@v1.10.0/pkg/stream/client.go:1005`), so it cannot set
+  `snodra-member`. The add-on speaks the protocol's low-level commands itself
+  (`rabbitmq/internal/streamwire`) and keeps the client's `pkg/amqp` for AMQP 1.0 message encoding; the add-on's
+  tests use its high-level API only to create streams. `TestSingleActiveConsumerAndSnodraMember` pins the property on
+  a real broker, and `TestStoredOffsetIsTheNextOne` pins the consumer-update reply with the stored offset.
+- **Question:** should the specification name the low-level capabilities a client must expose (and so allow a client
+  replacement), or require the Go client to add custom subscribe properties?
+
+### SG-44: a management-API consumer without `snodra-member`
+
+- **Specification:** [RabbitMQ Streams wire rules](https://snodra.damoreira.com/docs/library-authors/event-store-add-ons/#rabbitmq-streams-wire-rules)
+  says a subscription's members are "the distinct `snodra-member` values of the consumers of that name on the
+  source's partitions". A consumer written with another client (the official Go client cannot set the property) reads
+  the same stream without one.
+- **This library:** the management-API reader falls back to `<connection name>:<subscription id>` for a consumer
+  without `snodra-member`, and counts it as a member, so a reset refuses. The Rust add-on does the same
+  (`snodra-messaging-rs/crates/snodra-messaging-rabbitmq/src/management.rs`).
+- **Question:** is a consumer without the property a member (a reset must refuse while it reads), or is it invisible
+  to the members list?
+
+### SG-45: reading a stream's first offset and head
+
+- **Specification:** [event-store-add-ons.md, Segments and positions](https://snodra.damoreira.com/docs/library-authors/event-store-add-ons/#segments-and-positions)
+  makes positions opaque and [the RabbitMQ wire rules](https://snodra.damoreira.com/docs/library-authors/event-store-add-ons/#rabbitmq-streams-wire-rules)
+  say the position is the offset, but no page says how an add-on learns a stream's first offset and head. The stream
+  protocol's statistics name chunk ids, not offsets.
+- **This library:** reads the first and the last chunk on the partition's leader, as the Rust add-on does: the first
+  chunk's first offset is the first position, the last chunk's first offset plus its records is the head. A stream is
+  empty only when both reads are silent within 1.5 s; one silent read beside one that answered is a failure, never a
+  shortened or empty stream. `TestReplayOnlyWithTheManagementAPI` pins a plan's `from`/`until` from these reads.
+- **Question:** should the specification define how bounds are read (or a minimum bound), or leave it to each add-on?
+
+### SG-46: `browse` on a library without an event browser
+
+- **Specification:** [RabbitMQ Streams wire rules](https://snodra.damoreira.com/docs/library-authors/event-store-add-ons/#rabbitmq-streams-wire-rules)
+  says the RabbitMQ Streams add-on declares `browse`, `lag` and `native-dead-letter`, and `replay` with the
+  management API; the same page says a library without an event browser (the Kotlin library today) may still declare
+  `browse` for a store another program can read. The Go core has no event-browser interface, and the level-2 design
+  leaves browsers out.
+- **This library:** declares `lag`, `native-dead-letter` and (with the management API) `replay`, never `browse`; its
+  `EventStore` has no browser to return. A browser program with its own RabbitMQ add-on can still read the streams.
+- **Question:** should the Go and Python add-on pages say `browse` is not declared when the library has no browser, or
+  should they declare it for a separate browser program?
+
+### SG-47: when the management API's metrics are off
+
+- **Specification:** [event-store-add-ons.md, Capabilities](https://snodra.damoreira.com/docs/library-authors/event-store-add-ons/#capabilities)
+  says the RabbitMQ add-on declares `replay` only when its management API is configured, because only that API lists
+  the instances reading a subscription. No page says what a store does when the API is configured but its metrics
+  collection is off (`management.disable_stats` or `management_agent.disable_metrics_collector`): its consumer list
+  then answers nothing.
+- **This library:** `New` declares `replay` from the management URL without asking it; `Open` asks the overview once
+  and drops `replay` when the metrics are off, and fails with `ErrFailed` when the API does not answer (a store that
+  would declare `replay` cannot start while that node is down). Every reset asks the consumer list and fails, never
+  "nobody reads", on an answer it cannot trust.
+- **Question:** should the specification settle whether disabled metrics is a startup failure or a store without
+  `replay`, and whether `Open` or `New` is the contract?
+
+### SG-48: a reset is all or nothing over independently stored offsets
+
+- **Specification:** [event-store-add-ons.md, The admin](https://snodra.damoreira.com/docs/library-authors/event-store-add-ons/#the-admin)
+  says `apply(ranges)` "moves each range's segment's committed position to its `from`, all or nothing". RabbitMQ
+  Streams has no command that stores several partitions' offsets together: each is its own asynchronous command on
+  its partition's leader, and a failure after some were stored leaves them moved.
+- **This library:** validates every range and every head first, refuses while a member reads, stores each from in
+  turn, then reads every one back. A store or read-back failure is reported; the offsets already stored are not
+  restored (the Rust add-on does the same). A range read back at another offset is a subscribers-active refusal.
+  `TestReplayOnlyWithTheManagementAPI` pins the successful path and the refusal while a subscription reads.
+- **Question:** should a reset roll back (best effort) when a later partition's store fails, or should the
+  specification say a failed apply may leave some partitions moved and the planner re-runs it?
