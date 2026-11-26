@@ -376,3 +376,34 @@ settled; where an entry is settled its behaviour is the specification. The code 
   next unless another call moved the counter meanwhile. The protocol does not fix this order, and a caller must not
   rely on it.
 - **Question:** settled: the order is the library's.
+
+### SG-26: the segment an event without a key goes to
+
+- **Specification:** [event-store-add-ons.md, The reference: the in-memory event store](https://snodra.damoreira.com/docs/library-authors/event-store-add-ons/#the-reference-the-in-memory-event-store)
+  says "an event without a key to the next segment in turn"; it does not say whether the turn belongs to a source or
+  to the store, nor where it starts.
+- **This library:** keeps one turn for the whole store, starting at segment 0 and wrapping at the store's number of
+  segments; events of every source share it (`eventstore_memory.go`). The reference's in-memory store keeps one
+  counter for the store too (`snodra-messaging@64dde1e:snodra-messaging/src/main/kotlin/com/damoreira/snodra/messaging/eventstore/memory/MemoryEventStore.kt:107`).
+- **Question:** settled: the turn is the store's, shared by its sources.
+
+### SG-27: an acknowledgement after a segment changed hands
+
+- **Specification:** [event-store-add-ons.md, The operations](https://snodra.damoreira.com/docs/library-authors/event-store-add-ons/#the-operations)
+  says an acknowledgement "acknowledges that delivery and every earlier one of the segment; a later subscription of the
+  name resumes after it", and that what a revoked segment delivered and was not acknowledged comes again to its next
+  holder; it does not say what an acknowledgement of a segment the subscription no longer holds does.
+- **This library:** checks that the segment and the position exist, then drops the acknowledgement: the segment's new
+  holder starts from the committed position (`eventstore_memory.go`). The reference does the same
+  (`snodra-messaging@64dde1e:snodra-messaging/src/main/kotlin/com/damoreira/snodra/messaging/eventstore/memory/MemoryEventStore.kt:268`).
+- **Question:** settled: the acknowledgement is dropped.
+
+### SG-28: redelivering a position at or after the subscription's next one
+
+- **Specification:** [event-store-add-ons.md, The operations](https://snodra.damoreira.com/docs/library-authors/event-store-add-ons/#the-operations)
+  says redeliver "hands that delivery and the segment's later ones out again without leaving the subscription"; it does
+  not say what a call with a position at or after the subscription's next position does.
+- **This library:** only an earlier position moves the next position back; a position at or after it changes nothing, so
+  a redelivery never skips an event (`eventstore_memory.go`). The reference guards the move the same way
+  (`snodra-messaging@64dde1e:snodra-messaging/src/main/kotlin/com/damoreira/snodra/messaging/eventstore/memory/MemoryEventStore.kt:279`).
+- **Question:** settled: a position at or after the next one changes nothing.
