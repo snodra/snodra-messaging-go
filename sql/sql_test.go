@@ -186,14 +186,19 @@ func TestBackgroundWithThePurgeOffWaitsForTheContext(t *testing.T) {
 	}
 }
 
-// A listener never starts after Close: registering after the notifier stopped (or after the store
-// closed) is a no-op, and its cancel is safe to call.
+// A listener never starts after Close: registering after the notifier stopped, or after a fresh
+// store closed, is a no-op, and its cancel is safe to call.
 func TestAListenerDoesNotStartAfterClose(t *testing.T) {
-	store, err := New(Config{URL: "postgres://user:password@127.0.0.1:1/db"})
-	if err != nil {
-		t.Fatal(err)
+	newStore := func() *Store {
+		t.Helper()
+		store, err := New(Config{URL: "postgres://user:password@127.0.0.1:1/db"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = store.Close() })
+		return store
 	}
-	add := func(what string, register func(func()) func()) {
+	add := func(what string, store *Store, register func(func()) func()) {
 		t.Helper()
 		called := false
 		cancel := register(func() { called = true })
@@ -211,14 +216,15 @@ func TestAListenerDoesNotStartAfterClose(t *testing.T) {
 			t.Fatalf("%s: a wake registered after the store stopped was called", what)
 		}
 	}
-	add("stopped", func(wake func()) func() {
-		store.notifier.stop()
-		return store.notifier.register(wake)
-	})
-	if err := store.Close(); err != nil {
+	stopped := newStore()
+	stopped.notifier.stop()
+	add("stopped", stopped, stopped.notifier.register)
+
+	closed := newStore()
+	if err := closed.Close(); err != nil {
 		t.Fatal(err)
 	}
-	add("closed", store.Outbox().OnAppend)
+	add("closed", closed, closed.Outbox().OnAppend)
 }
 
 // A transaction of another SQL store in the context is refused, never run on this store's pool.

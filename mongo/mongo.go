@@ -170,8 +170,9 @@ func New(config Config) (*Store, error) {
 }
 
 // NewWithClient creates the store over database on a client the service owns and configures (its
-// TLS, credentials and pool): the store does not disconnect it, [Store.Close] does nothing to it,
-// and config.URI is ignored. A nil client or an empty database is snodra.ErrInvalid.
+// TLS, credentials and pool): the store does not disconnect it and [Store.Close] does nothing to
+// it, so the store keeps working after Close for as long as the client does. config.URI is
+// ignored. A nil client or an empty database is snodra.ErrInvalid.
 func NewWithClient(client *mongo.Client, database string, config Config) (*Store, error) {
 	if client == nil {
 		return nil, invalidf("needs a MongoDB client")
@@ -275,8 +276,9 @@ func (s *Store) now() time.Time {
 	return clock()
 }
 
-// Close disconnects a client the store created and does nothing to a service's own. The store is
-// not usable afterwards; calling Close more than once is a no-op.
+// Close disconnects a client the store created and does nothing to a service's own. Calling Close
+// more than once is a no-op. A store that owns its client cannot reach the database after Close;
+// one created with [NewWithClient] keeps working for as long as the service's client does.
 func (s *Store) Close(ctx context.Context) error {
 	if s.closed.Swap(true) {
 		return nil

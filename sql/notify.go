@@ -77,10 +77,12 @@ func (n *notifier) register(wake func()) func() {
 	}
 }
 
-// stop ends the listener and refuses a later register; Store.Close calls it.
+// stop ends the listener, forgets every registered wake and refuses a later register; Store.Close
+// calls it.
 func (n *notifier) stop() {
 	n.mu.Lock()
 	n.stopped = true
+	clear(n.wakers)
 	if n.cancel != nil {
 		n.cancel()
 		n.cancel = nil
@@ -88,9 +90,14 @@ func (n *notifier) stop() {
 	n.mu.Unlock()
 }
 
-// wakeAll calls every registered wake, outside the lock; a wake must return at once.
+// wakeAll calls every registered wake, outside the lock; a wake must return at once. A stopped
+// notifier wakes nobody.
 func (n *notifier) wakeAll() {
 	n.mu.Lock()
+	if n.stopped {
+		n.mu.Unlock()
+		return
+	}
 	wakers := make([]func(), 0, len(n.wakers))
 	for _, wake := range n.wakers {
 		wakers = append(wakers, wake)

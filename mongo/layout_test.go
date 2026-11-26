@@ -14,6 +14,29 @@ import (
 	snodra "github.com/snodra/snodra-messaging-go"
 )
 
+// The ten shared collection names are fixed by the layout: no prefix, no setting changes them.
+func TestTheLayoutsCollectionNames(t *testing.T) {
+	for _, check := range []struct {
+		name string
+		want string
+	}{
+		{collectionOutbox, "outbox"},
+		{collectionProcessed, "processed_events"},
+		{collectionDeadLetters, "dead_letters"},
+		{collectionControl, "processor_control"},
+		{collectionExternalCalls, "external_calls"},
+		{collectionSagas, "sagas"},
+		{collectionSagaDispatch, "saga_dispatch"},
+		{collectionSagaDispatchLease, "saga_dispatch_leases"},
+		{collectionDeadlines, "deadlines"},
+		{collectionSagaFailures, "saga_failures"},
+	} {
+		if check.name != check.want {
+			t.Fatalf("the collection constant is %q, the layout names %q", check.name, check.want)
+		}
+	}
+}
+
 // An appended entry has the layout's fields: key, sentAt and failedAt null when they have no
 // value, no owner or leaseUntil until a claim. Numeric types are the layout's (seq long, attempts
 // int), and the payload is a BSON document.
@@ -308,19 +331,49 @@ func TestTheLayoutsIndexes(t *testing.T) {
 	}
 }
 
-// A TTL in seconds rounds a positive fraction up; zero stays zero (it is a real TTL).
+// A TTL in seconds floors a positive fraction, as the reference stores it; zero stays zero (it is
+// a real TTL), and a sub-second retention becomes zero.
 func TestTTLSeconds(t *testing.T) {
 	for retention, want := range map[time.Duration]int32{
 		0:                       0,
 		-time.Second:            0,
-		500 * time.Millisecond:  1,
-		1500 * time.Millisecond: 2,
+		500 * time.Millisecond:  0,
+		1500 * time.Millisecond: 1,
 		7 * 24 * time.Hour:      604800,
 		30 * 24 * time.Hour:     2592000,
 	} {
 		if got := ttlSeconds(retention); got != want {
 			t.Fatalf("ttlSeconds(%v): got %d, want %d", retention, got, want)
 		}
+	}
+}
+
+// Partial filters compare by their fields, not their order, which carries no meaning; an array
+// inside one keeps its order.
+func TestPartialFiltersCompareWithoutFieldOrder(t *testing.T) {
+	first := bson.D{
+		{Key: "ended", Value: false},
+		{Key: "startKey", Value: bson.D{{Key: "$exists", Value: true}}},
+	}
+	reordered := bson.D{
+		{Key: "startKey", Value: bson.D{{Key: "$exists", Value: true}}},
+		{Key: "ended", Value: false},
+	}
+	if !samePartialFilter(first, reordered) {
+		t.Fatal("the same fields in another order do not compare equal")
+	}
+	if samePartialFilter(first, bson.D{{Key: "ended", Value: true}, {Key: "startKey", Value: bson.D{{Key: "$exists", Value: true}}}}) {
+		t.Fatal("a different value compares equal")
+	}
+	if samePartialFilter(first, bson.D{{Key: "ended", Value: false}}) {
+		t.Fatal("a missing field compares equal")
+	}
+	inArray := bson.D{{Key: "tag", Value: bson.A{"a", "b"}}}
+	if samePartialFilter(inArray, bson.D{{Key: "tag", Value: bson.A{"b", "a"}}}) {
+		t.Fatal("an array's order does not count")
+	}
+	if !samePartialFilter(bson.D{}, bson.D{}) || samePartialFilter(bson.D{}, first) {
+		t.Fatal("an absent filter is not none")
 	}
 }
 

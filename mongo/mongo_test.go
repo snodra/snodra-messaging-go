@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -47,6 +46,9 @@ func TestAnEntryWithoutOptionalFieldsReadsAsNone(t *testing.T) {
 		},
 		{
 			{Key: "_id", Value: "kotlin-all-absent"},
+			// A document written by an older version of another library carries a _class field;
+			// a reader ignores fields it does not know.
+			{Key: "_class", Value: "com.example.OutboxDocument"},
 			{Key: "type", Value: "conformance.Absent"},
 			{Key: "headers", Value: bson.D{}},
 			{Key: "payload", Value: bson.D{{Key: "n", Value: int64(2)}}},
@@ -115,6 +117,9 @@ func TestAnAppendedEntryWritesTheLayoutsNullFields(t *testing.T) {
 		if _, err := raw.LookupErr(name); err == nil {
 			t.Fatalf("%s is written before a claim", name)
 		}
+	}
+	if _, err := raw.LookupErr("_class"); err == nil {
+		t.Fatal("the store wrote a _class field")
 	}
 	if value, err := raw.LookupErr("seq"); err != nil || value.Type != bson.TypeInt64 {
 		t.Fatalf("seq: %v (%v), want a long", value.Type, err)
@@ -325,7 +330,7 @@ func TestTheIndexesAreIdempotentAndCheckable(t *testing.T) {
 					t.Fatalf("%q partial filter: %v", definition.name, err)
 				}
 			}
-			if !reflect.DeepEqual(partial, definition.partial) {
+			if !samePartialFilter(partial, definition.partial) {
 				t.Fatalf("%q partial filter: got %v, want %v", definition.name, partial, definition.partial)
 			}
 			delete(actual, definition.name)

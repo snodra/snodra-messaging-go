@@ -571,8 +571,9 @@ settled; where an entry is settled its behaviour is the specification. The code 
 - **This library:** `Store.scope` refuses a context carrying another `*Store`'s transaction with `ErrInvalid`, and
   joins its own `Begin` transaction, a service's `*sql.Tx` (`WithTx`) or a service's `*sql.Conn` (`WithConn`). A
   transaction of a different `snodra.MessageStore` implementation is invisible: each implementation uses an
-  unexported context key, so the call runs in a short transaction of its own instead of being refused.
-  The reference refuses one at the scope (`snodra-messaging-rs/crates/snodra-messaging-sqlx/src/db.rs:805`).
+  unexported context key, so the call runs in a short transaction of its own instead of being refused. The same
+  holds for a session: a session bound from another store's client is not detected either. The reference refuses
+  one at the scope (`snodra-messaging-rs/crates/snodra-messaging-sqlx/src/db.rs:805`).
 - **Question:** should the core define a shared transaction marker so one store can detect another's, or is the
   caller responsible for never mixing a context across stores?
 
@@ -597,10 +598,10 @@ settled; where an entry is settled its behaviour is the specification. The code 
   transaction that is not one of its own. The Go interface binds a transaction through a `context.Context`, and a
   context can carry only keys its package knows.
 - **This library:** the MongoDB store's `scope` refuses a context carrying another `*Store`'s transaction with
-  `ErrInvalid`, and joins its own `Begin` transaction or a service's session (`WithSession`). A transaction or session
-  of a different `snodra.MessageStore` implementation is invisible: each implementation uses an unexported context
-  key, so the call runs on its own instead of being refused. A session bound from a foreign MongoDB client is not
-  detected either. The reference refuses a foreign transaction at the scope
+  `ErrInvalid`, and joins its own `Begin` transaction or a service's session (`WithSession`). A transaction of a
+  different `snodra.MessageStore` implementation is invisible: each implementation uses an unexported context key,
+  so the call runs on its own instead of being refused. (The session half of this limit is SG-39's.) The reference
+  refuses a foreign transaction at the scope
   (`snodra-messaging-rs/crates/snodra-messaging-sqlx/src/db.rs:805`).
 - **Question:** should the core define a shared transaction marker so one store can detect another's, or is the
   caller responsible for never mixing a context across stores?
@@ -611,10 +612,12 @@ settled; where an entry is settled its behaviour is the specification. The code 
   instance sharing a database needs the same retentions and that neither add-on changes an index that exists; the
   core's `StoreLifecycle` says `CheckSchema` fails unless the database has what the store needs. No page says whether
   a TTL index created with one retention is a schema failure for a store configured with another.
-- **This library:** `CheckSchema` compares an index's keys, TTL, uniqueness and partial filter with the layout and the
-  store's settings. A database initialized with a different retention fails it with an error naming the index and
-  saying every instance needs the same retentions; `InitSchema` leaves the existing index as it is (MongoDB refuses an
-  index under an existing name with other options). The two reference add-ons have no schema check to compare with.
+- **This library:** `CheckSchema` compares an index's keys, TTL, uniqueness and partial filter (regardless of field
+  order) with the layout and the store's settings. A database initialized with a different retention fails it with an
+  error naming the index and saying every instance needs the same retentions; `InitSchema` leaves the existing index
+  as it is (MongoDB refuses an index under an existing name with other options). A retention is stored in whole
+  seconds, floored as the reference stores it, so a positive sub-second retention becomes zero. The two reference
+  add-ons have no schema check to compare with.
 - **Question:** should a retention change be a schema failure (the index must be dropped and recreated), or is the TTL
   a setting each instance may differ on?
 

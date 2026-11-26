@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"sort"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -135,13 +136,14 @@ func ascending(fields ...string) bson.D {
 // expiry in the field), so nil and zero must stay distinct.
 func duration(d time.Duration) *time.Duration { return &d }
 
-// ttlSeconds is d in whole seconds, rounded up so a positive sub-second retention never expires a
-// document at once. A negative duration is zero.
+// ttlSeconds is d in whole seconds, floored as the reference stores a retention: a positive
+// sub-second duration becomes zero, and the TTL monitor may then expire the document at once. A
+// negative duration is zero.
 func ttlSeconds(d time.Duration) int32 {
 	if d <= 0 {
 		return 0
 	}
-	seconds := (d + time.Second - 1) / time.Second
+	seconds := d / time.Second
 	if seconds > math.MaxInt32 {
 		return math.MaxInt32
 	}
@@ -249,10 +251,63 @@ func (s *Store) checkIndexes(ctx context.Context) error {
 					return fmt.Errorf("the MongoDB message store cannot read index %q on %q: %w", definition.name, layout.name, err)
 				}
 			}
-			if (len(definition.partial) > 0 || len(partial) > 0) && !reflect.DeepEqual(partial, definition.partial) {
+			if !samePartialFilter(partial, definition.partial) {
 				return fmt.Errorf("the MongoDB message store's index %q on %q filters %v, not %v: drop it and run InitSchema", definition.name, layout.name, partial, definition.partial)
 			}
 		}
 	}
 	return nil
+}
+
+// samePartialFilter compares two partial filter documents regardless of the order of their
+// fields, which carries no meaning in MongoDB; an array keeps its order, which does.
+func samePartialFilter(a, b bson.D) bool {
+	if len(a) == 0 || len(b) == 0 {
+		return len(a) == 0 && len(b) == 0
+	}
+	return reflect.DeepEqual(normalizedDocument(a), normalizedDocument(b))
+}
+
+// normalizedDocument sorts a document's fields by name and normalizes their values, recursively.
+func normalizedDocument(document bson.D) bson.D {
+	normalized := make(bson.D, len(document))
+	for i, element := range document {
+		normalized[i] = bson.E{Key: element.Key, Value: normalizedValue(element.Value)}
+	}
+	sort.Slice(normalized, func(i, j int) bool { return normalized[i].Key < normalized[j].Key })
+	return normalized
+}
+
+// normalizedValue normalizes a document nested in a filter; an array keeps its order.
+func normalizedValue(value any) any {
+	switch value := value.(type) {
+	case bson.D:
+		return normalizedDocument(value)
+	case bson.M:
+		document := make(bson.D, 0, len(value))
+		for key, element := range value {
+			document = append(document, bson.E{Key: key, Value: element})
+		}
+		return normalizedDocument(document)
+	case map[string]any:
+		document := make(bson.D, 0, len(value))
+		for key, element := range value {
+			document = append(document, bson.E{Key: key, Value: element})
+		}
+		return normalizedDocument(document)
+	case bson.A:
+		normalized := make(bson.A, len(value))
+		for i, element := range value {
+			normalized[i] = normalizedValue(element)
+		}
+		return normalized
+	case []any:
+		normalized := make(bson.A, len(value))
+		for i, element := range value {
+			normalized[i] = normalizedValue(element)
+		}
+		return normalized
+	default:
+		return value
+	}
 }
