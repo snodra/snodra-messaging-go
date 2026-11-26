@@ -15,7 +15,6 @@ import (
 	"github.com/snodra/snodra-messaging-go/mongo"
 	"github.com/snodra/snodra-messaging-go/rabbitmq"
 	"github.com/snodra/snodra-messaging-go/sql"
-	"github.com/twmb/franz-go/pkg/kgo"
 )
 
 // probe is one family's app in this process: the library's App on the family's message store and
@@ -112,13 +111,9 @@ func buildStores(s settings, family string) (snodra.MessageStore, snodra.EventSt
 	var eventStore snodra.EventStore
 	switch spec.event {
 	case "kafka":
-		// No compression: franz-go defaults to snappy, and a consumer whose client ships no
-		// snappy codec cannot read those records. The wire rules leave compression to the client,
-		// so the example pins what every official client reads.
-		created, err := kafka.New(kafka.Config{
-			BootstrapServers: s.kafkaBootstrap,
-			Options:          []kgo.Opt{kgo.ProducerBatchCompression(kgo.NoCompression())},
-		})
+		// The add-on's producer compresses nothing by default, the codec every official
+		// library's consumer reads; the example keeps the default it ships.
+		created, err := kafka.New(kafka.Config{BootstrapServers: s.kafkaBootstrap})
 		if err != nil {
 			closeStore(store)
 			return nil, nil, "", fmt.Errorf("the kafka event store: %w", err)

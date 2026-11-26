@@ -13,7 +13,7 @@ require (
 	github.com/snodra/snodra-messaging-go/sql v0.0.0
 )
 
-require github.com/twmb/franz-go v1.22.3
+require github.com/twmb/franz-go v1.22.3 // indirect
 
 require (
 	filippo.io/edwards25519 v1.2.0 // indirect

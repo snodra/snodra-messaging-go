@@ -12,11 +12,13 @@ import (
 	"reflect"
 	"sort"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	snodra "github.com/snodra/snodra-messaging-go"
 	"github.com/snodra/snodra-messaging-go/snodratest"
+	"github.com/twmb/franz-go/pkg/kgo"
 )
 
 // The nine level-2 event-store checks on a real broker.
@@ -139,6 +141,67 @@ func TestHeadersTravelByNameAndTheKeyAndPayloadAsPublished(t *testing.T) {
 			t.Fatalf("%s: the record's timestamp is %d", sent.ID, got.TimestampMs)
 		}
 	}
+}
+
+// A consumer with no compression codec reads what the store publishes: the producer's default is
+// no compression, the codec every official library's consumer decodes (aiokafka ships no snappy).
+func TestAPublishedRecordNeedsNoCodecToRead(t *testing.T) {
+	broker := kafkaBroker(t)
+	topic := uniqueTopic("no-codec")
+	createTopic(t, broker, topic, 1, nil)
+	store := newTestStore(t, broker)
+
+	key := "order-42"
+	outgoing := event(topic, "no-codec-1", &key)
+	// Repeated text compresses well: franz-go's default snappy preference would compress this
+	// batch, and a consumer without the codec would fail to read it.
+	outgoing.Payload = []byte(`{"padding":"` + strings.Repeat("compressible ", 1024) + `"}`)
+	if err := store.Publish(t.Context(), outgoing); err != nil {
+		t.Fatalf("publishing: %v", err)
+	}
+
+	consumer, err := kgo.NewClient(
+		kgo.SeedBrokers(broker.bootstrap),
+		kgo.ConsumeTopics(topic),
+		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
+		kgo.WithDecompressor(noCodecDecompressor{}),
+	)
+	if err != nil {
+		t.Fatalf("the raw consumer: %v", err)
+	}
+	t.Cleanup(consumer.Close)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	fetches := consumer.PollFetches(ctx)
+	if errors := fetches.Errors(); len(errors) > 0 {
+		t.Fatalf("reading without a codec: %v", errors)
+	}
+	records := fetches.Records()
+	if len(records) != 1 {
+		t.Fatalf("%d records delivered, want 1", len(records))
+	}
+	record := records[0]
+	if got := record.Attrs.CompressionType(); got != uint8(kgo.CodecNone) {
+		t.Fatalf("the record's compression is %d, want %d (none)", got, kgo.CodecNone)
+	}
+	if !bytes.Equal(record.Value, outgoing.Payload) {
+		t.Fatalf("the payload %q, want %q", record.Value, outgoing.Payload)
+	}
+	if record.Key == nil || string(record.Key) != key {
+		t.Fatalf("the key %q, want %q", record.Key, key)
+	}
+}
+
+// noCodecDecompressor is a consumer with no optional codec installed: it reads an uncompressed
+// batch and refuses every compressed one, like aiokafka without python-snappy.
+type noCodecDecompressor struct{}
+
+func (noCodecDecompressor) Decompress(src []byte, codecType kgo.CompressionCodecType) ([]byte, error) {
+	if codecType != kgo.CodecNone {
+		return nil, fmt.Errorf("the consumer has no compression codec for %d", codecType)
+	}
+	return src, nil
 }
 
 // Subscribing before the source's topic exists is not an error: the subscription waits for the
@@ -289,8 +352,8 @@ func TestARecordTheBrokerRefusesIsGivenUp(t *testing.T) {
 	store := newTestStore(t, broker)
 	key := "order-42"
 	outgoing := event(topic, "too-large", &key)
-	// The producer compresses (Snappy by default) and max.message.bytes bounds the compressed
-	// batch: random bytes stay over the topic's 1 KiB through compression.
+	// max.message.bytes bounds the batch the producer sends, and the producer sends it
+	// uncompressed: the payload stays over the topic's 1 KiB.
 	padding := make([]byte, 8192)
 	if _, err := rand.Read(padding); err != nil {
 		t.Fatalf("random padding: %v", err)

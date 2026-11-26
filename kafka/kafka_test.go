@@ -2,10 +2,12 @@ package kafka
 
 import (
 	"errors"
+	"slices"
 	"testing"
 
 	snodra "github.com/snodra/snodra-messaging-go"
 	"github.com/twmb/franz-go/pkg/kerr"
+	"github.com/twmb/franz-go/pkg/kgo"
 )
 
 func TestTheCommittedOffsetIsTheNextOne(t *testing.T) {
@@ -139,6 +141,39 @@ func TestNewRefusesBadSettings(t *testing.T) {
 		if !errors.Is(err, snodra.ErrInvalid) {
 			t.Fatalf("config %+v: %v, want ErrInvalid", config, err)
 		}
+	}
+}
+
+// The producer compresses nothing by default, the codec every official library's consumer reads;
+// a Config.Options entry replaces that default when a deployment wants another one.
+func TestTheProducerDefaultsToNoCompression(t *testing.T) {
+	store, err := New(Config{BootstrapServers: "127.0.0.1:1"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+	got, ok := store.producer.OptValue(kgo.ProducerBatchCompression).([]kgo.CompressionCodec)
+	if !ok {
+		t.Fatalf("the producer's compression setting is %T", store.producer.OptValue(kgo.ProducerBatchCompression))
+	}
+	if want := []kgo.CompressionCodec{kgo.NoCompression()}; !slices.Equal(got, want) {
+		t.Fatalf("the producer's default compression is %v, want no compression", got)
+	}
+}
+
+func TestAProducerCompressionOptionReplacesTheDefault(t *testing.T) {
+	gzip := kgo.ProducerBatchCompression(kgo.GzipCompression())
+	store, err := New(Config{BootstrapServers: "127.0.0.1:1", Options: []kgo.Opt{gzip}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+	got, ok := store.producer.OptValue(kgo.ProducerBatchCompression).([]kgo.CompressionCodec)
+	if !ok {
+		t.Fatalf("the producer's compression setting is %T", store.producer.OptValue(kgo.ProducerBatchCompression))
+	}
+	if want := []kgo.CompressionCodec{kgo.GzipCompression()}; !slices.Equal(got, want) {
+		t.Fatalf("the producer's compression is %v, want gzip", got)
 	}
 }
 

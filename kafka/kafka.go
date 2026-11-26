@@ -17,6 +17,11 @@
 //     group;
 //   - the group's committed offset is the next one to read: acknowledging the record at offset N
 //     stores N+1, and a new group starts at the earliest offset;
+//   - the producer compresses no record batch by default. Compression is a producer's choice that
+//     every consumer of the topic has to decode, and not every official library's consumer ships
+//     a snappy codec (aiokafka has none); the reference add-ons produce uncompressed too
+//     (librdkafka and the Java client both leave `compression.type` at `none`). A
+//     `kgo.ProducerBatchCompression` option in Config.Options chooses another codec;
 //   - a dead letter goes to `<source>.dlt`.
 //
 // The store declares the capabilities replay, lag and native-dead-letter. It has no event
@@ -84,6 +89,8 @@ type Config struct {
 	// Options are extra franz-go options for every client the store creates (TLS, SASL, a
 	// logger, ...). Use them for the connection: the store sets the group, the consume topic,
 	// the reset offset, the group protocol, the partitioner and the commit behavior itself.
+	// The producer compresses nothing by default; a kgo.ProducerBatchCompression option here
+	// replaces that codec.
 	Options []kgo.Opt
 	// MaxPollRecords is the most records one poll hands a subscription (default 100, at
 	// least 1).
@@ -155,7 +162,11 @@ func New(config Config) (*EventStore, error) {
 	}
 
 	options := append([]kgo.Opt(nil), config.Options...)
-	producer, err := kgo.NewClient(append(options,
+	// The producer's default codec comes before the caller's options, so a
+	// kgo.ProducerBatchCompression option replaces it; the store's own options, appended after
+	// the caller's, do not set compression.
+	producerOptions := append([]kgo.Opt{kgo.ProducerBatchCompression(kgo.NoCompression())}, options...)
+	producer, err := kgo.NewClient(append(producerOptions,
 		kgo.SeedBrokers(bootstrap),
 		// The Java client's default partitioner for keyed records: murmur2 masked positive,
 		// modulo the partitions. An unkeyed record has no placement rule.
