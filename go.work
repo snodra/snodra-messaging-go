@@ -2,15 +2,17 @@ go 1.26.0
 
 use (
 	.
+	./kafka
 	./observability
 )
 
-// Development and CI build observability/ against the root module next to it. Its go.mod requires
-// the last released root, the line a consumer resolves; this replaces exactly that version, and
-// scripts/bump-version.sh moves both at each release. Consumers never read this file.
+// Development and CI build kafka/ and observability/ against the root module next to them.
+// Their go.mod files require the last released root, the line a consumer resolves; this replaces
+// exactly that version with this checkout, so both build against the code here. Consumers never
+// read this file.
 //
-// `go mod tidy` and `go get` ignore the workspace: in observability/ they resolve the root module
-// at the released version its go.mod requires, from the network. Build and test there with the
-// workspace (`go test -race ./...` in each module), and let a release update that requirement.
-// go.work.sum is ignored.
+// `go mod tidy` and `go get` ignore the workspace: in kafka/ and observability/ they resolve the
+// root module at the released version its go.mod requires, from the network. Build and test there
+// with the workspace (`go test -race ./...` in each module), and let a release update that
+// requirement. go.work.sum is ignored.
 replace github.com/snodra/snodra-messaging-go v0.3.0 => ./
