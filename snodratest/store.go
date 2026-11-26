@@ -802,17 +802,21 @@ func storeEntry(tb storeTB, typeName string, createdAt time.Time, seq int64) sno
 		[]byte(fmt.Sprintf(`{"seq":%d,"text":"é","nested":{"ok":true}}`, seq)))
 }
 
-// storeEntryWithPayload is storeEntry with the payload given.
+// storeEntryWithPayload is storeEntry with the payload given. The time is truncated to
+// milliseconds, the precision every message store keeps (the SQL layout's TIMESTAMPTZ(3) and
+// DATETIME(3)), so a claimed entry equals the one appended.
 func storeEntryWithPayload(tb storeTB, typeName string, createdAt time.Time, seq int64, payload []byte) snodra.OutboxEntry {
 	tb.Helper()
 	key := "key-" + strconv.FormatInt(seq, 10)
 	return snodra.OutboxEntry{
-		ID:        fresh("entry"),
-		Type:      typeName,
-		Key:       &key,
-		Headers:   map[string]string{snodra.HeaderCorrelationID: fresh("correlation"), snodra.HeaderUserID: ""},
-		Payload:   payload,
-		CreatedAt: createdAt,
+		ID:      fresh("entry"),
+		Type:    typeName,
+		Key:     &key,
+		Headers: map[string]string{snodra.HeaderCorrelationID: fresh("correlation"), snodra.HeaderUserID: ""},
+		Payload: payload,
+		// TODO(spec-gap): SG-40 (the SQL layout keeps milliseconds; the kit builds the times it
+		// compares at that precision, as the reference kit does).
+		CreatedAt: createdAt.Truncate(time.Millisecond),
 		Seq:       seq,
 	}
 }

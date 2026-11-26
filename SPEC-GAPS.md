@@ -552,3 +552,31 @@ settled; where an entry is settled its behaviour is the specification. The code 
   (`snodra-messaging@64dde1e:snodra-messaging-kafka/src/main/kotlin/com/damoreira/snodra/messaging/kafka/KafkaEventStore.kt:112`);
   Rust orders text after every numeric offset.
 - **Question:** is a total order the contract, or should a library be able to refuse a malformed position?
+
+### SG-39: a transaction of another message store in a Go context
+
+- **Specification:** [message-store-add-ons.md, The stores](https://snodra.damoreira.com/docs/library-authors/message-store-add-ons/#the-stores)
+  says an add-on joins the caller's transaction and never writes beside it; the reference's SQL scope refuses a
+  transaction that is not one of its own. The Go interface binds a transaction through a `context.Context`, and a
+  context can carry only keys its package knows.
+- **This library:** `Store.scope` refuses a context carrying another `*Store`'s transaction with `ErrInvalid`, and
+  joins its own `Begin` transaction, a service's `*sql.Tx` (`WithTx`) or a service's `*sql.Conn` (`WithConn`). A
+  transaction of a different `snodra.MessageStore` implementation is invisible: each implementation uses an
+  unexported context key, so the call runs in a short transaction of its own instead of being refused.
+  The reference refuses one at the scope (`snodra-messaging-rs/crates/snodra-messaging-sqlx/src/db.rs:805`).
+- **Question:** should the core define a shared transaction marker so one store can detect another's, or is the
+  caller responsible for never mixing a context across stores?
+
+### SG-40: the precision of an outbox entry's created time
+
+- **Specification:** [message-store-add-ons.md, The SQL layout](https://snodra.damoreira.com/docs/library-authors/message-store-add-ons/#the-sql-layout)
+  keeps times as UTC instants at millisecond precision (`TIMESTAMPTZ(3)` and `DATETIME(3)`); the Go
+  `OutboxEntry.CreatedAt` is a `time.Time`, and neither its documentation nor the kit says what happens to its
+  sub-millisecond part.
+- **Settled:** an outbox entry's times are at millisecond precision, what every store keeps; a store may truncate
+  the value to it. The reference kit builds the times it compares truncated to milliseconds
+  (`snodra-messaging@64dde1e:snodra-messaging-test/src/main/kotlin/com/damoreira/snodra/messaging/test/store/MessageStoreConformanceTest.kt:66`).
+- **This library:** the Go kit's `storeEntryWithPayload` truncates the created time to milliseconds, so the appended
+  and the claimed entry compare equal on every store; the SQL add-on truncates every time it binds to the layout's
+  milliseconds, so the database never rounds one. `TestTheSQLMessageStorePassesTheKit` pins it on both engines.
+- **Question:** settled: millisecond precision is the contract the kit and the layout share.
