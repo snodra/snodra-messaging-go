@@ -407,3 +407,41 @@ settled; where an entry is settled its behaviour is the specification. The code 
   a redelivery never skips an event (`eventstore_memory.go`). The reference guards the move the same way
   (`snodra-messaging@64dde1e:snodra-messaging/src/main/kotlin/com/damoreira/snodra/messaging/eventstore/memory/MemoryEventStore.kt:279`).
 - **Question:** settled: a position at or after the next one changes nothing.
+
+### SG-29: appending an outbox entry whose id is stored already
+
+- **Specification:** [message-store-add-ons.md, The stores](https://snodra.damoreira.com/docs/library-authors/message-store-add-ons/#the-stores)
+  lists the outbox's operations, their guarantees and the identifiers the stores hold, but does not say what `append`
+  does with an entry whose id is stored already.
+- **This library:** refuses it with `ErrConflict`: nothing is appended, and the attempt is retried like a database's
+  duplicate key (`store_memory.go`, `Append`). The reference's in-memory store throws a duplicate-key exception
+  (`snodra-messaging@64dde1e:snodra-messaging/src/main/kotlin/com/damoreira/snodra/messaging/store/memory/MemoryStores.kt:108`),
+  and the Rust store conflicts too.
+- **Question:** is a second append of an id a conflict (and the attempt's retry) or a silent no-op?
+
+### SG-30: ordering the opaque positions of a replay range in a message store
+
+- **Specification:** [message-store-add-ons.md, The stores](https://snodra.damoreira.com/docs/library-authors/message-store-add-ons/#the-stores)
+  says a reset deletes a processor's markers "in replay ranges", and the event-store port gives a range as
+  `[from, until)` "in the event store's order"; the message store receives the positions as opaque strings and has no
+  `EventStore.Compare`, so it does not say how a store orders them.
+- **This library:** orders them as the reference's stored layout does
+  (`snodra-messaging@64dde1e:snodra-messaging/src/main/kotlin/com/damoreira/snodra/messaging/store/memory/MemoryStores.kt:38`):
+  a canonical decimal position is a number, ordered by value; any other position is text, ordered by its UTF-8 bytes;
+  and a number and a text never match, so a range whose kind differs from a marker's deletes nothing. The SQL layout's
+  numeric partitions and offsets and the MongoDB layout's numbers agree on the decimal case
+  (`store_memory.go`, `memoryPosition`).
+- **Question:** settled: the stored layout's order, as the reference's in-memory store implements it.
+
+### SG-31: an abandoned transaction's write reservations
+
+- **Specification:** [message-store-add-ons.md, The stores](https://snodra.damoreira.com/docs/library-authors/message-store-add-ons/#the-stores)
+  says transactions begin, commit and abort ("abort: never fails"), and that writes outside one run in a transaction of
+  their own; it does not say what a transaction the caller abandons without either does.
+- **This library:** a transaction reserves every record it writes, so a second live transaction writing one of them
+  fails at once with `ErrConflict`; the reservations are released by `Commit` or `Rollback`. A transaction abandoned
+  without either keeps its reservations until the process ends: Go has no destructor to run (`store_memory.go`,
+  `memoryTx`). The caller must always defer `Rollback`.
+- **Question:** should the specification require `Rollback` on every path and leave an abandoned transaction's
+  reservations to the store, or name a maximum lifetime after which the store may release them?
+
