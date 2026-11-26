@@ -786,7 +786,7 @@ func TestMemoryMessageStoreLifecycle(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Background did not end with its context")
 	}
-	if err := store.InitSchema(context.Background()); err != nil {
+	if err := store.InitSchema(context.Background(), nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.CheckSchema(context.Background()); err != nil {

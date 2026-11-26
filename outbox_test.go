@@ -3,6 +3,7 @@ package snodra
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -316,5 +317,63 @@ func TestRelayPublishReturnsTheCallersContext(t *testing.T) {
 	}
 	if len(events.events()) != 0 {
 		t.Fatal("a cancelled publish reached the event store")
+	}
+}
+
+// A full batch is followed by the next claim at once, not at the next poll: three entries with a
+// batch size of 2 and an hour's poll all go out.
+func TestRelayContinuesImmediatelyAfterAFullBatch(t *testing.T) {
+	store := NewMemoryMessageStore()
+	settings := relaySettings()
+	settings.poll = time.Hour
+	settings.batch = 2
+	now := time.Unix(1_800_000_000, 0)
+	for i, id := range []string{"a", "b", "c"} {
+		appendRelayEntry(t, store, id, "k", int64(i), now)
+	}
+	events := newRecordingEvents()
+	relay := testRelay(t, store, events, settings, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		relay.run(ctx)
+	}()
+	waitUntil(t, "the three relayed entries", func() bool { return len(events.events()) == 3 })
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the relay did not stop")
+	}
+	if got := eventIDs(events.events()); len(got) != 3 || got[0] != "a" || got[1] != "b" || got[2] != "c" {
+		t.Fatalf("published %v", got)
+	}
+}
+
+// blockingPublisher never answers before its context ends: the relay's send timeout turns that
+// into a failed send.
+type blockingPublisher struct{}
+
+func (blockingPublisher) Name() string { return "blocking" }
+
+func (blockingPublisher) Publish(ctx context.Context, _ OutgoingEvent) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// A send that gets no answer within the send timeout is a failed send (ErrFailed), so the relay
+// counts an attempt and retries it; the shipped timeout is 40 s.
+func TestRelaySendTimeoutIsAFailedSend(t *testing.T) {
+	is(t, defaultEventSettings().sendTimeout, 40*time.Second)
+	settings := relaySettings()
+	settings.sendTimeout = 5 * time.Millisecond
+	relay := testRelay(t, NewMemoryMessageStore(), blockingPublisher{}, settings, nil)
+	err := relay.publish(context.Background(), OutboxEntry{ID: "slow"})
+	if !errors.Is(err, ErrFailed) {
+		t.Fatalf("got %v, want ErrFailed", err)
+	}
+	if !strings.Contains(err.Error(), "no answer from the event store") {
+		t.Fatalf("got %q, want it to name the timeout", err)
 	}
 }

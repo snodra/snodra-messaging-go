@@ -461,7 +461,7 @@ settled; where an entry is settled its behaviour is the specification. The code 
   (`snodra-messaging@64dde1e:snodra-messaging/src/main/kotlin/com/damoreira/snodra/messaging/events/OutboxPublisher.kt:197`)
   and it refuses a lease not longer than that
   (`snodra-messaging@64dde1e:snodra-messaging/src/main/kotlin/com/damoreira/snodra/messaging/config/SnodraMessagingProperties.kt:334`);
-  Rust's is 40 s (`snodra-messaging-rs/src/events/publisher.rs`, `OUTBOX_SEND_TIMEOUT`). The values appear in the
+  Rust's is 40 s (`snodra-messaging-rs/src/events/publisher.rs:38`, `OUTBOX_SEND_TIMEOUT`). The values appear in the
   `SNODRA_OUTBOX_LEASE_MS` documentation and in `outbox.go`.
 - **Question:** should the specification fix the send timeout and the lease's lower bound, or leave them to each
   library?
@@ -478,7 +478,8 @@ settled; where an entry is settled its behaviour is the specification. The code 
   `snodra-messaging@64dde1e:snodra-messaging/src/main/kotlin/com/damoreira/snodra/messaging/config/SnodraMessagingProperties.kt:314`
   and `backOffMs = 1000` at
   `snodra-messaging@64dde1e:snodra-messaging/src/main/kotlin/com/damoreira/snodra/messaging/events/EventConsumer.kt:98`;
-  Rust `SNODRA_CONSUMER_MAX_ATTEMPTS` 5 and a 1 s backoff).
+  Rust `consumer_max_attempts: 5` at `snodra-messaging-rs/src/config.rs:259` and a 1 s backoff at
+  `snodra-messaging-rs/src/app.rs:1026`).
 - **Question:** should the specification name the level-2 attempts and wait, and say explicitly that a level-2 library
   logs and skips what fails them?
 
@@ -491,7 +492,10 @@ settled; where an entry is settled its behaviour is the specification. The code 
   level-2 library does with such a record.
 - **This library:** logs a warning and acknowledges it without a marker: nothing can handle it, and it blocks
   nothing. Level 3 parks it as an `INVALID` letter instead. The reference marks it `INVALID` and sends it to its
-  sink (`snodra-messaging@64dde1e:snodra-messaging/src/main/kotlin/com/damoreira/snodra/messaging/events/EventConsumer.kt:48`).
+  sink (the type check at
+  `snodra-messaging@64dde1e:snodra-messaging/src/main/kotlin/com/damoreira/snodra/messaging/events/EventConsumer.kt:359`
+  and the payload check at
+  `snodra-messaging@64dde1e:snodra-messaging/src/main/kotlin/com/damoreira/snodra/messaging/events/EventConsumer.kt:371`).
 - **Question:** settled for level 3 by the dead-letter modes; for a level-2 library the log-and-skip above is the
   library's.
 
@@ -500,9 +504,25 @@ settled; where an entry is settled its behaviour is the specification. The code 
 - **Specification:** [event-store-add-ons.md, The operations](https://snodra.damoreira.com/docs/library-authors/event-store-add-ons/#the-operations)
   says an error from `next` means the subscription is broken, and the caller "closes it and subscribes again after a
   backoff"; it does not give the wait or its cap.
-- **This library:** 1 s doubling to 30 s, back to 1 s once a subscription delivered a record. The references use the
-  same values: Kotlin `MIN` 1 s and `MAX` 30 s
-  (`snodra-messaging@64dde1e:snodra-messaging/src/main/kotlin/com/damoreira/snodra/messaging/events/Resubscribe.kt:74`),
-  Rust `RESUBSCRIBE_MIN` 1 s and `RESUBSCRIBE_MAX` 30 s (`snodra-messaging-rs/src/events/resubscribe.rs:16`).
+- **This library:** every failed subscription waits 1 s before the next, then 2, 4, 8, 16 and 30 s, the wait
+  staying at 30 s; a subscription that delivered a record or lived 30 s starts it over at 1 s. The references use
+  the same values and schedule: Kotlin `MIN` 1 s, `MAX` 30 s and `STABLE` 30 s
+  (`snodra-messaging@64dde1e:snodra-messaging/src/main/kotlin/com/damoreira/snodra/messaging/events/Resubscribe.kt:74`,
+  `:77` and `:80`), Rust `RESUBSCRIBE_MIN` 1 s and `RESUBSCRIBE_MAX` 30 s, the latter also the stable threshold
+  (`snodra-messaging-rs/src/events/resubscribe.rs:16` and `:18`).
 - **Question:** should the specification fix the re-subscribe backoff, or leave it to each library?
+
+### SG-36: an event published outside any trace has no traceparent
+
+- **Specification:** [messages.md, Event headers](https://snodra.damoreira.com/docs/library-authors/messages/#event-headers)
+  says every event carries seven headers and lists `traceparent` as "the W3C trace context of the work that published
+  it"; [Trace context](https://snodra.damoreira.com/docs/library-authors/messages/#trace-context) says an invalid one
+  is dropped, never passed on, and the message is sent without one. It does not say whether an event published outside
+  any trace carries an empty `traceparent` header or none at all.
+- **This library:** an event published outside any trace has six headers and no `traceparent`; inside a trace it has
+  all seven, with the handled message's valid `traceparent`. The references write one only when the work carries a
+  valid one, and nothing outside a trace: Kotlin
+  (`snodra-messaging@64dde1e:snodra-messaging/src/main/kotlin/com/damoreira/snodra/messaging/tracing/TraceHeaders.kt:22`)
+  and Rust (`snodra-messaging-rs/src/events/outbox.rs:40`). `TestPublishOutsideAnyHandling` pins it.
+- **Question:** should the page say an event outside any trace has six headers, or require an empty `traceparent`?
 

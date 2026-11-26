@@ -65,18 +65,20 @@ type MessageStore interface {
 // third-party add-on compiles against MessageStore alone. A store that does not implement it is
 // simply used as it is.
 //
-// [App.Start] hands the store the application's clock (UseClock), prepares its schema (InitSchema),
-// or checks a schema the service applies itself (CheckSchema), and then starts what the store runs
-// in the background (Background), if it implements this interface. A failing InitSchema or
-// CheckSchema fails Start; an error from Background while the app runs is logged.
+// [App.Start] hands the store the application's clock (UseClock), prepares its schema
+// (InitSchema, with the application's [Config]), or checks a schema the service applies itself
+// (CheckSchema), and then starts what the store runs in the background (Background), if it
+// implements this interface. A failing InitSchema or CheckSchema fails Start; an error from
+// Background while the app runs is logged.
 type StoreLifecycle interface {
 	// UseClock sets the application's clock: what the store stamps the times it sets itself
 	// with (an outbox entry's sending, a claim's lease). The clock must not call the store.
 	UseClock(now func() time.Time)
 	// InitSchema prepares what the store needs in its database, idempotently: indexes (MongoDB,
-	// with its retentions or TTLs), tables (SQL), nothing (memory). It runs when the service
-	// builds the store with schema initialization on (the default).
-	InitSchema(ctx context.Context) error
+	// with its retentions or TTLs), tables (SQL), nothing (memory). config is the application's
+	// read-only settings. It runs when the service builds the store with schema initialization
+	// on (the default).
+	InitSchema(ctx context.Context, config *Config) error
 	// CheckSchema fails unless the database has what the store needs, for example an SQL schema
 	// at the version it reads or later. It runs instead of InitSchema when the service applies
 	// the schema itself.
@@ -85,6 +87,18 @@ type StoreLifecycle interface {
 	// add-on's purge of what the retentions let go), until ctx is done. A store with nothing to
 	// run may return at once or wait for ctx.
 	Background(ctx context.Context) error
+}
+
+// Config is what a message store's [StoreLifecycle] sees of the application's configuration: the
+// logical service name and the event source its processors read. It is read-only: a store copies
+// what it needs and never changes it. Fields are added as settings a store uses appear (the
+// retentions, for example); a store must not depend on the struct's size.
+type Config struct {
+	// Service is the logical service name ([Service], SNODRA_SERVICE_NAME).
+	Service string
+	// EventsSource is the event store's source the service publishes to and its processors read
+	// ([EventsSource], SNODRA_EVENTS_SOURCE).
+	EventsSource string
 }
 
 // Tx is one transaction of the service's own database. A transaction must end with Commit or
@@ -113,7 +127,9 @@ type OutboxEntry struct {
 	Type string
 	// Key is the event's order key; nil for none.
 	Key *string
-	// Headers are the event's headers, as published.
+	// Headers are the headers the entry keeps in the outbox: the correlationId, the userId and,
+	// when the work that published the event carried one, the traceparent. The relay adds type,
+	// id, timestamp and source from the entry, so a store never holds a stale copy of them.
 	Headers map[string]string
 	// Payload is the event as JSON: a JSON object whose integers fit in a signed 64-bit
 	// integer, at most MaxPayloadDepth deep. A store refuses every other payload with an error

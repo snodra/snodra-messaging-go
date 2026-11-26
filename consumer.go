@@ -2,6 +2,7 @@ package snodra
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -21,8 +22,9 @@ import (
 //
 // TODO(spec-gap): SG-34 (what a level-2 library does with a malformed record).
 
-// What a failed subscription waits before subscribing again: the references' 1 s doubling to 30 s,
-// back to the floor once a subscription delivered a record.
+// A failed subscription waits 1 s before the next one, doubling to 30 s on every failure that
+// follows; the wait starts over after a subscription delivered a record or lived 30 s. The
+// references use the same schedule.
 //
 // TODO(spec-gap): SG-35 (the re-subscribe backoff of a failed event subscription).
 
@@ -36,36 +38,35 @@ func (a *App) consumeProcessor(ctx context.Context, p *processor) {
 		if ctx.Err() != nil {
 			return
 		}
+		started := a.now()
+		stable := false
+		var failure error
 		sub, err := a.cfg.eventStore.Subscribe(ctx, p.subscription)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
 			}
-			a.log.Warn("an event processor could not subscribe; trying again",
-				"processor", p.name, "subscription", p.subscription.Name, "in", wait, "error", err)
-			if !sleepCtx(ctx, wait) {
+			failure = err
+		} else {
+			delivered, readErr := a.readProcessor(ctx, p, sub)
+			closeEventSubscription(sub)
+			if ctx.Err() != nil {
 				return
 			}
-			wait = nextResubscribe(wait, settings)
-			continue
+			failure = readErr
+			stable = delivered || a.now().Sub(started) >= settings.resubscribeMax
 		}
-		delivered, readErr := a.readProcessor(ctx, p, sub)
-		closeEventSubscription(sub)
-		if ctx.Err() != nil {
-			return
-		}
-		if readErr != nil {
-			a.log.Warn("an event processor's subscription failed; subscribing again",
-				"processor", p.name, "subscription", p.subscription.Name, "in", wait, "error", readErr)
-		}
-		if delivered {
+		if stable {
 			wait = settings.resubscribeMin
-		} else {
-			wait = nextResubscribe(wait, settings)
 		}
-		if !sleepCtx(ctx, wait) {
+		if failure != nil {
+			a.log.Warn("an event processor's subscription failed; subscribing again",
+				"processor", p.name, "subscription", p.subscription.Name, "in", wait, "error", failure)
+		}
+		if !settings.sleep(ctx, wait) {
 			return
 		}
+		wait = nextResubscribe(wait, settings)
 	}
 }
 
@@ -163,6 +164,14 @@ func (a *App) handleDelivery(ctx context.Context, p *processor, sub EventSubscri
 		}
 		if ctx.Err() != nil {
 			// The app is stopping: the record stays unacknowledged for the next subscription.
+			return
+		}
+		var undecodable *decodeError
+		if errors.As(failure, &undecodable) {
+			// The payload cannot be read as the handler's message type: no retry can change it.
+			a.log.Error("an event's payload cannot be read by its handler; skipping the event",
+				"processor", p.name, "type", typeName, "id", id, "error", failure)
+			a.acknowledge(p, sub, d)
 			return
 		}
 		if attempt >= settings.consumerTries {

@@ -271,8 +271,8 @@ func (a *App) freezeTypes() {
 	a.freezeProcessors()
 }
 
-// freezeProcessors builds the processors of the registered event handlers, by name sorted (so the
-// default processor, "default", comes before the names that follow it alphabetically).
+// freezeProcessors builds the processors of the registered event handlers: the default processor
+// first, then the named ones sorted.
 func (a *App) freezeProcessors() {
 	a.processors = nil
 	names := make([]string, 0, len(a.eventHandlers))
@@ -280,6 +280,11 @@ func (a *App) freezeProcessors() {
 		names = append(names, name)
 	}
 	slices.Sort(names)
+	if slices.Contains(names, DefaultProcessor) {
+		names = append([]string{DefaultProcessor}, slices.DeleteFunc(names, func(name string) bool {
+			return name == DefaultProcessor
+		})...)
+	}
 	for _, name := range names {
 		a.processors = append(a.processors, newProcessor(a.cfg.service, name, a.cfg.events.source, a.eventHandlers[name]))
 	}

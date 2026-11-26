@@ -260,7 +260,7 @@ func (a *App) prepareStore(ctx context.Context) error {
 	lifecycle.UseClock(a.now)
 	var err error
 	if a.cfg.events.storeInitSchema {
-		err = lifecycle.InitSchema(ctx)
+		err = lifecycle.InitSchema(ctx, &Config{Service: a.cfg.service, EventsSource: a.cfg.events.source})
 	} else {
 		err = lifecycle.CheckSchema(ctx)
 	}
@@ -326,7 +326,7 @@ func (a *App) background(what string, fn func(context.Context) error) {
 }
 
 // stopBackground stops the relay, the consumers and the store's background work, and waits for
-// them at most eventsStopBudget and at most until ctx ends.
+// them at most backgroundStopBudget and at most until ctx ends.
 func (a *App) stopBackground(ctx context.Context) {
 	a.mu.Lock()
 	cancel, done := a.bgCancel, a.bgDone
@@ -335,9 +335,27 @@ func (a *App) stopBackground(ctx context.Context) {
 		return
 	}
 	cancel()
-	if done != nil {
-		_ = waitAll(ctx, eventsStopBudget, []<-chan struct{}{done})
+	if done == nil {
+		return
 	}
+	budget := backgroundStopBudget(ctx)
+	if budget <= 0 {
+		return
+	}
+	_ = waitAll(ctx, budget, []<-chan struct{}{done})
+}
+
+// backgroundStopBudget is how long the shutdown may wait for the background work: at most
+// eventsStopBudget, and never more than what is left of ctx's deadline, so a clean stop with a
+// slow store cannot spend the whole shutdown budget on it.
+func backgroundStopBudget(ctx context.Context) time.Duration {
+	budget := eventsStopBudget
+	if deadline, ok := ctx.Deadline(); ok {
+		if left := time.Until(deadline); left < budget {
+			budget = left
+		}
+	}
+	return budget
 }
 
 // certPresented notes that a stream went live presenting the client certificate with fingerprint
@@ -408,12 +426,12 @@ func (a *App) Run(ctx context.Context) error {
 	return a.Shutdown(sctx)
 }
 
-// Shutdown leaves the hubs in order: the relay, the event processors and the message store's
-// background work stop first (at most 5 s); then a Register with no types to every acknowledged
-// hub (so it routes elsewhere at once), waiting at most 1 s for its acks; then every subscription
-// served here completes with a ReplyEnd; then the handlers in flight finish (at most 5 s), the ends
-// written meanwhile (waited for at most 2 s more); then each stream is half-closed and the hub
-// gets at most 2 s to finish its side.
+// Shutdown leaves the hubs in order: a Register with no types to every acknowledged hub (so it
+// routes elsewhere at once), waiting at most 1 s for its acks; then every subscription served here
+// completes with a ReplyEnd; then the handlers in flight finish (at most 5 s), the ends written
+// meanwhile (waited for at most 2 s more); then each stream is half-closed and the hub gets at most
+// 2 s to finish its side; then the relay, the event processors and the message store's background
+// work stop (at most 5 s, and at most what is left of ctx's budget).
 // Every wait is also bounded by ctx: when ctx ends first, the streams are dropped and ctx's
 // error is returned, at most 50 ms after ctx's deadline (the time given to the dropped streams'
 // goroutines to end). A second call waits for the first and returns its result.
@@ -435,11 +453,9 @@ func (a *App) Shutdown(ctx context.Context) error {
 	close(a.stopped)
 	p := a.pool
 	a.mu.Unlock()
-	// The relay, the consumers and the store's background work stop first: the store is theirs
-	// while they run.
-	a.stopBackground(ctx)
 	defer close(a.closed)
 	if p == nil {
+		a.stopBackground(ctx)
 		return nil
 	}
 	defer func() { // before closed is closed
@@ -448,6 +464,9 @@ func (a *App) Shutdown(ctx context.Context) error {
 	}()
 	conns := p.closeMembership()
 	err := a.leave(ctx, conns)
+	// The relay and the consumers run through the hub's own steps, so what a drained handler
+	// appended to the outbox still goes out; they stop last, within what is left of the budget.
+	a.stopBackground(ctx)
 	a.kill()
 	// Every wait of a connection also watches killed, so they end at once; the grace only
 	// keeps a defect there from holding Shutdown past its deadline.

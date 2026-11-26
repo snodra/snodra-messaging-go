@@ -1,6 +1,5 @@
-// The events service example: a command appends an event to the service's outbox in the same
-// transaction as its own handling, the relay publishes it, and the service's own event processor
-// handles it.
+// The events service example: a command appends an event to the service's outbox, the relay
+// publishes it to the event store, and the service's own event processor handles it.
 //
 // The two in-memory stores make it runnable with nothing else; a real service replaces them with
 // its own database (the message store) and its broker (the event store), for example

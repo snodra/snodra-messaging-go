@@ -170,14 +170,14 @@ func TestTheKitFailsADuplicateMarkerThatRecordsAgain(t *testing.T) {
 	})
 }
 
-// failingRelayOutbox refuses the two relays' claims: the check must report the error instead of
-// leaving the other relay at the barrier.
+// failingRelayOutbox refuses relay-a's claims only: relay-b's first claim succeeds, so with a
+// barrier that waits for a second token from a failed relay-a, relay-b blocks there.
 type failingRelayOutbox struct {
 	snodra.OutboxStore
 }
 
 func (f failingRelayOutbox) Claim(ctx context.Context, owner string, lease time.Duration, limit int) ([]snodra.OutboxEntry, error) {
-	if owner == "relay-a" || owner == "relay-b" {
+	if owner == "relay-a" {
 		return nil, errors.New("the claim failed for the test")
 	}
 	return f.OutboxStore.Claim(ctx, owner, lease, limit)
@@ -191,14 +191,47 @@ func (f failingRelayStore) Outbox() snodra.OutboxStore {
 	return failingRelayOutbox{f.MessageStore.Outbox()}
 }
 
+// softTB records a check's failures without stopping it, so a check that is meant to fail promptly
+// can be watched for a hang.
+type softTB struct {
+	mu       sync.Mutex
+	failures []string
+}
+
+func (*softTB) Helper() {}
+
+func (s *softTB) Errorf(format string, args ...any) { s.record(format, args...) }
+func (s *softTB) Fatalf(format string, args ...any) { s.record(format, args...) }
+func (s *softTB) Fatal(args ...any)                 { s.record("%s", fmt.Sprint(args...)) }
+
+func (s *softTB) record(format string, args ...any) {
+	s.mu.Lock()
+	s.failures = append(s.failures, fmt.Sprintf(format, args...))
+	s.mu.Unlock()
+}
+
+func (s *softTB) failed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.failures) > 0
+}
+
 // TestTheKitReportsAnEarlyRelayError proves the concurrent-relay check reports a claim error
-// promptly: an early error must not leave the other relay blocked at the barrier.
+// promptly: an early error of relay-a must not leave relay-b blocked at the barrier. The check
+// itself would wait a minute for relay-b; the bound here is the regression.
 func TestTheKitReportsAnEarlyRelayError(t *testing.T) {
-	started := time.Now()
-	expectCheckFailure(t, func(tb storeTB) {
-		concurrentRelaysPublishEachEntryOnce(tb, failingRelayStore{snodra.NewMemoryMessageStore()})
-	})
-	if elapsed := time.Since(started); elapsed > 2*time.Second {
-		t.Fatalf("the check took %v to report the claim error", elapsed)
+	recorder := &softTB{}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		concurrentRelaysPublishEachEntryOnce(recorder, failingRelayStore{snodra.NewMemoryMessageStore()})
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the concurrent-relay check blocked on relay-a's early error")
+	}
+	if !recorder.failed() {
+		t.Fatal("the check passed on a store whose relay-a cannot claim")
 	}
 }

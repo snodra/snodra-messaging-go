@@ -420,6 +420,9 @@ func (c *config) validateEvents() error {
 		return fmt.Errorf("snodra: the re-subscribe backoff must be at least 1ms and not above its maximum (got %v and %v)",
 			c.events.resubscribeMin, c.events.resubscribeMax)
 	}
+	if c.events.sleep == nil {
+		c.events.sleep = sleepCtx
+	}
 	return nil
 }
 

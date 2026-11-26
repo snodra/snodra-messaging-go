@@ -100,3 +100,21 @@ func TestSeveralHandlersOfOneEventType(t *testing.T) {
 	}
 	is(t, strings.Join(order, ","), "first,second")
 }
+
+// The default processor comes before the named ones, whatever their names sort like.
+func TestTheDefaultProcessorComesFirst(t *testing.T) {
+	app := eventsApp(t, WithStore(NewMemoryMessageStore()), WithEventStore(NewMemoryEventStore()),
+		withEventSettings(consumerSettings()), ConsumerEnabled(false))
+	if err := HandleEvent(app, func(context.Context, OrderPlaced) error { return nil }, InProcessor("audit")); err != nil {
+		t.Fatal(err)
+	}
+	if err := HandleEvent(app, func(context.Context, OrderPlaced) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	is(t, len(app.processors), 2)
+	is(t, app.processors[0].name, DefaultProcessor)
+	is(t, app.processors[1].name, "audit")
+}

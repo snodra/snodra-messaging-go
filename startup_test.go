@@ -15,6 +15,7 @@ type lifecycleStore struct {
 	MessageStore
 	mu        sync.Mutex
 	clock     func() time.Time
+	config    *Config
 	initCalls int
 	checkCall int
 	initErr   error
@@ -33,9 +34,10 @@ func (s *lifecycleStore) UseClock(now func() time.Time) {
 	s.mu.Unlock()
 }
 
-func (s *lifecycleStore) InitSchema(context.Context) error {
+func (s *lifecycleStore) InitSchema(_ context.Context, config *Config) error {
 	s.mu.Lock()
 	s.initCalls++
+	s.config = config
 	s.mu.Unlock()
 	return s.initErr
 }
@@ -56,10 +58,10 @@ func (s *lifecycleStore) Background(ctx context.Context) error {
 	return nil
 }
 
-func (s *lifecycleStore) calls() (initCalls, checkCalls int, clock func() time.Time) {
+func (s *lifecycleStore) calls() (initCalls, checkCalls int, clock func() time.Time, config *Config) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.initCalls, s.checkCall, s.clock
+	return s.initCalls, s.checkCall, s.clock, s.config
 }
 
 // A service with only command, query and subscription-query handlers starts without a message
@@ -149,11 +151,14 @@ func TestTheBuilderBindsTheStoreLifecycle(t *testing.T) {
 	if err := app.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	initCalls, checkCalls, clock := store.calls()
+	initCalls, checkCalls, clock, config := store.calls()
 	is(t, initCalls, 1)
 	is(t, checkCalls, 0)
 	if clock == nil || !clock().Equal(at) {
 		t.Fatalf("the store's clock is not the app's: %v", clock())
+	}
+	if config == nil || config.Service != "orders-service" || config.EventsSource != DefaultEventsSource {
+		t.Fatalf("the store's config is not the app's: %+v", config)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -176,7 +181,7 @@ func TestTheBuilderChecksTheSchemaWhenInitializationIsOff(t *testing.T) {
 	if err := app.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	initCalls, checkCalls, _ := store.calls()
+	initCalls, checkCalls, _, _ := store.calls()
 	is(t, initCalls, 0)
 	is(t, checkCalls, 1)
 }
@@ -253,4 +258,17 @@ func TestTheBuilderWarnsAboutInMemoryStores(t *testing.T) {
 	}
 	is(t, recorder.count(slog.LevelWarn, "the in-memory message store is not durable: everything it holds is gone when the process ends; use a database add-on in production"), 1)
 	is(t, recorder.count(slog.LevelWarn, "the in-memory event store is not durable: everything it holds is gone when the process ends; use an event-store add-on in production"), 1)
+}
+
+// The background work gets at most five seconds and never more than the shutdown context has left.
+func TestBackgroundStopBudget(t *testing.T) {
+	is(t, backgroundStopBudget(context.Background()), eventsStopBudget)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	within(t, backgroundStopBudget(ctx), 900*time.Millisecond, time.Second)
+	expired, cancelExpired := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancelExpired()
+	if budget := backgroundStopBudget(expired); budget > 0 {
+		t.Fatalf("an expired context left a budget of %v", budget)
+	}
 }

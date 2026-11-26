@@ -3,6 +3,7 @@ package snodra
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -428,57 +429,95 @@ func TestACrashBetweenPublishAndMarkIsSkippedByTheConsumer(t *testing.T) {
 	})
 }
 
-// The relay publishes a committed append at once, not at its next poll.
+// idleOutbox observes the relay's claims: empty is closed at the first claim that came back
+// empty, so a test knows the relay did its first poll and now waits for a wake or its timer. A
+// silent one cannot wake the relay at all.
+type idleOutbox struct {
+	OutboxStore
+	silent bool
+	once   sync.Once
+	empty  chan struct{}
+}
+
+func (o *idleOutbox) Claim(ctx context.Context, owner string, lease time.Duration, limit int) ([]OutboxEntry, error) {
+	entries, err := o.OutboxStore.Claim(ctx, owner, lease, limit)
+	if err == nil && len(entries) == 0 {
+		o.once.Do(func() { close(o.empty) })
+	}
+	return entries, err
+}
+
+func (o *idleOutbox) OnAppend(wake func()) func() {
+	if o.silent {
+		return func() {}
+	}
+	return o.OutboxStore.OnAppend(wake)
+}
+
+// observingStore is a message store whose outbox is one idleOutbox.
+type observingStore struct {
+	MessageStore
+	outbox *idleOutbox
+}
+
+func newObservingStore(inner MessageStore, silent bool) *observingStore {
+	return &observingStore{
+		MessageStore: inner,
+		outbox:       &idleOutbox{OutboxStore: inner.Outbox(), silent: silent, empty: make(chan struct{})},
+	}
+}
+
+func (s *observingStore) Outbox() OutboxStore { return s.outbox }
+
+// waitForRelayedEvent waits until the event store holds n events of the default source.
+func waitForRelayedEvent(t *testing.T, events *MemoryEventStore, n int) {
+	t.Helper()
+	waitUntil(t, fmt.Sprintf("%d relayed event(s)", n), func() bool {
+		return len(events.Events(DefaultEventsSource)) == n
+	})
+}
+
+// The relay publishes a committed append at once, not at its next poll: the append wakes it
+// after its first, empty poll.
 func TestTheRelayWakesOnACommittedAppend(t *testing.T) {
-	store := NewMemoryMessageStore()
+	store := newObservingStore(NewMemoryMessageStore(), false)
 	events := NewMemoryEventStore()
-	observer := &ackObserver{EventStore: events}
 	settings := consumerSettings()
 	settings.poll = time.Hour
-	app := eventsApp(t, WithStore(store), WithEventStore(observer), withEventSettings(settings))
-	handled := make(chan struct{}, 1)
-	if err := HandleEvent(app, func(context.Context, OrderPlaced) error {
-		handled <- struct{}{}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
+	app := eventsApp(t, WithStore(store), WithEventStore(events), withEventSettings(settings), ConsumerEnabled(false))
 	if err := app.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	publishTestEvent(t, events, "wake-1", "orders.OrderPlaced", nil, nil)
 	select {
-	case <-handled:
+	case <-store.outbox.empty:
 	case <-time.After(5 * time.Second):
-		t.Fatal("the relay did not wake on the committed append")
+		t.Fatal("the relay did not take its first poll")
 	}
+	if err := Publish(context.Background(), app, OrderPlaced{OrderID: "wake-1"}); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	waitForRelayedEvent(t, events, 1)
 }
 
 // Without a wake the relay polls.
 func TestTheRelayPollsWhenTheStoreCannotWake(t *testing.T) {
-	inner := NewMemoryMessageStore()
-	store := silentStore{MessageStore: inner}
+	store := newObservingStore(NewMemoryMessageStore(), true)
 	events := NewMemoryEventStore()
-	observer := &ackObserver{EventStore: events}
 	settings := consumerSettings()
 	settings.poll = 5 * time.Millisecond
-	app := eventsApp(t, WithStore(store), WithEventStore(observer), withEventSettings(settings))
-	handled := make(chan struct{}, 1)
-	if err := HandleEvent(app, func(context.Context, OrderPlaced) error {
-		handled <- struct{}{}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
+	app := eventsApp(t, WithStore(store), WithEventStore(events), withEventSettings(settings), ConsumerEnabled(false))
 	if err := app.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	publishTestEvent(t, events, "poll-1", "orders.OrderPlaced", nil, nil)
 	select {
-	case <-handled:
+	case <-store.outbox.empty:
 	case <-time.After(5 * time.Second):
-		t.Fatal("the polling relay did not publish the event")
+		t.Fatal("the relay did not take its first poll")
 	}
+	if err := Publish(context.Background(), app, OrderPlaced{OrderID: "poll-1"}); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	waitForRelayedEvent(t, events, 1)
 }
 
 // One event type handled in two processors reaches both; a failure in one does not affect the
@@ -609,4 +648,118 @@ func TestAConsumerFallsBackToTheRecordPlaceForAnEventWithoutID(t *testing.T) {
 		exists, err := store.Processed().Exists(context.Background(), ProcessorMarker(DefaultProcessor, fallback))
 		return err == nil && exists
 	})
+}
+
+// A record without a type header and one whose payload is not a JSON object run no handler, are
+// acknowledged and leave no marker; each is logged at warning.
+func TestConsumerSkipsMalformedRecords(t *testing.T) {
+	store := NewMemoryMessageStore()
+	events := NewMemoryEventStore()
+	observer := &ackObserver{EventStore: events}
+	recorder := &logRecorder{}
+	app := eventsApp(t, WithStore(store), WithEventStore(observer), withEventSettings(consumerSettings()), Logger(slog.New(recorder)))
+	var calls atomic.Int64
+	if err := HandleEvent(app, func(context.Context, OrderPlaced) error {
+		calls.Add(1)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	for _, record := range []OutgoingEvent{
+		{Source: DefaultEventsSource, ID: "no-type", Headers: map[string]string{HeaderCorrelationID: "c-1"}, Payload: []byte(`{}`)},
+		{Source: DefaultEventsSource, ID: "no-object", Type: "orders.OrderPlaced", Headers: map[string]string{HeaderType: "orders.OrderPlaced", HeaderID: "no-object"}, Payload: []byte(`[1,2]`)},
+	} {
+		if err := events.Publish(context.Background(), record); err != nil {
+			t.Fatalf("publish %s: %v", record.ID, err)
+		}
+	}
+	waitUntil(t, "both malformed records' acknowledgements", func() bool { return observer.count() >= 2 })
+	is(t, calls.Load(), int64(0))
+	for _, id := range []string{"no-type", "no-object"} {
+		if exists, err := store.Processed().Exists(context.Background(), ProcessorMarker(DefaultProcessor, id)); err != nil || exists {
+			t.Fatalf("the malformed record %s has a marker: %v, %v", id, exists, err)
+		}
+	}
+	if n := recorder.count(slog.LevelWarn, "an event record has no type header; skipping it"); n != 1 {
+		t.Fatalf("the missing type was logged %d times", n)
+	}
+	if n := recorder.count(slog.LevelWarn, "an event record's payload is not a JSON object; skipping it"); n != 1 {
+		t.Fatalf("the non-object payload was logged %d times", n)
+	}
+}
+
+// A payload that is a JSON object but does not decode into the handler's message type is not
+// retried: no retry can change it. It is logged and skipped, like the reference.
+func TestConsumerSkipsAPayloadItsHandlerCannotReadWithoutRetrying(t *testing.T) {
+	store := newMarkerStore(NewMemoryMessageStore())
+	events := NewMemoryEventStore()
+	observer := &ackObserver{EventStore: events}
+	recorder := &logRecorder{}
+	app := eventsApp(t, WithStore(store), WithEventStore(observer), withEventSettings(consumerSettings()), Logger(slog.New(recorder)))
+	var calls atomic.Int64
+	if err := HandleEvent(app, func(context.Context, OrderPlaced) error {
+		calls.Add(1)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := events.Publish(context.Background(), OutgoingEvent{
+		Source: DefaultEventsSource, ID: "undecodable", Type: "orders.OrderPlaced",
+		Headers: map[string]string{HeaderType: "orders.OrderPlaced", HeaderID: "undecodable"},
+		Payload: []byte(`{"orderId":123}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitUntil(t, "the acknowledgement", func() bool { return observer.count() >= 1 })
+	is(t, calls.Load(), int64(0))
+	if markers := store.processed.recorded(); len(markers) != 1 {
+		t.Fatalf("the handler's marker transaction was attempted %d times, want 1", len(markers))
+	}
+	if exists, err := store.Processed().Exists(context.Background(), "processor:default:undecodable"); err != nil || exists {
+		t.Fatalf("marker: %v, %v", exists, err)
+	}
+	if n := recorder.count(slog.LevelError, "an event's payload cannot be read by its handler; skipping the event"); n != 1 {
+		t.Fatalf("the unreadable payload was logged %d times", n)
+	}
+}
+
+// ConsumerEnabled(false) starts no subscription: the event is relayed but no handler runs and no
+// marker is recorded.
+func TestConsumerEnabledFalseReadsNothing(t *testing.T) {
+	store := newMarkerStore(NewMemoryMessageStore())
+	events := NewMemoryEventStore()
+	app := eventsApp(t, WithStore(store), WithEventStore(events), withEventSettings(consumerSettings()), ConsumerEnabled(false))
+	var calls atomic.Int64
+	if err := HandleEvent(app, func(context.Context, OrderPlaced) error {
+		calls.Add(1)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	admin, err := events.Admin(SubscriptionSpec{Name: "orders-service.default", Source: DefaultEventsSource})
+	if err != nil {
+		t.Fatal(err)
+	}
+	members, err := admin.Members(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	is(t, len(members), 0)
+	if err := Publish(context.Background(), app, OrderPlaced{OrderID: "unread"}); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	waitForRelayedEvent(t, events, 1)
+	is(t, calls.Load(), int64(0))
+	if markers := store.processed.recorded(); len(markers) != 0 {
+		t.Fatalf("a disabled consumer recorded markers: %v", markers)
+	}
 }

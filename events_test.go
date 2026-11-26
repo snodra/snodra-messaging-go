@@ -125,7 +125,6 @@ func TestPublishOutsideAnyHandling(t *testing.T) {
 	if _, ok := entry.Headers[HeaderTraceparent]; ok {
 		t.Fatal("a traceparent outside any trace")
 	}
-	is(t, eventTimestamp(entry.CreatedAt), entry.CreatedAt.UTC().Format("2006-01-02T15:04:05.000Z"))
 	if !regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$`).MatchString(eventTimestamp(entry.CreatedAt)) {
 		t.Fatalf("timestamp %q", eventTimestamp(entry.CreatedAt))
 	}

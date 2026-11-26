@@ -40,8 +40,11 @@ type eventSettings struct {
 	consumerTries   int           // handler invocations per record, the first included
 	consumerBackoff time.Duration // between two invocations of one record
 	resubscribeMin  time.Duration // after a subscription failed, before subscribing again
-	resubscribeMax  time.Duration // the cap of that wait
+	resubscribeMax  time.Duration // the cap of that wait, and what counts as a stable subscription
 	storeInitSchema bool          // App.Start prepares the message store's schema
+	// sleep waits d or until ctx ends; false when ctx ended. It is sleepCtx, and a test replaces
+	// it to record the re-subscribe waits without waiting.
+	sleep func(ctx context.Context, d time.Duration) bool
 }
 
 // defaultEventSettings are the shipped defaults, the reference libraries' values.
@@ -60,6 +63,7 @@ func defaultEventSettings() eventSettings {
 		resubscribeMin:  time.Second,
 		resubscribeMax:  30 * time.Second,
 		storeInitSchema: true,
+		sleep:           sleepCtx,
 	}
 }
 
@@ -205,11 +209,12 @@ func Key(key string) PublishOption {
 
 // Publish builds the event e and appends it to the service's outbox: the event type is E's
 // MessageType, the id a fresh UUID, the key what [Key] set, the timestamp the creation time and
-// the seven headers of messages.md (type, id, correlationId, timestamp, source, userId and, when
-// the work that publishes carries one, traceparent). The append joins the transaction the context
-// carries (the store's Begin or the add-on's own transaction helper), so the event commits with
-// the service's writes or not at all. It returns once the entry is appended; the relay in every
-// instance publishes it to the event store afterwards, at least once.
+// the headers of messages.md: six headers plus traceparent when the work that publishes carries
+// one (type, id, correlationId, timestamp, source and userId, and traceparent inside a trace).
+// The append joins the transaction the context carries (the store's Begin or the add-on's own
+// transaction helper), so the event commits with the service's writes or not at all. It returns
+// once the entry is appended; the relay in every instance publishes it to the event store
+// afterwards, at least once.
 //
 // userId is the verified caller's subject for a command or a query; a token itself never crosses
 // into an event. An event published while handling another message carries that message's
@@ -279,6 +284,8 @@ func eventHeaders(ctx context.Context) map[string]string {
 	}
 	headers[HeaderUserID] = actingUserID(h)
 	if h.traceparent != "" {
+		// TODO(spec-gap): SG-36 (outside any trace an event carries six headers, with no
+		// traceparent: the reference writes one only when the work carries a valid one).
 		headers[HeaderTraceparent] = h.traceparent
 	}
 	return headers

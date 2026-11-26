@@ -74,7 +74,7 @@ func (s *MemoryMessageStore) UseClock(now func() time.Time) {
 }
 
 // InitSchema does nothing: the in-memory store needs no schema.
-func (s *MemoryMessageStore) InitSchema(context.Context) error { return nil }
+func (s *MemoryMessageStore) InitSchema(context.Context, *Config) error { return nil }
 
 // CheckSchema does nothing: the in-memory store needs no schema.
 func (s *MemoryMessageStore) CheckSchema(context.Context) error { return nil }
