@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -516,6 +517,149 @@ func TestMemoryEventStoreConfig(t *testing.T) {
 	if len(assigned.Segments) != 7 {
 		t.Fatalf("seven segments: %v", assigned.Segments)
 	}
+}
+
+// SG-28: redelivering a position at or after the subscription's next one changes nothing, so it
+// never skips an event.
+func TestMemoryRedeliverForwardDoesNotSkip(t *testing.T) {
+	store := NewMemoryEventStore()
+	source := "redeliver.forward.events"
+	key := "order-1" // segment "1" of the four, by the pinned hash vector
+	var sent []OutgoingEvent
+	for i := 0; i < 3; i++ {
+		sent = append(sent, eventFor(source, &key, "redeliver-forward-"+strconv.Itoa(i)))
+	}
+	for _, event := range sent {
+		if err := store.Publish(context.Background(), event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	spec := SubscriptionSpec{Name: "redeliver.forward", Source: source}
+	subscription, err := store.Subscribe(context.Background(), spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeSubscription(t, subscription)
+
+	first := nextDelivery(t, subscription)
+	segment := first.Segment
+	if segment != "1" || first.Position != "0" {
+		t.Fatalf("first delivery: segment %s position %s, want 1 0", segment, first.Position)
+	}
+	status := statusOf(t, subscription, segment)
+	if status.Position != "1" || status.Head != "3" {
+		t.Fatalf("after one of three: position %q, head %q, want 1 and 3", status.Position, status.Head)
+	}
+	if err := subscription.Redeliver(segment, "2"); err != nil {
+		t.Fatalf("redeliver 2: %v", err)
+	}
+	second := nextDelivery(t, subscription)
+	if second.Segment != segment || second.Position != "1" {
+		t.Fatalf("a redelivery at or after the next position changes nothing: got %s %s, want %s 1",
+			second.Segment, second.Position, segment)
+	}
+	if got := second.Headers[HeaderID]; got != sent[1].ID {
+		t.Fatalf("the next event is still the second one: got %q, want %q", got, sent[1].ID)
+	}
+}
+
+// SG-27: an acknowledgement of a segment that changed hands is dropped, so its new holder still
+// starts at the committed position and receives the unacknowledged event.
+func TestMemoryLateAckAfterHandoverIsDropped(t *testing.T) {
+	store := NewMemoryEventStore()
+	source := "late.ack.events"
+	key := "order-1" // segment "1" of the four, by the pinned hash vector
+	handled := eventFor(source, &key, "late-ack")
+	if err := store.Publish(context.Background(), handled); err != nil {
+		t.Fatal(err)
+	}
+	spec := SubscriptionSpec{Name: "late.ack", Source: source}
+	first, err := store.Subscribe(context.Background(), spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeSubscription(t, first)
+	delivery := nextDelivery(t, first)
+	if delivery.Segment != "1" || delivery.Position != "0" {
+		t.Fatalf("first delivery: segment %s position %s, want 1 0", delivery.Segment, delivery.Position)
+	}
+
+	second, err := store.Subscribe(context.Background(), spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeSubscription(t, second)
+
+	// The first instance must see the segment revoked before it acknowledges it.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	revoked := false
+	for !revoked {
+		event, err := first.Next(ctx)
+		if err != nil {
+			t.Fatalf("first instance: next: %v", err)
+		}
+		switch event := event.(type) {
+		case Revoked:
+			for _, segment := range event.Segments {
+				if segment == delivery.Segment {
+					revoked = true
+				}
+			}
+		case Assigned:
+			// A closing assignment may come before or after the revocation.
+		case Delivery:
+			t.Fatalf("first instance: an unexpected delivery after its event: %+v", event)
+		default:
+			t.Fatalf("first instance: unknown subscription event %T", event)
+		}
+	}
+	if err := first.Ack(delivery.Segment, delivery.Position); err != nil {
+		t.Fatalf("an acknowledgement of a segment that changed hands: %v", err)
+	}
+
+	again := nextDelivery(t, second)
+	if again.Segment != delivery.Segment || again.Position != "0" || again.Headers[HeaderID] != handled.ID {
+		t.Fatalf("the new holder receives the unacknowledged event: got %s %s %q, want %s 0 %q",
+			again.Segment, again.Position, again.Headers[HeaderID], delivery.Segment, handled.ID)
+	}
+	status := statusOf(t, second, delivery.Segment)
+	if status.Committed != "" {
+		t.Fatalf("the late acknowledgement moved the committed position: %+v", status)
+	}
+}
+
+// nextDelivery is the next delivery of subscription, skipping assignment changes.
+func nextDelivery(t *testing.T, subscription EventSubscription) Delivery {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for {
+		event, err := subscription.Next(ctx)
+		if err != nil {
+			t.Fatalf("next: %v", err)
+		}
+		switch event := event.(type) {
+		case Delivery:
+			return event
+		case Assigned, Revoked:
+			continue
+		default:
+			t.Fatalf("unknown subscription event %T", event)
+		}
+	}
+}
+
+// statusOf is the status of segment in the subscription's current assignment.
+func statusOf(t *testing.T, subscription EventSubscription, segment string) SegmentStatus {
+	t.Helper()
+	for _, status := range subscription.Segments() {
+		if status.Segment == segment {
+			return status
+		}
+	}
+	t.Fatalf("segment %s is not assigned", segment)
+	return SegmentStatus{}
 }
 
 // eventFor is one event of these tests: headers id/type, an optional key and a JSON object

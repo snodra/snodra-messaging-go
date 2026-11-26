@@ -28,8 +28,9 @@ const (
 //     "0". A position is the decimal index of a segment's event, from "0".
 //   - A subscription per name is shared by every Subscribe of that name in the process
 //     (competing instances): its segments are spread over its members, and a segment moves to
-//     another member only after the one holding it saw it revoked (its next Next), was closed
-//     or was dropped. The committed positions are kept per name in memory.
+//     another member only after the one holding it saw it revoked (its next Next) or closed.
+//     Close is the only way to give a segment up; Go has no drop notification. The committed
+//     positions are kept per name in memory.
 //   - Capabilities are CapabilityReplay and CapabilityLag; not CapabilityNativeDeadLetter (the
 //     dead letters stay in the message store) and not CapabilityBrowse (this library has no
 //     event browser).

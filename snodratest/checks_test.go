@@ -40,3 +40,22 @@ func TestChecksTxtMatchesTheRustKit(t *testing.T) {
 		t.Fatalf("the level-2 kit has %d checks, want 9", len(rustEventStoreL2Checks))
 	}
 }
+
+// TestSpecNamesCarryOneProcessSuffix pins that a run's subscription names never reuse a stored
+// committed position of an earlier run.
+func TestSpecNamesCarryOneProcessSuffix(t *testing.T) {
+	if processSuffix == "" {
+		t.Fatal("the process suffix is empty")
+	}
+	kit := &EventStoreKit{Source: "conformance.events"}
+	first, second := kit.spec(), kit.spec()
+	prefix := "conformance." + processSuffix + "-"
+	for _, name := range []string{first.Name, second.Name} {
+		if !strings.HasPrefix(name, prefix) {
+			t.Fatalf("subscription name %q does not start with %q", name, prefix)
+		}
+	}
+	if first.Name == second.Name {
+		t.Fatalf("two subscriptions share the name %q", first.Name)
+	}
+}

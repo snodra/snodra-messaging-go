@@ -241,9 +241,9 @@ func AnInstanceLeftWithoutSegmentsClosesItsChange(tb testing.TB, kit *EventStore
 	for segment := range readers[0].assigned {
 		all[segment] = true
 	}
-	cap := 2*len(all) + 2
+	limit := 2*len(all) + 2
 	emptied := false
-	for !emptied && len(readers) < cap {
+	for !emptied && len(readers) < limit {
 		var former []int
 		for i, reader := range readers {
 			if len(reader.assigned) > 0 {
@@ -271,7 +271,7 @@ func AnInstanceLeftWithoutSegmentsClosesItsChange(tb testing.TB, kit *EventStore
 	}
 	if !emptied {
 		tb.Logf("event store conformance check `an_instance_left_without_segments_closes_its_change`: %d instances and none that held segments was left without any (assigned %v): the empty assignment that closes such a change was not seen",
-			cap, assignedLists(readers))
+			limit, assignedLists(readers))
 	}
 	anyEmpty := false
 	for _, reader := range readers {
@@ -334,8 +334,9 @@ func UnackedDeliveryIsRedelivered(tb testing.TB, kit *EventStoreKit) {
 
 // RedeliveredAfterCommitIsSkipped checks that a crash after the handler's transaction committed
 // and before the acknowledgement makes the event come again, that its processed-event marker
-// (recorded in that transaction, its id built from the delivered id header as the core builds it)
-// makes it a duplicate, and that once acknowledged it does not come again.
+// (recorded through the processed-event port, the store's own transaction when the context
+// carries none; its id built from the delivered id header as the core builds it) makes it a
+// duplicate, and that once acknowledged it does not come again.
 func RedeliveredAfterCommitIsSkipped(tb testing.TB, kit *EventStoreKit) {
 	tb.Helper()
 	if kit.Markers == nil {

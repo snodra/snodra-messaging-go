@@ -2,7 +2,9 @@ package snodratest
 
 import (
 	"context"
+	"crypto/rand"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -52,10 +54,15 @@ func (k *EventStoreKit) instance(tb testing.TB) snodra.EventStore {
 	return store
 }
 
+// processSuffix makes this process's subscription names distinct from those of an earlier run
+// against a persistent store, so a new name starts at the earliest position instead of a stored
+// committed one. It is one suffix per process.
+var processSuffix = strings.ToLower(rand.Text())
+
 // spec is a subscription name nothing has used.
 func (k *EventStoreKit) spec() snodra.SubscriptionSpec {
 	return snodra.SubscriptionSpec{
-		Name:   "conformance." + strconv.FormatUint(nextNumber(), 10),
+		Name:   "conformance." + processSuffix + "-" + strconv.FormatUint(nextNumber(), 10),
 		Source: k.Source,
 	}
 }
@@ -120,7 +127,8 @@ func fresh(what string) string {
 }
 
 // bounded runs call with the kit's wait and fails the check naming step when it fails or does
-// not answer.
+// not answer. The call must return when ctx is done: Go cannot interrupt a call that ignores
+// it, so a store that does not is a hanging check, not a failure this helper can report.
 func bounded(tb testing.TB, step string, call func(context.Context) error) {
 	tb.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), wait)

@@ -265,7 +265,8 @@ type EventPublisher interface {
 	// Publish appends event to event.Source and returns once the event store accepted it. Two
 	// publishes of one key, the second called after the first returned, are delivered in that
 	// order. It fails with ErrRejected when the event store will never take the event (the
-	// relay gives it up at once), and with ErrFailed when another try may succeed.
+	// relay gives it up at once), and with ErrFailed when another try may succeed. A context
+	// that is done is returned as-is.
 	Publish(ctx context.Context, event OutgoingEvent) error
 }
 
@@ -293,7 +294,8 @@ type EventStore interface {
 	EventPublisher
 	// Capabilities is what the store offers beyond the required contract.
 	Capabilities() []Capability
-	// Subscribe joins spec as one more instance of its subscription.
+	// Subscribe joins spec as one more instance of its subscription. A context that is done is
+	// returned as-is.
 	Subscribe(ctx context.Context, spec SubscriptionSpec) (EventSubscription, error)
 	// Admin is the reset side of spec, for a reset run while no instance reads it. It fails
 	// with ErrUnsupported (an *UnsupportedError naming CapabilityReplay) when the store lacks
