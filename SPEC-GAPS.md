@@ -589,3 +589,31 @@ settled; where an entry is settled its behaviour is the specification. The code 
   and the claimed entry compare equal on every store; the SQL add-on truncates every time it binds to the layout's
   milliseconds, so the database never rounds one. `TestTheSQLMessageStorePassesTheKit` pins it on both engines.
 - **Question:** settled: millisecond precision is the contract the kit and the layout share.
+
+### SG-41: a transaction or session of another message store in a Go context
+
+- **Specification:** [message-store-add-ons.md, The stores](https://snodra.damoreira.com/docs/library-authors/message-store-add-ons/#the-stores)
+  says an add-on joins the caller's transaction and never writes beside it; the reference's SQL scope refuses a
+  transaction that is not one of its own. The Go interface binds a transaction through a `context.Context`, and a
+  context can carry only keys its package knows.
+- **This library:** the MongoDB store's `scope` refuses a context carrying another `*Store`'s transaction with
+  `ErrInvalid`, and joins its own `Begin` transaction or a service's session (`WithSession`). A transaction or session
+  of a different `snodra.MessageStore` implementation is invisible: each implementation uses an unexported context
+  key, so the call runs on its own instead of being refused. A session bound from a foreign MongoDB client is not
+  detected either. The reference refuses a foreign transaction at the scope
+  (`snodra-messaging-rs/crates/snodra-messaging-sqlx/src/db.rs:805`).
+- **Question:** should the core define a shared transaction marker so one store can detect another's, or is the
+  caller responsible for never mixing a context across stores?
+
+### SG-42: a changed retention at schema check time
+
+- **Specification:** [mongodb-layout.md](https://snodra.damoreira.com/docs/library-authors/mongodb-layout/) says every
+  instance sharing a database needs the same retentions and that neither add-on changes an index that exists; the
+  core's `StoreLifecycle` says `CheckSchema` fails unless the database has what the store needs. No page says whether
+  a TTL index created with one retention is a schema failure for a store configured with another.
+- **This library:** `CheckSchema` compares an index's keys, TTL, uniqueness and partial filter with the layout and the
+  store's settings. A database initialized with a different retention fails it with an error naming the index and
+  saying every instance needs the same retentions; `InitSchema` leaves the existing index as it is (MongoDB refuses an
+  index under an existing name with other options). The two reference add-ons have no schema check to compare with.
+- **Question:** should a retention change be a schema failure (the index must be dropped and recreated), or is the TTL
+  a setting each instance may differ on?
