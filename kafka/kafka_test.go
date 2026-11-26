@@ -260,3 +260,18 @@ func TestSubscribeAndAdminRefuseAnEmptyNameOrSource(t *testing.T) {
 		t.Fatalf("admin: %v, want ErrInvalid", err)
 	}
 }
+
+func TestTakeErrorReturnsTheLatestTroubleOnce(t *testing.T) {
+	sub := &subscription{}
+	if got := sub.TakeError(); got != "" {
+		t.Fatalf("a subscription with no trouble: %q", got)
+	}
+	sub.setError("kafka: the first trouble")
+	sub.setError("kafka: the latest trouble")
+	if got, want := sub.TakeError(), "kafka: the latest trouble"; got != want {
+		t.Fatalf("TakeError: %q, want %q", got, want)
+	}
+	if got := sub.TakeError(); got != "" {
+		t.Fatalf("TakeError after a read: %q, want empty", got)
+	}
+}

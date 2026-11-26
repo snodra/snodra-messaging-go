@@ -201,9 +201,9 @@ func (s *EventStore) Capabilities() []snodra.Capability {
 }
 
 // Publish appends event to the topic named by its source and returns once the brokers
-// acknowledged it (acks=all, idempotent producer). A blank source, an oversized record, an
-// invalid topic or a refused authorization is snodra.ErrRejected (the outbox relay gives it up);
-// any other failure is snodra.ErrFailed (another try may succeed).
+// acknowledged it (acks=all; idempotent unless Config.Options disables it). A blank source, an
+// oversized record, an invalid topic or a refused authorization is snodra.ErrRejected (the outbox
+// relay gives it up); any other failure is snodra.ErrFailed (another try may succeed).
 func (s *EventStore) Publish(ctx context.Context, event snodra.OutgoingEvent) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -246,9 +246,12 @@ func (s *EventStore) Subscribe(ctx context.Context, spec snodra.SubscriptionSpec
 	}
 	// A source that does not exist yet is not refused: the consumer waits for the topic's
 	// metadata and joins the group when the topic appears, as the reference subscription's
-	// poll does. The core's first-assignment bound reports a source that never appears.
+	// poll does. Until then Next yields no assignment. The core's level-2 read loop has no
+	// first-assignment bound, so a source that never appears leaves the processor waiting with
+	// no error, and only the kit's joining check reports it.
 	//
-	// TODO(spec-gap): SG-37 (a source that does not exist at Subscribe).
+	// TODO(spec-gap): SG-37 (a source that does not exist at Subscribe; the published 10 s
+	// first-assignment rule cannot hold for a source that never appears).
 	subscription := &subscription{
 		store:      s,
 		spec:       spec,

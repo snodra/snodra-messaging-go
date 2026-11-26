@@ -141,6 +141,43 @@ func TestHeadersTravelByNameAndTheKeyAndPayloadAsPublished(t *testing.T) {
 	}
 }
 
+// Subscribing before the source's topic exists is not an error: the subscription waits for the
+// topic, next reports only the caller's context expiring, and once the topic appears the group
+// joins and the subscription reads what is published there.
+func TestSubscribingBeforeTheTopicExistsWaitsForIt(t *testing.T) {
+	broker := kafkaBroker(t)
+	topic := uniqueTopic("late-topic")
+	store := newTestStore(t, broker)
+	spec := snodra.SubscriptionSpec{Name: uniqueGroup("orders-service", "late-topic"), Source: topic}
+	sub := subscribe(t, store, spec)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	subscriptionEvent, err := sub.Next(ctx)
+	cancel()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("next before the topic exists: %v (event %T), want context.DeadlineExceeded", err, subscriptionEvent)
+	}
+
+	createTopic(t, broker, topic, 1, nil)
+	// Wake the client's metadata refresh rather than waiting out its ordinary metadata age:
+	// the group can only join once the topic's partitions are known.
+	sub.client.ForceMetadataRefresh()
+	waitForAssignment(t, sub, 15*time.Second)
+
+	key := "order-42"
+	if err := store.Publish(t.Context(), event(topic, "late-topic-1", &key)); err != nil {
+		t.Fatalf("publishing to the new topic: %v", err)
+	}
+	delivered := readDeliveries(t, sub, 1, 30*time.Second)[0]
+	if delivered.Headers[snodra.HeaderID] != "late-topic-1" {
+		t.Fatalf("the event after the topic appeared: %s", delivered.Headers[snodra.HeaderID])
+	}
+	// Close before the topic cleanup deletes it, so the subscription does not see it vanish.
+	if err := sub.Close(t.Context()); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+}
+
 // A subscription's name is its consumer group, `<service>.<processor>`, on the classic protocol
 // with the range assignor: the instances of every official library meet in one group.
 func TestASubscriptionJoinsTheGroupNamedAfterTheProcessor(t *testing.T) {
@@ -164,6 +201,9 @@ func TestASubscriptionJoinsTheGroupNamedAfterTheProcessor(t *testing.T) {
 	}
 	if group.ProtocolType != "consumer" {
 		t.Fatalf("the group protocol type is %q, want consumer", group.ProtocolType)
+	}
+	if group.State != "Stable" {
+		t.Fatalf("the group state is %q, want Stable", group.State)
 	}
 	if group.Protocol != "range" {
 		t.Fatalf("the assignor is %q, want range", group.Protocol)
@@ -315,21 +355,21 @@ func TestADeadLetterGoesToTheDeadLetterTopic(t *testing.T) {
 	}
 }
 
-// An instance that is lost without its Close leaves its unacknowledged records uncommitted; the
+// An instance abandoned without its Close leaves its unacknowledged records uncommitted; the
 // next instance of the group reads them again, and not the acknowledged ones.
-func TestUnackedRecordsComeAgainAfterACrash(t *testing.T) {
+func TestUnackedRecordsComeAgainAfterAnAbandonedInstance(t *testing.T) {
 	broker := kafkaBroker(t)
-	topic := uniqueTopic("crash")
+	topic := uniqueTopic("abandoned")
 	createTopic(t, broker, topic, 1, nil)
 	store := newTestStore(t, broker)
 	key := "order-42"
-	sentIDs := []string{"crash-0", "crash-1", "crash-2"}
+	sentIDs := []string{"abandoned-0", "abandoned-1", "abandoned-2"}
 	for _, id := range sentIDs {
 		if err := store.Publish(t.Context(), event(topic, id, &key)); err != nil {
 			t.Fatalf("publishing %s: %v", id, err)
 		}
 	}
-	spec := snodra.SubscriptionSpec{Name: uniqueGroup("orders-service", "crash"), Source: topic}
+	spec := snodra.SubscriptionSpec{Name: uniqueGroup("orders-service", "abandoned"), Source: topic}
 
 	first := subscribe(t, store, spec)
 	waitForAssignment(t, first, 10*time.Second)
@@ -344,23 +384,24 @@ func TestUnackedRecordsComeAgainAfterACrash(t *testing.T) {
 	}
 	waitCommitted(t, broker, spec.Name, topic, 0, 1)
 
-	// The crash: the instance goes without its Close, so nothing is flushed and its client
-	// leaves the group with the committed offset it had.
-	crash(first)
+	// The instance is abandoned without its Close. Its client leaves the group gracefully, so
+	// the test does not wait for a session timeout; nothing is flushed, and the group's
+	// committed offset is still 1.
+	abandonSubscription(first)
 
 	second := subscribe(t, store, spec)
 	again := readDeliveries(t, second, 2, 30*time.Second)
 	if got := ids(again); !reflect.DeepEqual(got, sentIDs[1:]) {
-		t.Fatalf("after the crash: got %v, want %v", got, sentIDs[1:])
+		t.Fatalf("after the abandoned instance: got %v, want %v", got, sentIDs[1:])
 	}
 	if again[0].Position != "1" || again[1].Position != "2" {
-		t.Fatalf("after the crash: positions %v, want [1 2]", positions(again))
+		t.Fatalf("after the abandoned instance: positions %v, want [1 2]", positions(again))
 	}
 }
 
-// crash abandons a subscription as a dead process would: no Close, no acknowledgement flushed,
-// then the client leaves the group.
-func crash(sub *subscription) {
+// abandonSubscription drops a subscription without its Close: its client leaves the group
+// gracefully and nothing is flushed, so only the offsets acknowledged before it remain committed.
+func abandonSubscription(sub *subscription) {
 	sub.mu.Lock()
 	sub.closed = true
 	sub.signal()

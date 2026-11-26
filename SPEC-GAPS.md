@@ -530,26 +530,35 @@ settled; where an entry is settled its behaviour is the specification. The code 
 
 - **Specification:** [event-store-add-ons.md, The operations](https://snodra.damoreira.com/docs/library-authors/event-store-add-ons/#the-operations)
   says subscribe joins the subscription's name on its source as one more instance, and that a new subscription starts at
-  the earliest position of every segment; [Kafka wire rules](https://snodra.damoreira.com/docs/library-authors/event-store-add-ons/#kafka-wire-rules)
-  says the library creates no topic ("the infrastructure does"). No page says what `subscribe` does while the source's
-  topic does not exist yet.
+  the earliest position of every segment; it also says a new subscription's first event is an assignment, "an empty one
+  when it holds no segment, within a bound of its joining (10 s in both libraries, `FIRST_ASSIGNMENT_WITHIN`)"; [Kafka
+  wire rules](https://snodra.damoreira.com/docs/library-authors/event-store-add-ons/#kafka-wire-rules) says the library
+  creates no topic ("the infrastructure does"). No page says what `subscribe` does while the source's topic does not
+  exist yet.
 - **This library:** `Subscribe` does not ask for the topic's metadata. The consumer's group joins when the topic appears,
-  and until then `Next` yields no assignment (the core's first-assignment bound reports a source that never appears).
-  The reference starts a subscription the same way, by subscribing the consumer and polling
+  and until then `Next` yields no assignment; a short caller context ends with that context's error, not a broken
+  subscription. A topic created later is noticed at the consumer's next metadata refresh (the client caches metadata for
+  up to 5 minutes); the test forces a refresh so it does not wait. The core has no first-assignment bound at level 2: its
+  read loop just calls `Next`, so a source that never appears leaves the processor waiting with no error, and only the
+  kit's joining check reports it. The reference starts a subscription the same way, by subscribing the consumer and
+  polling
   (`snodra-messaging@64dde1e:snodra-messaging-kafka/src/main/kotlin/com/damoreira/snodra/messaging/kafka/KafkaSubscription.kt:175`
-  and `:401`).
-- **Question:** should `Subscribe` refuse a source that does not exist, or wait for it as this library does?
+  and `:401`). `TestSubscribingBeforeTheTopicExistsWaitsForIt` pins it.
+- **Question:** should `Subscribe` refuse a source that does not exist, or wait for it as this library does? If it waits,
+  the published "first event within 10 s" rule cannot hold for a source that never appears: the rule is the kit's bound
+  and the interface's promise, but the level-2 core enforces neither, so the specification should say which of the two is
+  the contract.
 
 ### SG-38: comparing a position that is not an offset
 
 - **Specification:** [event-store-add-ons.md, Segments and positions](https://snodra.damoreira.com/docs/library-authors/event-store-add-ons/#segments-and-positions)
   says segments and positions are opaque strings a reader never interprets and that the core orders positions only
   through the event store's `compare`; Kafka's positions are decimal offsets. It does not say what `compare` does with
-  a position that is not an offset, and Go's interface returns no error for it.
+  a position that is not an offset.
 - **This library:** decimal offsets compare by value; any text that is not an offset comes after every offset, by its
-  bytes among themselves (`kafka/offsets.go`). `Compare` is total and never panics. The reference throws *invalid* for a
-  position that is not an offset
-  (`snodra-messaging@64dde1e:snodra-messaging-kafka/src/main/kotlin/com/damoreira/snodra/messaging/kafka/KafkaEventStore.kt:112`);
+  bytes among themselves (`kafka/offsets.go`). Go's `Compare` returns no error, so the order is total and never fails.
+  The reference throws *invalid* for a position that is not an offset
+  (`snodra-messaging@64dde1e:snodra-messaging-kafka/src/main/kotlin/com/damoreira/snodra/messaging/kafka/KafkaEventStore.kt:113`);
   Rust orders text after every numeric offset.
 - **Question:** is a total order the contract, or should a library be able to refuse a malformed position?
 
