@@ -5,7 +5,8 @@
 <h1 align="center">Snodra Messaging (Go)</h1>
 
 <p align="center">
-  Commands, queries, streams, scatter-gathers and subscriptions for Go services, routed by Snodra Server.
+  Commands, queries, streams, scatter-gathers and subscriptions — and events through an outbox —
+  for Go services, routed by Snodra Server.
 </p>
 
 <p align="center">
@@ -29,23 +30,49 @@ retries and timeouts.
   is not shared, of a type the service handles itself, is answered in-process by its own handler, without the hub;
   `snodra.AlwaysRouteThroughHub(true)` sends it through the hub like any other request.
 - **Every query mode**: point, scatter-gather, streaming and subscription; streams and updates are `iter.Seq2`.
+- **Events** through an outbox: `Publish` appends the event in the transaction the context carries, and a relay in
+  every instance publishes it to the event store, at least once. `Key` is the order key.
+- **Event handlers** with processed-event markers: `HandleEvent` runs in the `default` processor or in a named one
+  (`InProcessor`), and the handler's writes and its marker commit together, so a redelivery is skipped.
+- **Add-ons**: Kafka and RabbitMQ Streams for the event store; MongoDB and SQL (PostgreSQL, MySQL) for the outbox and
+  the markers; in-memory stores for tests. Each add-on is a module of its own, and `snodratest` is the add-on kit.
 - **The hub connection**: registration, heartbeats, reconnects, flow control, several hubs and an ordered shutdown.
 - **Credentials and identity**: a token (static, or a file read again), an OAuth2 JWT (renewed) or a client
   certificate (rolled over to a renewed pair); the caller's token verified against the issuer's keys, and guards on
   handlers.
 - **Telemetry** behind an interface, with an OpenTelemetry implementation in the separate `observability` module.
-- **Feature level 1**, proved by the 33 checks of the conformance runner. Events, stores, event processors and sagas
-  (levels 2 to 4) are not in it yet.
+- **Feature level 2**, proved by the 33 level-1 checks of the conformance runner and by the level-2 event-store and
+  message-store kits. Processor control, dead letters and sagas (levels 3 and 4) are not in it yet.
 
 ## Install
 
 ```sh
 go get github.com/snodra/snodra-messaging-go@latest
 go get github.com/snodra/snodra-messaging-go/observability@latest   # optional: OpenTelemetry
+
+# One event store and one message store, when the service publishes or handles events:
+go get github.com/snodra/snodra-messaging-go/kafka@latest           # Kafka event store
+go get github.com/snodra/snodra-messaging-go/rabbitmq@latest        # RabbitMQ Streams event store
+go get github.com/snodra/snodra-messaging-go/mongo@latest           # MongoDB message store
+go get github.com/snodra/snodra-messaging-go/sql@latest             # SQL message store (PostgreSQL, MySQL)
 ```
 
-Both modules are on the Go module proxy and need Go 1.26 or later; the core depends only on gRPC and protobuf. Both
-modules of a release have the same version.
+The modules are on the Go module proxy and need Go 1.26 or later; the core depends only on gRPC and protobuf. The
+modules of a release share its version. Each add-on depends on the core and on its own store client, never the reverse.
+
+## Add-ons
+
+| Add-on | Module | Holds |
+|---|---|---|
+| Kafka event store | `github.com/snodra/snodra-messaging-go/kafka` | Events, in ordered partitions |
+| RabbitMQ Streams event store | `github.com/snodra/snodra-messaging-go/rabbitmq` | Events, in partitioned streams |
+| MongoDB message store | `github.com/snodra/snodra-messaging-go/mongo` | Outbox, markers, in the shared collections |
+| SQL message store | `github.com/snodra/snodra-messaging-go/sql` | Outbox, markers, in the shared V1 tables |
+
+A service needs one event store and one message store, each passed to `snodra.New` with `WithEventStore` and
+`WithStore`. The event stores follow the shared wire layouts and declare their capabilities; the message stores follow
+the shared SQL V1 and MongoDB layouts. The Go event-store add-ons have no event browser, so they declare no `browse`.
+The settings and guarantees are on <https://snodra.damoreira.com/docs/add-ons/>.
 
 ## A handler
 
@@ -68,10 +95,15 @@ Settings are options, and `snodra.FromEnv()` reads the `SNODRA_*` variables; opt
 
 ## Documentation
 
-Quick start, the settings map, the API and testing: **<https://snodra.damoreira.com/docs/messaging/go/>**, and
+Quick start, the settings map, the API, events and testing: **<https://snodra.damoreira.com/docs/messaging/go/>**, and
 `go doc -all` for the package. A complete service is [`examples/quickstart`](examples/quickstart/main.go). The
 library speaks the Snodra protocol (`snodra.hub.v1`). Where the specification is silent, [SPEC-GAPS.md](SPEC-GAPS.md)
 records what this library does. Other languages: <https://snodra.damoreira.com/>.
+
+- Events, the outbox, the relay and processors: [Go API, Events](https://snodra.damoreira.com/docs/messaging/go/api/#events)
+- Every `SNODRA_*` variable, the core's and the add-ons': [Go configuration](https://snodra.damoreira.com/docs/messaging/go/configuration/)
+- The four add-ons: [Add-ons](https://snodra.damoreira.com/docs/add-ons/)
+- Testing handlers, the add-on kits and the conformance runner: [Go testing](https://snodra.damoreira.com/docs/messaging/go/testing/)
 
 ## Contributing
 

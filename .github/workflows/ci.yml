@@ -72,6 +72,81 @@ jobs:
           working-directory: observability
       - run: go test -race ./...
 
+  # The add-on modules run against their own infrastructure, started by Testcontainers on the
+  # runner's Docker daemon. Each module is a Go module of the workspace, so it tests the core of
+  # this commit. They add no release logic; the version job waits for them.
+  kafka:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+        working-directory: kafka
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: 1.27.x
+      - name: Docker
+        run: docker info >/dev/null
+      - run: go test -race ./...
+
+  rabbitmq:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+        working-directory: rabbitmq
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: 1.27.x
+      - name: Docker
+        run: docker info >/dev/null
+      - run: go test -race ./...
+
+  mongodb:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+        working-directory: mongo
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: 1.27.x
+      - name: Docker
+        run: docker info >/dev/null
+      - run: go test -race ./...
+
+  sql:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+        working-directory: sql
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: 1.27.x
+      - name: Docker
+        run: docker info >/dev/null
+      - run: go test -race ./...
+
   proto-sync:
     runs-on: ubuntu-latest
     steps:
@@ -199,7 +274,7 @@ jobs:
   #   the bundle holds the recorded and tested objects, one commit on top of the tested main head,
   #   and pushes those ids.
   version:
-    needs: [lint, test, observability, proto-sync, generated, conformance, scripts]
+    needs: [lint, test, observability, kafka, rabbitmq, mongodb, sql, proto-sync, generated, conformance, scripts]
     # Pushes to main of this repository only: never a fork or a pull request, and never the
     # release commit itself (a GITHUB_TOKEN push starts no workflow anyway).
     if: >-
