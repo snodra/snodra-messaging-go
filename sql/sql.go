@@ -488,10 +488,13 @@ func (s *Store) WithTx(ctx context.Context, tx *stdSQL.Tx) context.Context {
 	return context.WithValue(ctx, serviceTxKey{}, tx)
 }
 
-// WithConn binds the service's own *sql.Conn to ctx: the store runs its statements on that
-// connection, so a transaction the service keeps open on it (BEGIN, then its writes, then COMMIT)
-// commits the library's writes with it. The store does not begin, commit or roll back anything on
-// the connection.
+// WithConn binds the service's own *sql.Conn to ctx: an append or a marker recorded with the
+// returned context runs on that connection, so a transaction the service keeps open on it (BEGIN,
+// then its writes, then COMMIT) commits the library's writes with it. Only those two writes use
+// the connection: the outbox's claims and marks, the purge and the marker reads run on the store's
+// pool as they always do. The store does not begin, commit or roll back anything on the
+// connection. A connection that is closed or not in a transaction is the service's to manage; the
+// store sends its write as it is.
 func (s *Store) WithConn(ctx context.Context, conn *stdSQL.Conn) context.Context {
 	if conn == nil {
 		return ctx

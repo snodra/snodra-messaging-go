@@ -33,6 +33,7 @@ type notifier struct {
 	wakers  map[uint64]func()
 	next    uint64
 	cancel  context.CancelFunc
+	stopped bool
 	listens atomic.Uint64
 }
 
@@ -41,12 +42,18 @@ func newNotifier(store *Store) *notifier {
 }
 
 // register adds wake and starts the listener when it was not running; the returned function
-// removes it, and stops the listener when it was the last one. It is safe to call more than once.
+// removes it, and stops the listener when it was the last one. It is safe to call more than once,
+// and a store that has stopped its listener (Close) registers nothing: a listener never starts
+// after Close.
 func (n *notifier) register(wake func()) func() {
-	if wake == nil || n.store.closed.Load() {
+	if wake == nil {
 		return func() {}
 	}
 	n.mu.Lock()
+	if n.stopped || n.store.closed.Load() {
+		n.mu.Unlock()
+		return func() {}
+	}
 	id := n.next
 	n.next++
 	n.wakers[id] = wake
@@ -70,9 +77,10 @@ func (n *notifier) register(wake func()) func() {
 	}
 }
 
-// stop ends the listener; Store.Close calls it.
+// stop ends the listener and refuses a later register; Store.Close calls it.
 func (n *notifier) stop() {
 	n.mu.Lock()
+	n.stopped = true
 	if n.cancel != nil {
 		n.cancel()
 		n.cancel = nil

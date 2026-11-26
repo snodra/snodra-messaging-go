@@ -165,6 +165,83 @@ func TestWithTxAndWithConnIgnoreNil(t *testing.T) {
 	}
 }
 
+// With the purge off, Background has nothing to run and waits for the app to end.
+func TestBackgroundWithThePurgeOffWaitsForTheContext(t *testing.T) {
+	store, err := New(Config{URL: "postgres://user:password@127.0.0.1:1/db", PurgeInterval: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	done := make(chan error, 1)
+	go func() { done <- store.Background(ctx) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("background: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("background did not return after the context ended")
+	}
+}
+
+// A listener never starts after Close: registering after the notifier stopped (or after the store
+// closed) is a no-op, and its cancel is safe to call.
+func TestAListenerDoesNotStartAfterClose(t *testing.T) {
+	store, err := New(Config{URL: "postgres://user:password@127.0.0.1:1/db"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	add := func(what string, register func(func()) func()) {
+		t.Helper()
+		called := false
+		cancel := register(func() { called = true })
+		store.notifier.mu.Lock()
+		running := store.notifier.cancel != nil
+		_, registered := store.notifier.wakers[0]
+		store.notifier.mu.Unlock()
+		if running || registered {
+			t.Fatalf("%s: a listener was started after the store stopped", what)
+		}
+		cancel()
+		cancel()
+		store.notifier.wakeAll()
+		if called {
+			t.Fatalf("%s: a wake registered after the store stopped was called", what)
+		}
+	}
+	add("stopped", func(wake func()) func() {
+		store.notifier.stop()
+		return store.notifier.register(wake)
+	})
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	add("closed", store.Outbox().OnAppend)
+}
+
+// A transaction of another SQL store in the context is refused, never run on this store's pool.
+func TestAnotherStoresTransactionIsRefused(t *testing.T) {
+	first, err := New(Config{URL: "postgres://user:password@127.0.0.1:1/db"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = first.Close() }()
+	second, err := New(Config{URL: "postgres://user:password@127.0.0.1:1/db"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = second.Close() }()
+	ctx := context.WithValue(context.Background(), storeTxKey{}, &storeTx{store: first})
+	if err := second.Outbox().Append(ctx, testEntry("conformance.Foreign", time.Now(), 1)); !errors.Is(err, snodra.ErrInvalid) {
+		t.Fatalf("append with another store's transaction: %v, want ErrInvalid", err)
+	}
+	if _, err := second.Processed().Record(ctx, testMarker()); !errors.Is(err, snodra.ErrInvalid) {
+		t.Fatalf("record with another store's transaction: %v, want ErrInvalid", err)
+	}
+}
+
 func TestClosingTwiceIsANoOp(t *testing.T) {
 	store, err := New(Config{URL: "postgres://user:password@127.0.0.1:1/db"})
 	if err != nil {

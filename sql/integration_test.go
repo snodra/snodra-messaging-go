@@ -350,6 +350,27 @@ func TestTheServiceTransactionBindsTheStoresWrites(t *testing.T) {
 		if exists, err := store.Processed().Exists(ctx, marker.ID); err != nil || exists {
 			t.Fatalf("a connection rollback left the marker (%v, %v)", exists, err)
 		}
+
+		if _, err := conn.ExecContext(ctx, "BEGIN"); err != nil {
+			t.Fatal(err)
+		}
+		entry = testEntry("conformance.ServiceConn", time.Now(), 4)
+		marker = testMarker()
+		if err := store.Outbox().Append(cctx, entry); err != nil {
+			t.Fatalf("append on the committed connection: %v", err)
+		}
+		if recorded, err := store.Processed().Record(cctx, marker); err != nil || !recorded {
+			t.Fatalf("record on the committed connection: %v (%v)", recorded, err)
+		}
+		if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+			t.Fatal(err)
+		}
+		if pending, err := store.Outbox().Pending(ctx); err != nil || pending != 2 {
+			t.Fatalf("a connection commit left %d entries, want 2 (%v)", pending, err)
+		}
+		if exists, err := store.Processed().Exists(ctx, marker.ID); err != nil || !exists {
+			t.Fatalf("a connection commit left no marker (%v, %v)", exists, err)
+		}
 	})
 }
 
@@ -394,6 +415,9 @@ func TestACommitWakesAndARollbackDoesNot(t *testing.T) {
 	waitFor(t, "the listener's start-up wake", 5*time.Second, func() bool { return woken.Load() >= 1 })
 	woken.Store(0)
 
+	// The committed append that follows is the barrier: its notification reaches the listener
+	// after the rolled-back transaction ended, so a rollback that notified would be counted
+	// before this wait succeeds.
 	txctx, tx, err := store.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -403,10 +427,6 @@ func TestACommitWakesAndARollbackDoesNot(t *testing.T) {
 	}
 	if err := tx.Rollback(txctx); err != nil {
 		t.Fatal(err)
-	}
-	time.Sleep(500 * time.Millisecond)
-	if got := woken.Load(); got != 0 {
-		t.Fatalf("a rollback woke the relay %d times", got)
 	}
 
 	txctx, tx, err = store.Begin(ctx)
@@ -420,6 +440,118 @@ func TestACommitWakesAndARollbackDoesNot(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitFor(t, "a commit to wake the relay", 5*time.Second, func() bool { return woken.Load() >= 1 })
+	if got := woken.Load(); got != 1 {
+		t.Fatalf("the commit woke the relay and the rollback did not: got %d wakes, want 1", got)
+	}
+}
+
+// The store stamps the times it sets itself (a claim's lease, an entry's sending and its failure)
+// with the application's clock, never the database's.
+func TestTheApplicationClockStampsTheStoresTimes(t *testing.T) {
+	bothServers(t, func(t *testing.T, server *testServer) {
+		store := server.newStore(t, true)
+		at := time.Date(2026, 11, 3, 10, 0, 0, 0, time.UTC)
+		store.UseClock(func() time.Time { return at })
+		ctx := context.Background()
+		outbox := store.Outbox()
+		sent := testEntry("conformance.Clock", time.Now(), 1)
+		failed := testEntry("conformance.Clock", time.Now(), 2)
+		for _, entry := range []snodra.OutboxEntry{sent, failed} {
+			if err := outbox.Append(ctx, entry); err != nil {
+				t.Fatalf("append %s: %v", entry.ID, err)
+			}
+		}
+		claimed, err := outbox.Claim(ctx, "relay-a", 30*time.Second, 10)
+		if err != nil {
+			t.Fatalf("claim: %v", err)
+		}
+		if len(claimed) != 2 {
+			t.Fatalf("claimed %d entries, want 2", len(claimed))
+		}
+		read := func(id string) (sentAt, failedAt, leaseUntil stdSQL.NullTime) {
+			t.Helper()
+			if err := store.DB().QueryRowContext(ctx,
+				store.bind("SELECT sent_at, failed_at, lease_until FROM snodra_outbox WHERE id = ?"), id).
+				Scan(&sentAt, &failedAt, &leaseUntil); err != nil {
+				t.Fatalf("reading %s: %v", id, err)
+			}
+			return sentAt, failedAt, leaseUntil
+		}
+		_, _, lease := read(sent.ID)
+		if want := at.Add(30 * time.Second); !lease.Valid || !lease.Time.Equal(want) {
+			t.Fatalf("the claim's lease: got %v, want %v", lease, want)
+		}
+		if err := outbox.MarkSent(ctx, []string{sent.ID}); err != nil {
+			t.Fatal(err)
+		}
+		sentAt, _, lease := read(sent.ID)
+		if !sentAt.Valid || !sentAt.Time.Equal(at) {
+			t.Fatalf("sent at: got %v, want %v", sentAt, at)
+		}
+		if !lease.Valid || !lease.Time.Equal(at.Add(30*time.Second)) {
+			t.Fatalf("mark sent kept the lease: got %v", lease)
+		}
+		if err := outbox.MarkFailed(ctx, failed.ID, "conformance: given up"); err != nil {
+			t.Fatal(err)
+		}
+		_, failedAt, _ := read(failed.ID)
+		if !failedAt.Valid || !failedAt.Time.Equal(at) {
+			t.Fatalf("failed at: got %v, want %v", failedAt, at)
+		}
+	})
+}
+
+// Background runs the purge on its interval and returns when the context ends.
+func TestBackgroundPurgesOnItsInterval(t *testing.T) {
+	bothServers(t, func(t *testing.T, server *testServer) {
+		database := server.database(t)
+		store, err := New(Config{
+			URL:             server.url(database),
+			PurgeInterval:   20 * time.Millisecond,
+			OutboxRetention: time.Millisecond,
+		})
+		if err != nil {
+			t.Fatalf("the store over %s: %v", database, err)
+		}
+		t.Cleanup(func() { _ = store.Close() })
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		if err := store.InitSchema(ctx, nil); err != nil {
+			t.Fatalf("applying the schema: %v", err)
+		}
+
+		runCtx, stop := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() { done <- store.Background(runCtx) }()
+		entry := testEntry("conformance.Background", time.Now(), 1)
+		if err := store.Outbox().Append(ctx, entry); err != nil {
+			t.Fatal(err)
+		}
+		claimed, err := store.Outbox().Claim(ctx, "relay", time.Minute, 1)
+		if err != nil || len(claimed) != 1 {
+			t.Fatalf("claim: %d entries (%v)", len(claimed), err)
+		}
+		if err := store.Outbox().MarkSent(ctx, []string{entry.ID}); err != nil {
+			t.Fatal(err)
+		}
+		waitFor(t, "the background purge to remove the sent entry", 10*time.Second, func() bool {
+			var count int
+			if err := store.DB().QueryRowContext(context.Background(),
+				"SELECT COUNT(*) FROM snodra_outbox").Scan(&count); err != nil {
+				return false
+			}
+			return count == 0
+		})
+		stop()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("background: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("background did not return after the context ended")
+		}
+	})
 }
 
 // Every retention removes its old rows and keeps the fresh, pending, live and scheduled ones.
