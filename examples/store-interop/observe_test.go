@@ -31,7 +31,7 @@ func TestTheObservedProcessedPortTellsHandledFromDuplicate(t *testing.T) {
 	if err != nil || recorded {
 		t.Fatalf("the duplicate record = %v, %v", recorded, err)
 	}
-	led.observeHandled(OrderPlaced{ID: "event-1", Run: "run42", Publisher: "go", Family: familyPostgres, Key: "k-1", Seq: 3})
+	led.observeHandled(OrderPlaced{ID: "event-1", Run: "run42", Publisher: "go", Family: familyPostgres, Key: "k-1", Seq: 3}, nil)
 	deliveries, handled, duplicates := led.snapshot()
 	if handled != 1 || duplicates != 1 {
 		t.Fatalf("handled, duplicates = %d, %d", handled, duplicates)
@@ -47,9 +47,62 @@ func TestTheObservedProcessedPortTellsHandledFromDuplicate(t *testing.T) {
 	}
 }
 
+func TestTheLedgerShowsOnlyCommittedTransactions(t *testing.T) {
+	ctx := context.Background()
+	inner := snodra.NewMemoryMessageStore()
+	led := newLedger()
+	store := newObservedStore(inner, familyPostgres, led)
+	marker := snodra.ProcessedMarker{
+		ID:        markerID(familyPostgres, "event-1"),
+		Type:      eventType,
+		Processor: processorName(familyPostgres),
+		Source:    sourceName("run42", familyPostgres),
+		Segment:   "0",
+		Position:  "7",
+	}
+	txctx, tx, err := store.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	recorded, err := store.Processed().Record(txctx, marker)
+	if err != nil || !recorded {
+		t.Fatalf("the record = %v, %v", recorded, err)
+	}
+	led.observeHandled(OrderPlaced{ID: "event-1", Run: "run42", Publisher: "go", Family: familyPostgres, Key: "k-1", Seq: 3}, txRecordFrom(txctx))
+	if deliveries, handled, duplicates := led.snapshot(); len(deliveries) != 0 || handled != 0 || duplicates != 0 {
+		t.Fatalf("an uncommitted transaction was visible: %+v", deliveries)
+	}
+	if err := tx.Commit(txctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	deliveries, handled, duplicates := led.snapshot()
+	if handled != 1 || duplicates != 0 || len(deliveries) != 1 {
+		t.Fatalf("after the commit: %+v, %d, %d", deliveries, handled, duplicates)
+	}
+	if deliveries[0].Publisher != "go" || deliveries[0].Key != "k-1" {
+		t.Fatalf("the committed delivery = %+v", deliveries[0])
+	}
+
+	marker.ID = markerID(familyPostgres, "event-2")
+	txctx, tx, err = store.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if recorded, err = store.Processed().Record(txctx, marker); err != nil || !recorded {
+		t.Fatalf("the rolled-back record = %v, %v", recorded, err)
+	}
+	led.observeHandled(OrderPlaced{ID: "event-2", Run: "run42", Publisher: "go", Family: familyPostgres, Key: "k-2", Seq: 4}, txRecordFrom(txctx))
+	if err := tx.Rollback(txctx); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	if deliveries, handled, duplicates := led.snapshot(); len(deliveries) != 1 || handled != 1 || duplicates != 0 {
+		t.Fatalf("a rolled-back transaction was visible: %+v, %d, %d", deliveries, handled, duplicates)
+	}
+}
+
 func TestAMarkerOfAnotherProcessorIsNotObserved(t *testing.T) {
 	led := newLedger()
-	led.observeMarker(familyMongo, snodra.ProcessedMarker{ID: "processor:other:event-1"}, true)
+	led.observeMarker(familyMongo, snodra.ProcessedMarker{ID: "processor:other:event-1"}, true, nil)
 	if deliveries, handled, duplicates := led.snapshot(); len(deliveries) != 0 || handled != 0 || duplicates != 0 {
 		t.Fatalf("another processor's marker was observed: %+v", deliveries)
 	}

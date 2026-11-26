@@ -28,7 +28,6 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"sync"
 	"syscall"
 	"time"
 )
@@ -75,23 +74,19 @@ func run(logger *slog.Logger) error {
 	return nil
 }
 
-// shutDown stops every app in reverse order and then the stores the probes own.
+// shutDown stops every app in reverse order, each before the next, and then the stores the probes
+// own. The five apps fit the compose stop_grace_period (60 s) within their per-app budget.
 func shutDown(probes []*probe, logger *slog.Logger) {
-	var wg sync.WaitGroup
 	for i := len(probes) - 1; i >= 0; i-- {
 		p := probes[i]
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			ctx, cancel := context.WithTimeout(context.Background(), shutdownBudget)
-			defer cancel()
-			if err := p.app.Shutdown(ctx); err != nil {
-				logger.Warn("an app did not shut down cleanly", "family", p.family, "error", err)
-			}
-			p.close(logger)
-		}()
+		ctx, cancel := context.WithTimeout(context.Background(), shutdownBudget)
+		err := p.app.Shutdown(ctx)
+		cancel()
+		if err != nil {
+			logger.Warn("an app did not shut down cleanly", "family", p.family, "error", err)
+		}
+		p.close(logger)
 	}
-	wg.Wait()
 }
 
 // closeProbes closes what was built before an app started.

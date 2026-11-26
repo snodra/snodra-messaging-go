@@ -294,9 +294,10 @@ func (p *probe) state(ctx context.Context, query State) (StateReply, error) {
 }
 
 // onPlaced is the event handler the library's consumer runs in its transaction with the stage-1
-// marker; the ledger only keeps what the driver reads.
-func (p *probe) onPlaced(_ context.Context, event OrderPlaced) error {
-	p.store.ledger.observeHandled(event)
+// marker; the ledger keeps the event in that transaction's record and shows it only once the
+// transaction commits.
+func (p *probe) onPlaced(ctx context.Context, event OrderPlaced) error {
+	p.store.ledger.observeHandled(event, txRecordFrom(ctx))
 	return nil
 }
 

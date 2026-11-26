@@ -29,6 +29,28 @@ type handledObservation struct {
 	seq       int64
 }
 
+// txRecord collects what one transaction writes to the ledger. The library's consumer opens the
+// transaction before the stage-1 marker and commits it after the handler; only a commit moves the
+// record into the ledger, so State never reports a delivery the transaction did not commit.
+type txRecord struct {
+	markers []markerObservation
+	handled map[string]handledObservation
+}
+
+func newTxRecord() *txRecord {
+	return &txRecord{handled: map[string]handledObservation{}}
+}
+
+// txRecordKey is where Begin puts the transaction's record: the consumer passes the same context
+// to the marker record and, through it, to the handlers.
+type txRecordKey struct{}
+
+// txRecordFrom returns the record of the transaction ctx carries, or nil.
+func txRecordFrom(ctx context.Context) *txRecord {
+	record, _ := ctx.Value(txRecordKey{}).(*txRecord)
+	return record
+}
+
 // ledger is what the probe's consumer did, in memory: the stage-1 marker records (from the store
 // wrapper) and the events whose handler ran. Both languages' drivers read it through State; the
 // real state is the stores.
@@ -42,33 +64,67 @@ func newLedger() *ledger {
 	return &ledger{handled: map[string]handledObservation{}}
 }
 
-// observeMarker records one processed port call.
-func (l *ledger) observeMarker(family string, marker snodra.ProcessedMarker, recorded bool) {
+// observeMarker records one processed port call. A new marker belongs to the transaction ctx
+// carries, and reaches the ledger only when that transaction commits; a duplicate is not
+// committed (the consumer rolls back) and is recorded at once, as the delivery the other language
+// skipped.
+func (l *ledger) observeMarker(family string, marker snodra.ProcessedMarker, recorded bool, tx *txRecord) {
 	prefix := "processor:" + processorName(family) + ":"
 	if !strings.HasPrefix(marker.ID, prefix) {
 		return
 	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.markers = append(l.markers, markerObservation{
+	observation := markerObservation{
 		eventID:   strings.TrimPrefix(marker.ID, prefix),
 		segment:   marker.Segment,
 		position:  marker.Position,
 		duplicate: !recorded,
-	})
+	}
+	if recorded && tx != nil {
+		tx.markers = append(tx.markers, observation)
+		return
+	}
+	l.appendMarker(observation)
 }
 
-// observeHandled records one event handler run.
-func (l *ledger) observeHandled(event OrderPlaced) {
+// appendMarker adds a marker the ledger may show now.
+func (l *ledger) appendMarker(observation markerObservation) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.handled[event.ID] = handledObservation{
+	l.markers = append(l.markers, observation)
+}
+
+// observeHandled records one event handler run: in the transaction ctx carries, or at once when
+// the handler runs outside one.
+func (l *ledger) observeHandled(event OrderPlaced, tx *txRecord) {
+	observation := handledObservation{
 		id:        event.ID,
 		run:       event.Run,
 		publisher: event.Publisher,
 		family:    event.Family,
 		key:       event.Key,
 		seq:       event.Seq,
+	}
+	if tx != nil {
+		tx.handled[event.ID] = observation
+		return
+	}
+	l.appendHandled(observation)
+}
+
+// appendHandled adds a handler's record the ledger may show now.
+func (l *ledger) appendHandled(observation handledObservation) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.handled[observation.id] = observation
+}
+
+// commit moves a committed transaction's records into the ledger.
+func (l *ledger) commit(tx *txRecord) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.markers = append(l.markers, tx.markers...)
+	for id, observation := range tx.handled {
+		l.handled[id] = observation
 	}
 }
 
@@ -119,9 +175,41 @@ func newObservedStore(inner snodra.MessageStore, family string, ledger *ledger) 
 	return &observedStore{MessageStore: inner, inner: inner, family: family, ledger: ledger}
 }
 
+// Begin starts the add-on's transaction and carries the ledger record the consumer's marker and
+// handlers write; the ledger sees them only when the transaction commits.
+func (s *observedStore) Begin(ctx context.Context) (context.Context, snodra.Tx, error) {
+	innerCtx, tx, err := s.inner.Begin(ctx)
+	if err != nil {
+		return innerCtx, tx, err
+	}
+	record := newTxRecord()
+	return context.WithValue(innerCtx, txRecordKey{}, record), &observedTx{inner: tx, ledger: s.ledger, record: record}, nil
+}
+
 // Processed is the add-on's processed store, observed.
 func (s *observedStore) Processed() snodra.ProcessedStore {
 	return &observedProcessed{inner: s.inner.Processed(), family: s.family, ledger: s.ledger}
+}
+
+// observedTx is the add-on's transaction, committing its ledger record after the add-on committed.
+type observedTx struct {
+	inner  snodra.Tx
+	ledger *ledger
+	record *txRecord
+}
+
+var _ snodra.Tx = (*observedTx)(nil)
+
+func (t *observedTx) Commit(ctx context.Context) error {
+	if err := t.inner.Commit(ctx); err != nil {
+		return err
+	}
+	t.ledger.commit(t.record)
+	return nil
+}
+
+func (t *observedTx) Rollback(ctx context.Context) error {
+	return t.inner.Rollback(ctx)
 }
 
 // UseClock hands the add-on its application clock, when it takes one.
@@ -169,7 +257,7 @@ var _ snodra.ProcessedStore = (*observedProcessed)(nil)
 func (p *observedProcessed) Record(ctx context.Context, marker snodra.ProcessedMarker) (bool, error) {
 	recorded, err := p.inner.Record(ctx, marker)
 	if err == nil {
-		p.ledger.observeMarker(p.family, marker, recorded)
+		p.ledger.observeMarker(p.family, marker, recorded, txRecordFrom(ctx))
 	}
 	return recorded, err
 }
