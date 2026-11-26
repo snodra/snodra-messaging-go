@@ -111,8 +111,8 @@ func buildStores(s settings, family string) (snodra.MessageStore, snodra.EventSt
 	var eventStore snodra.EventStore
 	switch spec.event {
 	case "kafka":
-		// The add-on's producer compresses nothing by default, the codec every official
-		// library's consumer reads; the example keeps the default it ships.
+		// The add-on's producer compresses nothing by default, the codec every consumer reads
+		// without an optional library; the example keeps the default it ships.
 		created, err := kafka.New(kafka.Config{BootstrapServers: s.kafkaBootstrap})
 		if err != nil {
 			closeStore(store)

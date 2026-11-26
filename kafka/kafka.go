@@ -18,9 +18,8 @@
 //   - the group's committed offset is the next one to read: acknowledging the record at offset N
 //     stores N+1, and a new group starts at the earliest offset;
 //   - the producer compresses no record batch by default. Compression is a producer's choice that
-//     every consumer of the topic has to decode, and not every official library's consumer ships
-//     a snappy codec (aiokafka has none); the reference add-ons produce uncompressed too
-//     (librdkafka and the Java client both leave `compression.type` at `none`). A
+//     every consumer of the topic has to decode, and a consumer that lacks the codec cannot read
+//     the stream; the reference add-ons also send with their clients' default, no compression. A
 //     `kgo.ProducerBatchCompression` option in Config.Options chooses another codec;
 //   - a dead letter goes to `<source>.dlt`.
 //
@@ -89,8 +88,8 @@ type Config struct {
 	// Options are extra franz-go options for every client the store creates (TLS, SASL, a
 	// logger, ...). Use them for the connection: the store sets the group, the consume topic,
 	// the reset offset, the group protocol, the partitioner and the commit behavior itself.
-	// The producer compresses nothing by default; a kgo.ProducerBatchCompression option here
-	// replaces that codec.
+	// The producer compresses nothing by default, readable without an optional codec; a
+	// kgo.ProducerBatchCompression option here replaces that codec.
 	Options []kgo.Opt
 	// MaxPollRecords is the most records one poll hands a subscription (default 100, at
 	// least 1).

@@ -144,8 +144,8 @@ func TestNewRefusesBadSettings(t *testing.T) {
 	}
 }
 
-// The producer compresses nothing by default, the codec every official library's consumer reads;
-// a Config.Options entry replaces that default when a deployment wants another one.
+// The producer compresses nothing by default, the codec every consumer reads without an optional
+// library; a Config.Options entry replaces that default when a deployment wants another one.
 func TestTheProducerDefaultsToNoCompression(t *testing.T) {
 	store, err := New(Config{BootstrapServers: "127.0.0.1:1"})
 	if err != nil {

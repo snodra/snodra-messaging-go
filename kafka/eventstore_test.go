@@ -144,7 +144,7 @@ func TestHeadersTravelByNameAndTheKeyAndPayloadAsPublished(t *testing.T) {
 }
 
 // A consumer with no compression codec reads what the store publishes: the producer's default is
-// no compression, the codec every official library's consumer decodes (aiokafka ships no snappy).
+// no compression, the codec every consumer decodes without an optional library.
 func TestAPublishedRecordNeedsNoCodecToRead(t *testing.T) {
 	broker := kafkaBroker(t)
 	topic := uniqueTopic("no-codec")
@@ -153,7 +153,7 @@ func TestAPublishedRecordNeedsNoCodecToRead(t *testing.T) {
 
 	key := "order-42"
 	outgoing := event(topic, "no-codec-1", &key)
-	// Repeated text compresses well: franz-go's default snappy preference would compress this
+	// Repeated text compresses well: the client's default snappy preference would compress this
 	// batch, and a consumer without the codec would fail to read it.
 	outgoing.Payload = []byte(`{"padding":"` + strings.Repeat("compressible ", 1024) + `"}`)
 	if err := store.Publish(t.Context(), outgoing); err != nil {
@@ -194,7 +194,7 @@ func TestAPublishedRecordNeedsNoCodecToRead(t *testing.T) {
 }
 
 // noCodecDecompressor is a consumer with no optional codec installed: it reads an uncompressed
-// batch and refuses every compressed one, like aiokafka without python-snappy.
+// batch and refuses every compressed one.
 type noCodecDecompressor struct{}
 
 func (noCodecDecompressor) Decompress(src []byte, codecType kgo.CompressionCodecType) ([]byte, error) {
