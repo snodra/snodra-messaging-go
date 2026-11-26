@@ -16,4 +16,4 @@ use (
 // the released version its go.mod requires, from the network. Build and test there with the
 // workspace (`go test -race ./...` in each module), and let a release update that requirement.
 // go.work.sum is ignored.
-replace github.com/snodra/snodra-messaging-go v0.3.0 => ./
+replace github.com/snodra/snodra-messaging-go v0.4.0 => ./
