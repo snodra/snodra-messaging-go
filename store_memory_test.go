@@ -711,3 +711,86 @@ func TestMemoryMessageStoreBeginWithACancelledContext(t *testing.T) {
 		t.Fatalf("got %v, want context.Canceled", err)
 	}
 }
+
+// L2-3 review: an empty owner is not a claimer; "" is the store's mark for an entry nobody holds.
+func TestMemoryMessageStoreRefusesAnEmptyOutboxOwner(t *testing.T) {
+	store := NewMemoryMessageStore()
+	ctx := context.Background()
+	if err := store.Outbox().Append(ctx, memoryEntry(t, "e-1", time.Unix(1_800_000_000, 0), 0)); err != nil {
+		t.Fatal(err)
+	}
+	_, err := store.Outbox().Claim(ctx, "", time.Minute, 10)
+	if !errors.Is(err, ErrInvalid) {
+		t.Fatalf("Claim with an empty owner: got %v, want ErrInvalid", err)
+	}
+	claimed, err := store.Outbox().Claim(ctx, "relay", time.Minute, 10)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("a named claim: %d entries, %v", len(claimed), err)
+	}
+}
+
+// SG-31: a transaction abandoned without Commit or Rollback keeps the records it reserved: a
+// second live transaction writing one conflicts at once, and a rollback releases them. The
+// reference's in-memory store reserves the row the same way until its transaction ends
+// (snodra-messaging@64dde1e:.../store/memory/MemoryTables.kt:77).
+func TestAnAbandonedTransactionKeepsItsReservation(t *testing.T) {
+	store := NewMemoryMessageStore()
+	entry := memoryEntry(t, "e-abandoned", time.Unix(1_800_000_000, 0), 0)
+	abandonedCtx, abandoned := beginMemoryTx(t, store)
+	if err := store.Outbox().Append(abandonedCtx, entry); err != nil {
+		t.Fatal(err)
+	}
+	// The transaction is neither committed nor rolled back: a second writer conflicts, and its
+	// own transaction ends.
+	secondCtx, second := beginMemoryTx(t, store)
+	err := store.Outbox().Append(secondCtx, entry)
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("a second live writer of the reserved entry: got %v, want ErrConflict", err)
+	}
+	if err := second.Rollback(secondCtx); err != nil {
+		t.Fatal(err)
+	}
+	// Nothing of the abandoned transaction is visible.
+	if pending, err := store.Outbox().Pending(context.Background()); err != nil || pending != 0 {
+		t.Fatalf("pending: %d, %v", pending, err)
+	}
+	// Rolling the abandoned transaction back releases the record.
+	if err := abandoned.Rollback(abandonedCtx); err != nil {
+		t.Fatal(err)
+	}
+	thirdCtx, third := beginMemoryTx(t, store)
+	if err := store.Outbox().Append(thirdCtx, entry); err != nil {
+		t.Fatalf("after the release: %v", err)
+	}
+	if err := third.Commit(thirdCtx); err != nil {
+		t.Fatal(err)
+	}
+	if pending, err := store.Outbox().Pending(context.Background()); err != nil || pending != 1 {
+		t.Fatalf("pending after the commit: %d, %v", pending, err)
+	}
+}
+
+// The in-memory store provides the optional lifecycle: a clock, no schema, and background work
+// that ends with the app.
+func TestMemoryMessageStoreLifecycle(t *testing.T) {
+	store := NewMemoryMessageStore()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- store.Background(ctx) }()
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Background did not end with its context")
+	}
+	if err := store.InitSchema(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CheckSchema(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	isStore(t, store.Name(), MemoryMessageStoreName)
+}

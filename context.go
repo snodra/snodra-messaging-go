@@ -32,6 +32,9 @@ type handling struct {
 	traceparent string
 	// caller is who sent the request; nil for an anonymous caller.
 	caller *Caller
+	// event is set when an event handler runs: the handling is the delivered event, whose userId
+	// header is the acting user (an event carries no token).
+	event bool
 }
 
 type handlingKey struct{}

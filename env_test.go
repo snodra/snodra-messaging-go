@@ -23,6 +23,9 @@ func clearEnv(t *testing.T) {
 		"SNODRA_SERVER_TLS_SERVER_NAME", "SNODRA_SERVER_TLS_CLIENT_CERT", "SNODRA_SERVER_TLS_CLIENT_KEY",
 		"SNODRA_SERVER_OAUTH2_TOKEN_URI", "SNODRA_SERVER_OAUTH2_CLIENT_ID", "SNODRA_SERVER_OAUTH2_CLIENT_SECRET",
 		"SNODRA_SERVER_OAUTH2_CLIENT_SECRET_FILE", "SNODRA_SERVER_OAUTH2_SCOPE", "SNODRA_SERVER_OAUTH2_CA",
+		"SNODRA_EVENTS_SOURCE", "SNODRA_OUTBOX_ENABLED", "SNODRA_OUTBOX_POLL_INTERVAL_MS",
+		"SNODRA_OUTBOX_BATCH_SIZE", "SNODRA_OUTBOX_MAX_ATTEMPTS", "SNODRA_OUTBOX_LEASE_MS",
+		"SNODRA_CONSUMER_ENABLED", "SNODRA_CONSUMER_MAX_ATTEMPTS", "SNODRA_STORE_INIT_SCHEMA",
 	} {
 		t.Setenv(name, "")
 	}
@@ -83,6 +86,13 @@ func TestFromEnvRefusesBadValues(t *testing.T) {
 		"SNODRA_SERVER_RETRY_INITIAL_BACKOFF_MS": "-5",
 		"SNODRA_SERVER_RETRY_MULTIPLIER":         "0.5",
 		"SNODRA_SERVER_RETRY_MAX_BACKOFF_MS":     "x",
+		"SNODRA_OUTBOX_ENABLED":                  "maybe",
+		"SNODRA_OUTBOX_POLL_INTERVAL_MS":         "0",
+		"SNODRA_OUTBOX_BATCH_SIZE":               "0",
+		"SNODRA_OUTBOX_MAX_ATTEMPTS":             "-1",
+		"SNODRA_CONSUMER_ENABLED":                "perhaps",
+		"SNODRA_CONSUMER_MAX_ATTEMPTS":           "0",
+		"SNODRA_STORE_INIT_SCHEMA":               "sometimes",
 	} {
 		t.Run(name, func(t *testing.T) {
 			clearEnv(t)
@@ -288,5 +298,50 @@ func TestCredentialsFromEnv(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Fatalf("%s: %v", c.what, err)
 		}
+	}
+}
+
+func TestFromEnvEventSettings(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("SNODRA_SERVICE_NAME", "orders-service")
+	app, err := New(FromEnv())
+	is(t, err, nil)
+	is(t, app.cfg.events.source, DefaultEventsSource)
+	is(t, app.cfg.events.outboxEnabled, true)
+	is(t, app.cfg.events.poll, 200*time.Millisecond)
+	is(t, app.cfg.events.batch, 100)
+	is(t, app.cfg.events.outboxAttempts, 10)
+	is(t, app.cfg.events.lease, 120*time.Second)
+	is(t, app.cfg.events.sendTimeout, 40*time.Second)
+	is(t, app.cfg.events.consumerEnabled, true)
+	is(t, app.cfg.events.consumerTries, 5)
+	is(t, app.cfg.events.storeInitSchema, true)
+
+	t.Setenv("SNODRA_EVENTS_SOURCE", "orders.events")
+	t.Setenv("SNODRA_OUTBOX_ENABLED", "false")
+	t.Setenv("SNODRA_OUTBOX_POLL_INTERVAL_MS", "250")
+	t.Setenv("SNODRA_OUTBOX_BATCH_SIZE", "7")
+	t.Setenv("SNODRA_OUTBOX_MAX_ATTEMPTS", "3")
+	t.Setenv("SNODRA_OUTBOX_LEASE_MS", "60000")
+	t.Setenv("SNODRA_CONSUMER_ENABLED", "false")
+	t.Setenv("SNODRA_CONSUMER_MAX_ATTEMPTS", "2")
+	t.Setenv("SNODRA_STORE_INIT_SCHEMA", "false")
+	app, err = New(FromEnv())
+	is(t, err, nil)
+	is(t, app.cfg.events.source, "orders.events")
+	is(t, app.cfg.events.outboxEnabled, false)
+	is(t, app.cfg.events.poll, 250*time.Millisecond)
+	is(t, app.cfg.events.batch, 7)
+	is(t, app.cfg.events.outboxAttempts, 3)
+	is(t, app.cfg.events.lease, time.Minute)
+	is(t, app.cfg.events.consumerEnabled, false)
+	is(t, app.cfg.events.consumerTries, 2)
+	is(t, app.cfg.events.storeInitSchema, false)
+
+	// The lease must outlast one send (40 s).
+	t.Setenv("SNODRA_OUTBOX_LEASE_MS", "1000")
+	_, err = New(FromEnv())
+	if err == nil || !strings.Contains(err.Error(), "SNODRA_OUTBOX_LEASE_MS") {
+		t.Fatalf("got %v, want an error naming SNODRA_OUTBOX_LEASE_MS", err)
 	}
 }

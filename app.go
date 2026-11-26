@@ -3,6 +3,7 @@ package snodra
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"maps"
 	"slices"
@@ -18,6 +19,10 @@ const runShutdownBudget = 15 * time.Second
 
 // killGrace bounds the wait for the connections' goroutines after they were stopped hard.
 const killGrace = 50 * time.Millisecond
+
+// eventsStopBudget bounds the shutdown's wait for the relay, the consumers and the store's
+// background work before the hub's own steps begin.
+const eventsStopBudget = 5 * time.Second
 
 var (
 	errShutDown       = errors.New("snodra: the app is shut down")
@@ -46,16 +51,30 @@ type App struct {
 	// sharedQueryTypes and subscriptionTypes are their names, sorted, fixed by Start.
 	handlers                                   map[string]*handler
 	commandTypes, queryTypes, sharedQueryTypes []string
-	subscriptionTypes                          []string         // of query_types or shared_query_types
-	calls                                      *pendingCalls    // the sent requests awaiting their answer
-	running                                    *runningRequests // the forwarded requests being served, for the hub's Cancel
-	subs                                       *servedSubscriptions
-	identity                                   *identityResolver
-	tokens                                     *tokenProvider // the access tokens towards the hubs; nil without JWT
-	tel                                        *telemetry     // what the library reports; never nil
-	gaugesEnded                                atomic.Bool    // Shutdown finished: the gauges read zeros
-	certMu                                     sync.Mutex
-	certSeen                                   map[string]struct{} // the client certificates any hub presented, for the rotation count
+	subscriptionTypes                          []string // of query_types or shared_query_types
+	// eventHandlers are the event handlers by processor and event type, and processors are
+	// their processors with their subscriptions, both fixed by Start.
+	eventHandlers map[string]map[string][]*eventHandler
+	processors    []*processor
+	// now is the application's clock: what the library stamps the times it sets itself with,
+	// and what a store implementing StoreLifecycle gets.
+	now       func() time.Time
+	outboxSeq atomic.Int64
+	// Background work: the relay, the consumers and the message store's own work. bgDone is
+	// closed once every one of them returned; nil before Start.
+	bgCtx       context.Context
+	bgCancel    context.CancelFunc
+	bgDone      chan struct{}
+	bgWait      sync.WaitGroup
+	calls       *pendingCalls    // the sent requests awaiting their answer
+	running     *runningRequests // the forwarded requests being served, for the hub's Cancel
+	subs        *servedSubscriptions
+	identity    *identityResolver
+	tokens      *tokenProvider // the access tokens towards the hubs; nil without JWT
+	tel         *telemetry     // what the library reports; never nil
+	gaugesEnded atomic.Bool    // Shutdown finished: the gauges read zeros
+	certMu      sync.Mutex
+	certSeen    map[string]struct{} // the client certificates any hub presented, for the rotation count
 
 	drainMu    sync.Mutex
 	drainUntil time.Time // when the shutdown's handler drain ends; zero before it
@@ -127,6 +146,8 @@ func New(opts ...Option) (*App, error) {
 		slots:          make(chan struct{}, cfg.maxConcurrent),
 		inflight:       newInflight(),
 		handlers:       map[string]*handler{},
+		eventHandlers:  map[string]map[string][]*eventHandler{},
+		now:            time.Now,
 		calls:          newPendingCalls(),
 		running:        newRunningRequests(),
 		subs:           newServedSubscriptions(cfg.maxSubscriptions, log),
@@ -140,14 +161,14 @@ func New(opts ...Option) (*App, error) {
 // [App.Ready] waits for the first acknowledged hub. When a registration failed, Start returns
 // every registration error, joined, and starts nothing.
 //
-// ctx is only checked on entry (Start returns its error when it is already done): it does not
-// bound the app, and cancelling it later stops nothing. [App.Shutdown] stops the app; [App.Run]
-// serves until its own context ends.
+// ctx is checked on entry and bounds the message store's schema preparation when the store
+// implements [StoreLifecycle]; it does not bound the app, and cancelling it later stops nothing.
+// [App.Shutdown] stops the app; [App.Run] serves until its own context ends.
 func (a *App) Start(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := a.start(); err != nil {
+	if err := a.start(ctx); err != nil {
 		return err
 	}
 	a.tel.observeGauges(a.gauges) // no lock held: the implementation may read at once
@@ -155,7 +176,7 @@ func (a *App) Start(ctx context.Context) error {
 }
 
 // start is Start's work under the app's lock.
-func (a *App) start() error {
+func (a *App) start(ctx context.Context) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	switch {
@@ -167,12 +188,156 @@ func (a *App) start() error {
 	if err := a.registrationError(); err != nil {
 		return err
 	}
+	if err := a.checkEventStartup(); err != nil {
+		return err
+	}
 	a.freezeTypes()
+	if err := a.prepareStore(ctx); err != nil {
+		return err
+	}
 	a.started = true
 	a.warnPlainTextCredential()
+	a.warnMemoryStores()
 	a.pool = newPool(a)
 	a.pool.start(a)
+	a.startBackground()
 	return nil
+}
+
+// warnMemoryStores says once, at startup, that the in-memory stores lose everything when the
+// process ends: they are for tests and local runs, not production.
+func (a *App) warnMemoryStores() {
+	if _, ok := a.cfg.store.(*MemoryMessageStore); ok {
+		a.log.Warn("the in-memory message store is not durable: everything it holds is gone when the process ends; use a database add-on in production")
+	}
+	if _, ok := a.cfg.eventStore.(*MemoryEventStore); ok {
+		a.log.Warn("the in-memory event store is not durable: everything it holds is gone when the process ends; use an event-store add-on in production")
+	}
+}
+
+// checkEventStartup refuses event handlers without the stores they need, naming the missing
+// add-on and the first handler in a stable order. Commands, queries and subscription queries need
+// neither store. A service that only publishes is not visible here (a builder cannot know that a
+// service publishes): its first [Publish] fails naming the missing add-on.
+func (a *App) checkEventStartup() error {
+	if len(a.eventHandlers) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(a.eventHandlers))
+	for name := range a.eventHandlers {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	first := ""
+	for _, name := range names {
+		for typ := range a.eventHandlers[name] {
+			if first == "" || typ < first {
+				first = typ
+			}
+		}
+	}
+	if a.cfg.store == nil {
+		return fmt.Errorf("snodra: the event handler for %s needs a message store: set one with WithStore "+
+			"(WithStore(snodra.NewMemoryMessageStore()) runs the in-memory one, not durable: tests and local runs)", first)
+	}
+	if a.cfg.eventStore == nil {
+		return fmt.Errorf("snodra: the event handler for %s needs an event store: set one with WithEventStore "+
+			"(WithEventStore(snodra.NewMemoryEventStore()) runs the in-memory one, not durable: tests and local runs)", first)
+	}
+	return nil
+}
+
+// prepareStore hands the message store the application's clock and prepares or checks its schema,
+// when it implements StoreLifecycle.
+func (a *App) prepareStore(ctx context.Context) error {
+	if a.cfg.store == nil {
+		return nil
+	}
+	lifecycle, ok := a.cfg.store.(StoreLifecycle)
+	if !ok {
+		return nil
+	}
+	lifecycle.UseClock(a.now)
+	var err error
+	if a.cfg.events.storeInitSchema {
+		err = lifecycle.InitSchema(ctx)
+	} else {
+		err = lifecycle.CheckSchema(ctx)
+	}
+	if err != nil {
+		what := "prepare its schema"
+		if !a.cfg.events.storeInitSchema {
+			what = "check its schema"
+		}
+		return fmt.Errorf("snodra: the message store %s could not %s: %w", a.cfg.store.Name(), what, err)
+	}
+	return nil
+}
+
+// startBackground starts what runs beside the hub connections until Shutdown: the message store's
+// own work, one outbox relay, and one consumer per processor with event handlers.
+func (a *App) startBackground() {
+	if a.cfg.store == nil {
+		return
+	}
+	settings := a.cfg.events
+	a.bgCtx, a.bgCancel = context.WithCancel(context.Background())
+	a.bgDone = make(chan struct{})
+	if lifecycle, ok := a.cfg.store.(StoreLifecycle); ok {
+		a.background("the message store's background work", func(ctx context.Context) error {
+			return lifecycle.Background(ctx)
+		})
+	}
+	if a.cfg.eventStore != nil {
+		if settings.outboxEnabled {
+			relay := newOutboxRelay(a)
+			a.background("the outbox relay", func(ctx context.Context) error {
+				relay.run(ctx)
+				return nil
+			})
+		}
+		if settings.consumerEnabled {
+			for _, processor := range a.processors {
+				p := processor
+				a.background("the consumer of processor "+p.name, func(ctx context.Context) error {
+					a.consumeProcessor(ctx, p)
+					return nil
+				})
+			}
+		}
+	}
+	done := a.bgDone
+	go func() {
+		a.bgWait.Wait()
+		close(done)
+	}()
+}
+
+// background runs fn in its own goroutine until the app's background context ends, logging its
+// error while the app still runs.
+func (a *App) background(what string, fn func(context.Context) error) {
+	a.bgWait.Add(1)
+	go func() {
+		defer a.bgWait.Done()
+		if err := fn(a.bgCtx); err != nil && a.bgCtx.Err() == nil {
+			a.log.Error(what+" failed", "error", err)
+		}
+	}()
+}
+
+// stopBackground stops the relay, the consumers and the store's background work, and waits for
+// them at most eventsStopBudget and at most until ctx ends.
+func (a *App) stopBackground(ctx context.Context) {
+	a.mu.Lock()
+	cancel, done := a.bgCancel, a.bgDone
+	a.mu.Unlock()
+	if cancel == nil {
+		return
+	}
+	cancel()
+	if done != nil {
+		_ = waitAll(ctx, eventsStopBudget, []<-chan struct{}{done})
+	}
 }
 
 // certPresented notes that a stream went live presenting the client certificate with fingerprint
@@ -243,9 +408,10 @@ func (a *App) Run(ctx context.Context) error {
 	return a.Shutdown(sctx)
 }
 
-// Shutdown leaves the hubs in order: a Register with no types to every acknowledged hub (so
-// it routes elsewhere at once), waiting at most 1 s for its acks; then every subscription served
-// here completes with a ReplyEnd; then the handlers in flight finish (at most 5 s), the ends
+// Shutdown leaves the hubs in order: the relay, the event processors and the message store's
+// background work stop first (at most 5 s); then a Register with no types to every acknowledged
+// hub (so it routes elsewhere at once), waiting at most 1 s for its acks; then every subscription
+// served here completes with a ReplyEnd; then the handlers in flight finish (at most 5 s), the ends
 // written meanwhile (waited for at most 2 s more); then each stream is half-closed and the hub
 // gets at most 2 s to finish its side.
 // Every wait is also bounded by ctx: when ctx ends first, the streams are dropped and ctx's
@@ -269,6 +435,9 @@ func (a *App) Shutdown(ctx context.Context) error {
 	close(a.stopped)
 	p := a.pool
 	a.mu.Unlock()
+	// The relay, the consumers and the store's background work stop first: the store is theirs
+	// while they run.
+	a.stopBackground(ctx)
 	defer close(a.closed)
 	if p == nil {
 		return nil

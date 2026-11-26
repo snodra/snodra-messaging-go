@@ -1,11 +1,12 @@
-// Package snodratest is the conformance kit for Snodra event-store add-ons. An add-on's own
-// test hands it a source it prepared and a way to make the add-on; the kit runs the nine
-// level-2 event-store checks as subtests, named exactly as the Rust kit names them.
+// Package snodratest is the conformance kit for Snodra add-ons: the event-store kit
+// ([EventStore]) and the message-store kit ([MessageStore]). An add-on's own test hands each kit
+// what it needs; the kit runs the level-2 checks as subtests, named exactly as the Rust kit names
+// them. An add-on that implements both interfaces proves both with two calls.
 //
 // The kit imports only the standard library and the core package, never a store client, so a
 // third-party add-on depends only on the core.
 //
-// An add-on proves itself with one call:
+// The event-store kit:
 //
 //	func TestMyEventStore(t *testing.T) {
 //		store := myeventstore.New()
@@ -27,14 +28,26 @@
 //   - markers records the processed-event marker of the at-least-once check: pass the message
 //     store's processed-event store. The kit records one marker, the way the consumer does.
 //
-// The checks run one after the other in the Rust kit's order, each on subscription names of its
-// own; a new name starts at the earliest position, so each check reads what the earlier ones
-// appended and looks only at its own events (by their id header). The first failing check stops
-// the kit and its message names the check and the event store. Every check is exported, so a
-// failing one can be run by itself on an EventStoreKit.
+// The message-store kit:
 //
-// Each check waits at most a minute for what the event store does in the background, and for
-// every call it makes: a publish, a subscribe or a close that does not answer fails the check
-// naming the step. The checks are the nine level-2 checks; the capability checks (replay, lag,
-// native dead letter, and the absent-capability checks) come with level 3.
+//	func TestMyMessageStore(t *testing.T) {
+//		snodratest.MessageStore(t, func() snodra.MessageStore {
+//			return mystore.New(ctx) // empty state, its schema ready
+//		})
+//	}
+//
+// It runs the nine level-2 outbox and processed-event checks on a store over empty state. Each
+// check gets its own store (open is called once per check), so checks never see each other's
+// data; every check is exported as a function taking a testing.TB and a store, so a failing one
+// can be run by itself.
+//
+// The checks run one after the other in the Rust kit's order, each on subscription names (event
+// store) or stores (message store) of its own. The first failing check stops the kit and its
+// message names the check and the add-on. Every check is exported, so a failing one can be run by
+// itself. Each check waits at most a minute for what the add-on does in the background, and for
+// every call it makes: a publish, a subscribe, a claim or a close that does not answer fails the
+// check naming the step.
+//
+// The checks are the nine level-2 checks of each kit; the capability checks (replay, lag, native
+// dead letter, and the absent-capability checks) and the processor checks come with level 3.
 package snodratest

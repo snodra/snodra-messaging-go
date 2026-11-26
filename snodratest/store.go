@@ -9,6 +9,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -418,7 +420,12 @@ func concurrentRelaysPublishEachEntryOnce(tb storeTB, store snodra.MessageStore)
 	}
 
 	start := make(chan struct{})
-	claimedTogether := make(chan struct{}, 2)
+	// ready is closed once both relays made their first claim, or once one of them failed before
+	// it could: an early error must not leave the other waiting at the barrier.
+	var arrived atomic.Int32
+	var readyOnce sync.Once
+	var ready = make(chan struct{})
+	open := func() { readyOnce.Do(func() { close(ready) }) }
 	type result struct {
 		published []string
 		err       error
@@ -431,13 +438,16 @@ func concurrentRelaysPublishEachEntryOnce(tb storeTB, store snodra.MessageStore)
 		for {
 			batch, err := outbox.Claim(context.Background(), owner, storeLongLease, 7)
 			if err != nil {
+				open()
 				results <- result{err: err}
 				return
 			}
 			if first {
 				first = false
-				claimedTogether <- struct{}{}
-				<-claimedTogether
+				if arrived.Add(1) == 2 {
+					open()
+				}
+				<-ready
 			}
 			if len(batch) == 0 {
 				results <- result{published: published}
@@ -445,6 +455,7 @@ func concurrentRelaysPublishEachEntryOnce(tb storeTB, store snodra.MessageStore)
 			}
 			ids := storeIDs(batch)
 			if err := outbox.MarkSent(context.Background(), ids); err != nil {
+				open()
 				results <- result{err: err}
 				return
 			}

@@ -52,6 +52,16 @@ const defaultHubAddress = "static://snodra-server:7000"
 //     SNODRA_SERVER_TLS_SERVER_NAME (which need it); default false
 //   - SNODRA_SERVER_TLS_CLIENT_CERT, SNODRA_SERVER_TLS_CLIENT_KEY: [ClientCertificate], which
 //     implies TLS (an error with SNODRA_SERVER_TLS=false)
+//   - SNODRA_EVENTS_SOURCE: [EventsSource] (default "snodra.events")
+//   - SNODRA_OUTBOX_ENABLED: [OutboxEnabled], true or false (default true)
+//   - SNODRA_OUTBOX_POLL_INTERVAL_MS, SNODRA_OUTBOX_BATCH_SIZE, SNODRA_OUTBOX_MAX_ATTEMPTS,
+//     SNODRA_OUTBOX_LEASE_MS: the relay's poll interval (200), batch size (100), sends of one
+//     entry (10) and claim lease (120000); the lease must be longer than a send (40 s)
+//   - SNODRA_CONSUMER_ENABLED: [ConsumerEnabled], true or false (default true)
+//   - SNODRA_CONSUMER_MAX_ATTEMPTS: the handler invocations per record, the first included
+//     (default 5)
+//   - SNODRA_STORE_INIT_SCHEMA: whether Start prepares the message store's schema, true (the
+//     default) or false when the service applies it itself
 //
 // The credential kinds (token, JWT, client certificate) exclude each other.
 func FromEnv() Option {
@@ -130,7 +140,90 @@ func (c *config) applyEnv(getenv func(string) string) error {
 	if err := c.applyCredentialsEnv(get); err != nil {
 		return err
 	}
+	if err := c.applyEventsEnv(get); err != nil {
+		return err
+	}
 	return c.applySendEnv(get)
+}
+
+// applyEventsEnv reads the event side's settings: the source, the relay and the consumer.
+func (c *config) applyEventsEnv(get func(string) (string, bool)) error {
+	if v, ok := get("SNODRA_EVENTS_SOURCE"); ok {
+		c.events.source = v
+	}
+	flag := func(name string, target *bool) error {
+		v, ok := get(name)
+		if !ok {
+			return nil
+		}
+		on, err := envFlag(name, v)
+		if err != nil {
+			return err
+		}
+		*target = on
+		return nil
+	}
+	if err := flag("SNODRA_OUTBOX_ENABLED", &c.events.outboxEnabled); err != nil {
+		return err
+	}
+	if err := flag("SNODRA_CONSUMER_ENABLED", &c.events.consumerEnabled); err != nil {
+		return err
+	}
+	if err := flag("SNODRA_STORE_INIT_SCHEMA", &c.events.storeInitSchema); err != nil {
+		return err
+	}
+	millis := func(name, v string) (time.Duration, error) {
+		n, err := envNumber(name, v, math.MaxInt64/int64(time.Millisecond))
+		return time.Duration(n) * time.Millisecond, err
+	}
+	if v, ok := get("SNODRA_OUTBOX_POLL_INTERVAL_MS"); ok {
+		d, err := millis("SNODRA_OUTBOX_POLL_INTERVAL_MS", v)
+		if err != nil {
+			return err
+		}
+		if d < time.Millisecond {
+			return fmt.Errorf("snodra: SNODRA_OUTBOX_POLL_INTERVAL_MS must be at least 1, got %q", v)
+		}
+		c.events.poll = d
+	}
+	if v, ok := get("SNODRA_OUTBOX_BATCH_SIZE"); ok {
+		n, err := envNumber("SNODRA_OUTBOX_BATCH_SIZE", v, math.MaxInt32)
+		if err != nil {
+			return err
+		}
+		if n < 1 {
+			return fmt.Errorf("snodra: SNODRA_OUTBOX_BATCH_SIZE must be at least 1, got %q", v)
+		}
+		c.events.batch = int(n)
+	}
+	if v, ok := get("SNODRA_OUTBOX_MAX_ATTEMPTS"); ok {
+		n, err := envNumber("SNODRA_OUTBOX_MAX_ATTEMPTS", v, math.MaxInt32)
+		if err != nil {
+			return err
+		}
+		if n < 1 {
+			return fmt.Errorf("snodra: SNODRA_OUTBOX_MAX_ATTEMPTS must be at least 1, got %q", v)
+		}
+		c.events.outboxAttempts = int(n)
+	}
+	if v, ok := get("SNODRA_OUTBOX_LEASE_MS"); ok {
+		d, err := millis("SNODRA_OUTBOX_LEASE_MS", v)
+		if err != nil {
+			return err
+		}
+		c.events.lease = d
+	}
+	if v, ok := get("SNODRA_CONSUMER_MAX_ATTEMPTS"); ok {
+		n, err := envNumber("SNODRA_CONSUMER_MAX_ATTEMPTS", v, math.MaxInt32)
+		if err != nil {
+			return err
+		}
+		if n < 1 {
+			return fmt.Errorf("snodra: SNODRA_CONSUMER_MAX_ATTEMPTS must be at least 1, got %q", v)
+		}
+		c.events.consumerTries = int(n)
+	}
+	return nil
 }
 
 // applyCredentialsEnv reads the instance's credential towards the hubs.

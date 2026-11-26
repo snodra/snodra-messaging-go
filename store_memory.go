@@ -31,6 +31,8 @@ const (
 //     are the application's clock (UseClock); until it is set, the wall clock.
 //   - A committed outbox append calls every OnAppend waker, so the relay publishes at once
 //     rather than at its next poll.
+//   - It has no schema and nothing in the background: StoreLifecycle's InitSchema and CheckSchema
+//     do nothing, and Background waits for the app to end.
 //   - Nothing is ever deleted but what the explicit Purge and DeleteMarkers calls remove: it keeps
 //     everything else it is given until the process ends. It is not durable: one process,
 //     everything lost when it ends. A service builder warns at startup that it is not durable.
@@ -69,6 +71,19 @@ func (s *MemoryMessageStore) UseClock(now func() time.Time) {
 	}
 	s.clock = now
 	s.mu.Unlock()
+}
+
+// InitSchema does nothing: the in-memory store needs no schema.
+func (s *MemoryMessageStore) InitSchema(context.Context) error { return nil }
+
+// CheckSchema does nothing: the in-memory store needs no schema.
+func (s *MemoryMessageStore) CheckSchema(context.Context) error { return nil }
+
+// Background runs nothing: it waits until ctx is done, as the lifecycle's background work lives
+// as long as the app.
+func (s *MemoryMessageStore) Background(ctx context.Context) error {
+	<-ctx.Done()
+	return nil
 }
 
 // Begin starts a transaction and returns a context that carries it.
@@ -312,6 +327,9 @@ func (tx *memoryTx) clear() {
 
 // reserve reserves for tx every record it wrote; a conflict when another live transaction holds
 // one.
+// TODO(spec-gap): SG-31 (an abandoned transaction keeps its reservations until the process ends;
+// the reference reserves the row until its transaction ends too, and conflicts the second writer,
+// snodra-messaging@64dde1e:snodra-messaging/src/main/kotlin/com/damoreira/snodra/messaging/store/memory/MemoryTables.kt:77).
 func (d *memoryData) reserve(tx *memoryTx) error {
 	for _, key := range tx.written() {
 		holder, held := d.reserved[key]
@@ -452,10 +470,14 @@ func (o memoryOutbox) Append(ctx context.Context, entry OutboxEntry) error {
 	return err
 }
 
-// Claim claims up to limit pending entries for owner under a lease.
+// Claim claims up to limit pending entries for owner under a lease. An empty owner is refused
+// with ErrInvalid: the store keeps "" for an entry nobody holds.
 func (o memoryOutbox) Claim(ctx context.Context, owner string, lease time.Duration, limit int) ([]OutboxEntry, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	if owner == "" {
+		return nil, fmt.Errorf("%w: a claim needs a non-empty owner", ErrInvalid)
 	}
 	if limit <= 0 {
 		return nil, nil
@@ -1029,6 +1051,7 @@ func (memorySagaMarkers) Insert(context.Context, string, string, time.Time) erro
 
 var (
 	_ MessageStore          = (*MemoryMessageStore)(nil)
+	_ StoreLifecycle        = (*MemoryMessageStore)(nil)
 	_ OutboxStore           = memoryOutbox{}
 	_ ProcessedStore        = memoryProcessed{}
 	_ ProcessedEvents       = memoryProcessed{}

@@ -2,6 +2,7 @@ package snodratest
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"sync"
@@ -167,4 +168,37 @@ func TestTheKitFailsADuplicateMarkerThatRecordsAgain(t *testing.T) {
 	expectCheckFailure(t, func(tb storeTB) {
 		processedMarkerRecordsOnce(tb, lyingProcessedStore{snodra.NewMemoryMessageStore()})
 	})
+}
+
+// failingRelayOutbox refuses the two relays' claims: the check must report the error instead of
+// leaving the other relay at the barrier.
+type failingRelayOutbox struct {
+	snodra.OutboxStore
+}
+
+func (f failingRelayOutbox) Claim(ctx context.Context, owner string, lease time.Duration, limit int) ([]snodra.OutboxEntry, error) {
+	if owner == "relay-a" || owner == "relay-b" {
+		return nil, errors.New("the claim failed for the test")
+	}
+	return f.OutboxStore.Claim(ctx, owner, lease, limit)
+}
+
+type failingRelayStore struct {
+	snodra.MessageStore
+}
+
+func (f failingRelayStore) Outbox() snodra.OutboxStore {
+	return failingRelayOutbox{f.MessageStore.Outbox()}
+}
+
+// TestTheKitReportsAnEarlyRelayError proves the concurrent-relay check reports a claim error
+// promptly: an early error must not leave the other relay blocked at the barrier.
+func TestTheKitReportsAnEarlyRelayError(t *testing.T) {
+	started := time.Now()
+	expectCheckFailure(t, func(tb storeTB) {
+		concurrentRelaysPublishEachEntryOnce(tb, failingRelayStore{snodra.NewMemoryMessageStore()})
+	})
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("the check took %v to report the claim error", elapsed)
+	}
 }

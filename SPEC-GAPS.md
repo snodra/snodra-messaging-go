@@ -441,7 +441,68 @@ settled; where an entry is settled its behaviour is the specification. The code 
 - **This library:** a transaction reserves every record it writes, so a second live transaction writing one of them
   fails at once with `ErrConflict`; the reservations are released by `Commit` or `Rollback`. A transaction abandoned
   without either keeps its reservations until the process ends: Go has no destructor to run (`store_memory.go`,
-  `memoryTx`). The caller must always defer `Rollback`.
+  `memoryTx`). The caller must always defer `Rollback`. The reference's in-memory store reserves the row the same way
+  and conflicts the second writer
+  (`snodra-messaging@64dde1e:snodra-messaging/src/main/kotlin/com/damoreira/snodra/messaging/store/memory/MemoryTables.kt:77`),
+  releasing it only when the transaction ends
+  (`snodra-messaging@64dde1e:snodra-messaging/src/main/kotlin/com/damoreira/snodra/messaging/store/memory/MemoryMessageStore.kt:143`);
+  `TestAnAbandonedTransactionKeepsItsReservation` pins it.
 - **Question:** should the specification require `Rollback` on every path and leave an abandoned transaction's
   reservations to the store, or name a maximum lifetime after which the store may release them?
+
+### SG-32: the relay's send timeout and the lease it must leave free
+
+- **Specification:** [message-store-add-ons.md, The stores](https://snodra.damoreira.com/docs/library-authors/message-store-add-ons/#the-stores)
+  says a claim holds the entries "under a lease" and that a failed attempt counts, but it does not say how long one
+  publish may take, how much of the lease a send must leave free, or how long a lease must be.
+- **This library:** one publish gets 40 s; a send without an answer in 40 s counts as a failed send, and a batch stops
+  one send timeout before its lease ends, so the lease must be longer than 40 s (`New` refuses a shorter one). The
+  references make the same choice with their own values: Kotlin's timeout is 45 s
+  (`snodra-messaging@64dde1e:snodra-messaging/src/main/kotlin/com/damoreira/snodra/messaging/events/OutboxPublisher.kt:197`)
+  and it refuses a lease not longer than that
+  (`snodra-messaging@64dde1e:snodra-messaging/src/main/kotlin/com/damoreira/snodra/messaging/config/SnodraMessagingProperties.kt:334`);
+  Rust's is 40 s (`snodra-messaging-rs/src/events/publisher.rs`, `OUTBOX_SEND_TIMEOUT`). The values appear in the
+  `SNODRA_OUTBOX_LEASE_MS` documentation and in `outbox.go`.
+- **Question:** should the specification fix the send timeout and the lease's lower bound, or leave them to each
+  library?
+
+### SG-33: the attempts and the wait of a failed record at level 2
+
+- **Specification:** [feature-levels.md, Level 2](https://snodra.damoreira.com/docs/library-authors/feature-levels/#level-2-events)
+  says events are handled at least once with duplicates skipped, and [message-store-add-ons.md](https://snodra.damoreira.com/docs/library-authors/message-store-add-ons/#the-stores)
+  says a record that exhausts its attempts is parked as a dead letter at level 3; neither page says how many handler
+  invocations a level-2 record gets, how long the wait between them is, or what happens when they all fail.
+- **This library:** five invocations, one second apart (`SNODRA_CONSUMER_MAX_ATTEMPTS`), then the record is logged at
+  error and acknowledged, so it does not block its key; level 3 parks it instead. The references use the same count
+  and wait (Kotlin `EventConsumer.kt`: `maxAttempts` 5 from
+  `snodra-messaging@64dde1e:snodra-messaging/src/main/kotlin/com/damoreira/snodra/messaging/config/SnodraMessagingProperties.kt:314`
+  and `backOffMs = 1000` at
+  `snodra-messaging@64dde1e:snodra-messaging/src/main/kotlin/com/damoreira/snodra/messaging/events/EventConsumer.kt:98`;
+  Rust `SNODRA_CONSUMER_MAX_ATTEMPTS` 5 and a 1 s backoff).
+- **Question:** should the specification name the level-2 attempts and wait, and say explicitly that a level-2 library
+  logs and skips what fails them?
+
+### SG-34: a malformed record at level 2
+
+- **Specification:** [messages.md](https://snodra.damoreira.com/docs/library-authors/messages/) says an event has a
+  type name and its payload is a JSON object, and
+  [feature-levels.md, Level 3](https://snodra.damoreira.com/docs/library-authors/feature-levels/#level-3-processors)
+  lists `INVALID` as a dead-letter reason (no type, a payload that is not a JSON object); no page says what a
+  level-2 library does with such a record.
+- **This library:** logs a warning and acknowledges it without a marker: nothing can handle it, and it blocks
+  nothing. Level 3 parks it as an `INVALID` letter instead. The reference marks it `INVALID` and sends it to its
+  sink (`snodra-messaging@64dde1e:snodra-messaging/src/main/kotlin/com/damoreira/snodra/messaging/events/EventConsumer.kt:48`).
+- **Question:** settled for level 3 by the dead-letter modes; for a level-2 library the log-and-skip above is the
+  library's.
+
+### SG-35: the re-subscribe backoff of a failed event subscription
+
+- **Specification:** [event-store-add-ons.md, The operations](https://snodra.damoreira.com/docs/library-authors/event-store-add-ons/#the-operations)
+  says an error from `next` means the subscription is broken, and the caller "closes it and subscribes again after a
+  backoff"; it does not give the wait or its cap.
+- **This library:** 1 s doubling to 30 s, back to 1 s once a subscription delivered a record. The references use the
+  same values: Kotlin `MIN` 1 s and `MAX` 30 s
+  (`snodra-messaging@64dde1e:snodra-messaging/src/main/kotlin/com/damoreira/snodra/messaging/events/Resubscribe.kt:74`),
+  Rust `RESUBSCRIBE_MIN` 1 s and `RESUBSCRIBE_MAX` 30 s (`snodra-messaging-rs/src/events/resubscribe.rs:16`).
+- **Question:** should the specification fix the re-subscribe backoff, or leave it to each library?
 

@@ -36,6 +36,13 @@ type config struct {
 	// handles itself ([AlwaysRouteThroughHub]).
 	alwaysRouteThroughHub bool
 
+	// The message store and the event store of the service, both optional: only events need
+	// them.
+	store      MessageStore
+	eventStore EventStore
+	// events is the event side's settings: source, relay, consumer and store schema.
+	events eventSettings
+
 	jwksURL, issuer string // the callers' tokens are verified against them; "": no token is an identity
 	rolesClaim      string // where a token's roles are; "": roles
 	forwardJWT      bool   // nested requests carry the handled request's authorization header
@@ -65,6 +72,7 @@ func defaultConfig() config {
 		loadFactor:       100,
 		codec:            JSON,
 		timings:          defaultTimings(),
+		events:           defaultEventSettings(),
 		forwardJWT:       true,
 		resolve:          lookupTargets,
 	}
@@ -249,6 +257,77 @@ func AlwaysRouteThroughHub(on bool) Option {
 	}
 }
 
+// WithStore sets the message store: the service's own database, where the outbox, the
+// processed-event markers, the dead letters, the processors' control state, the idempotent calls
+// and the sagas live. A store is the add-on of one database ([MessageStore]); the in-memory one is
+// [NewMemoryMessageStore]. Events need it; commands, queries and subscription queries do not, and
+// a service with only those starts without it. See
+// https://snodra.damoreira.com/docs/library-authors/message-store-add-ons/.
+func WithStore(store MessageStore) Option {
+	return func(c *config) error {
+		if store == nil {
+			return errors.New("snodra: WithStore needs a message store")
+		}
+		c.store = store
+		return nil
+	}
+}
+
+// WithEventStore sets the event store: where the relay publishes the service's events and where
+// its processors read them ([EventStore]). The in-memory one is [NewMemoryEventStore]. Events need
+// it; commands, queries and subscription queries do not, and a service with only those starts
+// without it. See https://snodra.damoreira.com/docs/library-authors/event-store-add-ons/.
+func WithEventStore(store EventStore) Option {
+	return func(c *config) error {
+		if store == nil {
+			return errors.New("snodra: WithEventStore needs an event store")
+		}
+		c.eventStore = store
+		return nil
+	}
+}
+
+// EventsSource is the event store's source the service publishes its events to and its processors
+// read (SNODRA_EVENTS_SOURCE). The default is [DefaultEventsSource], "snodra.events".
+func EventsSource(source string) Option {
+	return func(c *config) error {
+		source = strings.TrimSpace(source)
+		if source == "" {
+			return errors.New("snodra: EventsSource needs a non-empty source")
+		}
+		c.events.source = source
+		return nil
+	}
+}
+
+// OutboxEnabled says whether every instance runs the outbox relay (SNODRA_OUTBOX_ENABLED). On by
+// default. Turning it off on every instance stops the service's events being published; turning it
+// off on all but one is how a service keeps the order per key of what one instance publishes (see
+// https://snodra.damoreira.com/docs/library-authors/message-store-add-ons/#the-rule).
+func OutboxEnabled(on bool) Option {
+	return func(c *config) error {
+		c.events.outboxEnabled = on
+		return nil
+	}
+}
+
+// ConsumerEnabled says whether the instances read their event processors' subscriptions
+// (SNODRA_CONSUMER_ENABLED). On by default; a tool that only publishes turns it off.
+func ConsumerEnabled(on bool) Option {
+	return func(c *config) error {
+		c.events.consumerEnabled = on
+		return nil
+	}
+}
+
+// withEventSettings replaces the event side's settings (tests).
+func withEventSettings(settings eventSettings) Option {
+	return func(c *config) error {
+		c.events = settings
+		return nil
+	}
+}
+
 // withWriteHook sets the writer's hook (tests).
 func withWriteHook(h func(ctx context.Context, m *hubpb.ClientMessage)) Option {
 	return func(c *config) error {
@@ -302,7 +381,46 @@ func (c *config) validate() error {
 	if c.logger == nil {
 		c.logger = slog.Default()
 	}
+	if err := c.validateEvents(); err != nil {
+		return err
+	}
 	return c.validateCredentials()
+}
+
+// validateEvents checks the event side's settings: a source, a poll interval, a batch, the
+// attempts, and a lease longer than one send (a batch stops a send timeout before its lease ends,
+// so an entry is never claimable by another instance while this one still sends it).
+func (c *config) validateEvents() error {
+	if strings.TrimSpace(c.events.source) == "" {
+		return errors.New("snodra: no events source: set it with EventsSource or SNODRA_EVENTS_SOURCE")
+	}
+	if c.events.poll < time.Millisecond {
+		return fmt.Errorf("snodra: the outbox poll interval must be at least 1ms, got %v", c.events.poll)
+	}
+	if c.events.batch < 1 {
+		return fmt.Errorf("snodra: the outbox batch size must be at least 1, got %d", c.events.batch)
+	}
+	if c.events.outboxAttempts < 1 {
+		return fmt.Errorf("snodra: the outbox must try an entry at least once, got %d", c.events.outboxAttempts)
+	}
+	if c.events.sendTimeout < time.Millisecond {
+		return fmt.Errorf("snodra: the outbox send timeout must be at least 1ms, got %v", c.events.sendTimeout)
+	}
+	if c.events.lease <= c.events.sendTimeout {
+		return fmt.Errorf("snodra: the outbox lease (%v, SNODRA_OUTBOX_LEASE_MS) must be longer than a send (%v)",
+			c.events.lease, c.events.sendTimeout)
+	}
+	if c.events.consumerTries < 1 {
+		return fmt.Errorf("snodra: the consumer must try a record at least once, got %d", c.events.consumerTries)
+	}
+	if c.events.consumerBackoff < 0 {
+		return fmt.Errorf("snodra: the consumer's backoff must not be negative, got %v", c.events.consumerBackoff)
+	}
+	if c.events.resubscribeMin < time.Millisecond || c.events.resubscribeMax < c.events.resubscribeMin {
+		return fmt.Errorf("snodra: the re-subscribe backoff must be at least 1ms and not above its maximum (got %v and %v)",
+			c.events.resubscribeMin, c.events.resubscribeMax)
+	}
+	return nil
 }
 
 // validateCredentials checks the instance's credential towards the hubs: one kind, a token file

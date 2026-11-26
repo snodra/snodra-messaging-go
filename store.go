@@ -60,6 +60,33 @@ type MessageStore interface {
 	Sagas() SagaStores
 }
 
+// StoreLifecycle is what a message store may implement besides MessageStore: the builder calls
+// these methods around the store's life, and the six store ports stay as they are, so a
+// third-party add-on compiles against MessageStore alone. A store that does not implement it is
+// simply used as it is.
+//
+// [App.Start] hands the store the application's clock (UseClock), prepares its schema (InitSchema),
+// or checks a schema the service applies itself (CheckSchema), and then starts what the store runs
+// in the background (Background), if it implements this interface. A failing InitSchema or
+// CheckSchema fails Start; an error from Background while the app runs is logged.
+type StoreLifecycle interface {
+	// UseClock sets the application's clock: what the store stamps the times it sets itself
+	// with (an outbox entry's sending, a claim's lease). The clock must not call the store.
+	UseClock(now func() time.Time)
+	// InitSchema prepares what the store needs in its database, idempotently: indexes (MongoDB,
+	// with its retentions or TTLs), tables (SQL), nothing (memory). It runs when the service
+	// builds the store with schema initialization on (the default).
+	InitSchema(ctx context.Context) error
+	// CheckSchema fails unless the database has what the store needs, for example an SQL schema
+	// at the version it reads or later. It runs instead of InitSchema when the service applies
+	// the schema itself.
+	CheckSchema(ctx context.Context) error
+	// Background is what the store runs on its own while the app runs (for example the SQL
+	// add-on's purge of what the retentions let go), until ctx is done. A store with nothing to
+	// run may return at once or wait for ctx.
+	Background(ctx context.Context) error
+}
+
 // Tx is one transaction of the service's own database. A transaction must end with Commit or
 // Rollback; an operation that fails with ErrConflict is retried as a whole, in a new
 // transaction.
@@ -70,7 +97,9 @@ type MessageStore interface {
 // abandons everything and never fails; a transaction that ended already is a no-op.
 //
 // TODO(spec-gap): SG-31 (a transaction abandoned without Commit or Rollback keeps its write
-// reservations until the process ends: Go has no destructor to release them).
+// reservations until the process ends: Go has no destructor to release them; the reference's
+// in-memory store reserves a row the same way until its transaction ends,
+// snodra-messaging@64dde1e:snodra-messaging/src/main/kotlin/com/damoreira/snodra/messaging/store/memory/MemoryTables.kt:77).
 type Tx interface {
 	Commit(ctx context.Context) error
 	Rollback(ctx context.Context) error
@@ -111,9 +140,11 @@ type OutboxStore interface {
 	Append(ctx context.Context, entry OutboxEntry) error
 	// Claim returns at most limit pending entries, now held by owner until lease from the
 	// application's clock: those nobody holds, those whose holder's lease has passed, and those
-	// owner holds already (its lease renewed); never an entry another owner holds. The only
-	// order is (CreatedAt, Seq, ID): an entry owner still holds comes back in its place, so an
-	// entry whose send failed is retried before the later ones.
+	// owner holds already (its lease renewed); never an entry another owner holds. owner must
+	// not be empty: an empty owner is the store's mark for "nobody holds this entry", so a
+	// claimer cannot be told from it. The only order is (CreatedAt, Seq, ID): an entry owner
+	// still holds comes back in its place, so an entry whose send failed is retried before the
+	// later ones.
 	Claim(ctx context.Context, owner string, lease time.Duration, limit int) ([]OutboxEntry, error)
 	// MarkSent marks the entries sent: never claimed again, purged after the retention.
 	MarkSent(ctx context.Context, ids []string) error
@@ -767,6 +798,11 @@ func CheckOutboxPayload(typeName string, payload []byte) error {
 			return refuse("is deeper than %d (JSON depth), deeper than every store keeps, so it "+
 				"cannot be an outbox entry", MaxPayloadDepth)
 		}
+		var number *payloadNumberError
+		if errors.As(err, &number) {
+			// The payload is JSON; its number is what the contract refuses.
+			return refuse("%s", number.Error())
+		}
 		return refuse("is not JSON, so it cannot be an outbox entry: %v", err)
 	}
 	if kind != 'o' {
@@ -868,24 +904,39 @@ func payloadValue(decoder *json.Decoder, containers int) (kind byte, depth int, 
 // checkJSONNumber refuses a number no double holds (an overflow such as 1e400; an underflow
 // such as 1e-400 merely rounds to zero and is fine) and an integer outside the signed 64-bit
 // range. A number with a fraction or an exponent is a double, exactly as every store reads it.
+// Every refusal is a *payloadNumberError: the payload is valid JSON, only its number is not.
 func checkJSONNumber(text string) error {
 	if !strings.ContainsAny(text, ".eE") {
 		if _, err := strconv.ParseInt(text, 10, 64); err != nil {
-			return fmt.Errorf("holds the integer %s, outside the signed 64-bit range, so it cannot "+
-				"be an outbox entry", shownInteger(text))
+			return &payloadNumberError{
+				detail: "holds the integer " + shownInteger(text) + ", outside the signed 64-bit " +
+					"range, so it cannot be an outbox entry",
+			}
 		}
 		return nil
 	}
 	value, err := strconv.ParseFloat(text, 64)
 	if err != nil && !errors.Is(err, strconv.ErrRange) {
-		return fmt.Errorf("holds the number %s, which a double cannot read: %w", shownInteger(text), err)
+		return &payloadNumberError{
+			detail: "holds the number " + shownInteger(text) + ", which a double cannot read, so it " +
+				"cannot be an outbox entry (" + err.Error() + ")",
+		}
 	}
 	if math.IsInf(value, 0) || math.IsNaN(value) {
-		return fmt.Errorf("holds the number %s, which no double holds, so it cannot be an outbox "+
-			"entry", shownInteger(text))
+		return &payloadNumberError{
+			detail: "holds the number " + shownInteger(text) + ", which no double holds, so it " +
+				"cannot be an outbox entry",
+		}
 	}
 	return nil
 }
+
+// payloadNumberError is a number the outbox contract refuses in an otherwise valid JSON payload.
+type payloadNumberError struct {
+	detail string
+}
+
+func (e *payloadNumberError) Error() string { return e.detail }
 
 // shownInteger quotes a number token, cut so a bad payload cannot make the message long.
 func shownInteger(text string) string {

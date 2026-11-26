@@ -69,3 +69,31 @@ func TestCheckOutboxPayloadRefusesTheContract(t *testing.T) {
 		})
 	}
 }
+
+// A number the outbox contract refuses is reported as what it is: the payload is JSON, only its
+// number is out of the contract, not "not JSON".
+func TestCheckOutboxPayloadClassifiesANumberRefusal(t *testing.T) {
+	for _, test := range []struct {
+		payload string
+		wants   []string
+	}{
+		{`{"n":9223372036854775808}`, []string{"holds the integer", "outside the signed 64-bit range"}},
+		{`{"n":-9223372036854775809}`, []string{"holds the integer", "outside the signed 64-bit range"}},
+		{`{"n":1e400}`, []string{"holds the number", "no double holds"}},
+		{`{"n":-1e400}`, []string{"holds the number", "no double holds"}},
+	} {
+		err := CheckOutboxPayload("conformance.Event", []byte(test.payload))
+		if !errors.Is(err, ErrInvalid) {
+			t.Fatalf("%s: got %v, want ErrInvalid", test.payload, err)
+		}
+		message := err.Error()
+		if strings.Contains(message, "is not JSON") {
+			t.Errorf("%s: a number refusal read as bad JSON: %s", test.payload, message)
+		}
+		for _, want := range test.wants {
+			if !strings.Contains(message, want) {
+				t.Errorf("%s: %q does not say %q", test.payload, message, want)
+			}
+		}
+	}
+}

@@ -246,8 +246,9 @@ func (a *App) registrationError() error {
 	return errors.Join(a.regErrs...)
 }
 
-// freezeTypes lists the registered types for the Register, sorted. Called by Start with a.mu
-// held; the handlers do not change afterwards.
+// freezeTypes lists the registered types for the Register, sorted, and builds the event
+// processors with their subscriptions. Called by Start with a.mu held; the handlers do not change
+// afterwards.
 func (a *App) freezeTypes() {
 	a.commandTypes, a.queryTypes, a.sharedQueryTypes, a.subscriptionTypes = nil, nil, nil, nil
 	for name, h := range a.handlers {
@@ -267,4 +268,19 @@ func (a *App) freezeTypes() {
 	slices.Sort(a.queryTypes)
 	slices.Sort(a.sharedQueryTypes)
 	slices.Sort(a.subscriptionTypes)
+	a.freezeProcessors()
+}
+
+// freezeProcessors builds the processors of the registered event handlers, by name sorted (so the
+// default processor, "default", comes before the names that follow it alphabetically).
+func (a *App) freezeProcessors() {
+	a.processors = nil
+	names := make([]string, 0, len(a.eventHandlers))
+	for name := range a.eventHandlers {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	for _, name := range names {
+		a.processors = append(a.processors, newProcessor(a.cfg.service, name, a.cfg.events.source, a.eventHandlers[name]))
+	}
 }
