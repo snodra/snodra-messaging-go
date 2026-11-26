@@ -632,7 +632,8 @@ settled; where an entry is settled its behaviour is the specification. The code 
   (`github.com/rabbitmq/rabbitmq-stream-go-client@v1.10.0/pkg/stream/client.go:1005`), so it cannot set
   `snodra-member`. The add-on speaks the protocol's low-level commands itself
   (`rabbitmq/internal/streamwire`) and keeps the client's `pkg/amqp` for AMQP 1.0 message encoding; the add-on's
-  tests use its high-level API only to create streams. `TestSingleActiveConsumerAndSnodraMember` pins the property on
+  tests use its high-level API to create streams and, in the AMQP layout test, to decode one published message.
+  `TestSingleActiveConsumerAndSnodraMember` pins the property on
   a real broker, and `TestStoredOffsetIsTheNextOne` pins the consumer-update reply with the stored offset.
 - **Question:** should the specification name the low-level capabilities a client must expose (and so allow a client
   replacement), or require the Go client to add custom subscribe properties?
@@ -644,8 +645,9 @@ settled; where an entry is settled its behaviour is the specification. The code 
   source's partitions". A consumer written with another client (the official Go client cannot set the property) reads
   the same stream without one.
 - **This library:** the management-API reader falls back to `<connection name>:<subscription id>` for a consumer
-  without `snodra-member`, and counts it as a member, so a reset refuses. The Rust add-on does the same
-  (`snodra-messaging-rs/crates/snodra-messaging-rabbitmq/src/management.rs`).
+  without `snodra-member`, and counts it as a member, so a reset refuses. The Kotlin add-on does the same
+  (`snodra-messaging-rabbitmq/src/main/kotlin/com/damoreira/snodra/messaging/rabbitmq/RabbitManagement.kt:168`), as
+  does the Rust add-on (`snodra-messaging-rs/crates/snodra-messaging-rabbitmq/src/management.rs:197`).
 - **Question:** is a consumer without the property a member (a reset must refuse while it reads), or is it invisible
   to the members list?
 
@@ -655,10 +657,12 @@ settled; where an entry is settled its behaviour is the specification. The code 
   makes positions opaque and [the RabbitMQ wire rules](https://snodra.damoreira.com/docs/library-authors/event-store-add-ons/#rabbitmq-streams-wire-rules)
   say the position is the offset, but no page says how an add-on learns a stream's first offset and head. The stream
   protocol's statistics name chunk ids, not offsets.
-- **This library:** reads the first and the last chunk on the partition's leader, as the Rust add-on does: the first
-  chunk's first offset is the first position, the last chunk's first offset plus its records is the head. A stream is
-  empty only when both reads are silent within 1.5 s; one silent read beside one that answered is a failure, never a
-  shortened or empty stream. `TestReplayOnlyWithTheManagementAPI` pins a plan's `from`/`until` from these reads.
+- **This library:** reads the first and the last chunk on the partition's leader, as the Kotlin and Rust add-ons do
+  (`snodra-messaging-rabbitmq/src/main/kotlin/com/damoreira/snodra/messaging/rabbitmq/RabbitReads.kt:100`,
+  `snodra-messaging-rs/crates/snodra-messaging-rabbitmq/src/read.rs:134`): the first chunk's first offset is the first
+  position, the last chunk's first offset plus its records is the head. A stream is empty only when both reads are
+  silent within 1.5 s; one silent read beside one that answered is a failure, never a shortened or empty stream.
+  `TestReplayOnlyWithTheManagementAPI` pins a plan's `from`/`until` from these reads.
 - **Question:** should the specification define how bounds are read (or a minimum bound), or leave it to each add-on?
 
 ### SG-46: `browse` on a library without an event browser
@@ -666,8 +670,7 @@ settled; where an entry is settled its behaviour is the specification. The code 
 - **Specification:** [RabbitMQ Streams wire rules](https://snodra.damoreira.com/docs/library-authors/event-store-add-ons/#rabbitmq-streams-wire-rules)
   says the RabbitMQ Streams add-on declares `browse`, `lag` and `native-dead-letter`, and `replay` with the
   management API; the same page says a library without an event browser (the Kotlin library today) may still declare
-  `browse` for a store another program can read. The Go core has no event-browser interface, and the level-2 design
-  leaves browsers out.
+  `browse` for a store another program can read. The Go core has no event-browser interface.
 - **This library:** declares `lag`, `native-dead-letter` and (with the management API) `replay`, never `browse`; its
   `EventStore` has no browser to return. A browser program with its own RabbitMQ add-on can still read the streams.
 - **Question:** should the Go and Python add-on pages say `browse` is not declared when the library has no browser, or
@@ -695,7 +698,10 @@ settled; where an entry is settled its behaviour is the specification. The code 
   its partition's leader, and a failure after some were stored leaves them moved.
 - **This library:** validates every range and every head first, refuses while a member reads, stores each from in
   turn, then reads every one back. A store or read-back failure is reported; the offsets already stored are not
-  restored (the Rust add-on does the same). A range read back at another offset is a subscribers-active refusal.
-  `TestReplayOnlyWithTheManagementAPI` pins the successful path and the refusal while a subscription reads.
+  restored. The Kotlin add-on has the same limit
+  (`snodra-messaging-rabbitmq/src/main/kotlin/com/damoreira/snodra/messaging/rabbitmq/RabbitSubscriptionAdmin.kt:54`),
+  as does the Rust add-on (`snodra-messaging-rs/crates/snodra-messaging-rabbitmq/src/admin.rs:235`). A range read back
+  at another offset is a subscribers-active refusal. `TestReplayOnlyWithTheManagementAPI` pins the successful path and
+  the refusal while a subscription reads.
 - **Question:** should a reset roll back (best effort) when a later partition's store fails, or should the
   specification say a failed apply may leave some partitions moved and the planner re-runs it?

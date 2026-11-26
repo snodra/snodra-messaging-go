@@ -69,6 +69,11 @@ type part struct {
 	owed      bool
 	unstored  uint64
 	lastStore time.Time
+	// storeMu serializes this partition's offset writes, and lastStoreOffset is the greatest
+	// one stored (or read on activation): an older acknowledgement never regresses it.
+	storeMu            sync.Mutex
+	lastStoreOffset    uint64
+	hasLastStoreOffset bool
 }
 
 // memberID is a random id per subscription instance, the `snodra-member` subscribe property.
@@ -214,20 +219,23 @@ func (s *subscription) storeLoop() {
 		case <-s.done:
 			return
 		case <-ticker.C:
+			type pending struct {
+				part   *part
+				offset uint64
+			}
+			var stores []pending
 			s.mu.Lock()
 			for _, p := range s.parts {
 				if p.active && p.hasAcked && p.unstored > 0 {
-					acked := p.acked
+					stores = append(stores, pending{part: p, offset: p.acked})
 					p.unstored = 0
 					p.lastStore = time.Now()
-					go func() {
-						if err := p.conn.StoreOffset(s.spec.Name, p.stream, acked); err != nil {
-							s.recordError(fmt.Sprintf("storing the offset of %s: %v", p.stream, err))
-						}
-					}()
 				}
 			}
 			s.mu.Unlock()
+			for _, store := range stores {
+				s.storeOffset(store.part, store.offset)
+			}
 		}
 	}
 }
@@ -321,6 +329,16 @@ func (s *subscription) activate(p *part, correlationID uint32) {
 		_ = p.conn.ConsumerUpdateResponse(correlationID, streamwire.Next())
 		return
 	}
+	// The watermark moves before the partition becomes active: a store already in flight
+	// finishes first, and every later one sees the new position.
+	p.storeMu.Lock()
+	p.lastStoreOffset = 0
+	p.hasLastStoreOffset = false
+	if found {
+		p.lastStoreOffset = stored
+		p.hasLastStoreOffset = true
+	}
+	p.storeMu.Unlock()
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
@@ -392,12 +410,34 @@ func (s *subscription) deactivate(p *part, correlationID uint32) {
 	_ = p.conn.ConsumerUpdateResponse(correlationID, streamwire.Next())
 }
 
-// storeAndVerify stores acked as the next offset and waits until the broker reads it back.
-func (s *subscription) storeAndVerify(p *part, acked uint64) {
-	if err := p.conn.StoreOffset(s.spec.Name, p.stream, acked); err != nil {
+// storeOffset stores offset unless a greater one is already stored on this partition.
+func (s *subscription) storeOffset(p *part, offset uint64) {
+	p.storeMu.Lock()
+	defer p.storeMu.Unlock()
+	if !shouldStoreOffset(p.hasLastStoreOffset, p.lastStoreOffset, offset) {
+		return
+	}
+	if err := p.conn.StoreOffset(s.spec.Name, p.stream, offset); err != nil {
 		s.recordError(fmt.Sprintf("storing the offset of %s: %v", p.stream, err))
 		return
 	}
+	p.lastStoreOffset = offset
+	p.hasLastStoreOffset = true
+	s.mu.Lock()
+	p.stored = offset
+	p.hasStored = true
+	s.mu.Unlock()
+}
+
+// shouldStoreOffset reports whether offset moves the partition's stored position: a store of
+// the same or an older offset would regress it.
+func shouldStoreOffset(has bool, last, offset uint64) bool {
+	return !has || offset > last
+}
+
+// storeAndVerify stores acked as the next offset and waits until the broker reads it back.
+func (s *subscription) storeAndVerify(p *part, acked uint64) {
+	s.storeOffset(p, acked)
 	deadline := time.Now().Add(storeWait)
 	for {
 		ctx, cancel := context.WithDeadline(context.Background(), deadline)
@@ -496,6 +536,10 @@ func (s *subscription) Ack(segment, position string) error {
 		return err
 	}
 	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil
+	}
 	p := s.part(segment)
 	if p == nil || !p.active {
 		s.mu.Unlock()
@@ -532,9 +576,7 @@ func (s *subscription) Ack(segment, position string) error {
 	}
 	s.mu.Unlock()
 	if store {
-		if err := p.conn.StoreOffset(s.spec.Name, p.stream, next); err != nil {
-			s.recordError(fmt.Sprintf("storing the offset of %s: %v", p.stream, err))
-		}
+		s.storeOffset(p, next)
 	}
 	return nil
 }

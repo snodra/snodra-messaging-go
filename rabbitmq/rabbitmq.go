@@ -110,7 +110,9 @@ type Config struct {
 	// TLS connects with TLS; nil connects in the clear.
 	TLS *tls.Config
 	// ManagementURL is the management API's root (`http://rabbitmq:15672`, no credentials in
-	// it). Setting it declares `replay`; Open asks it once.
+	// it). Setting it declares `replay`; Open asks it once. An https URL is verified against
+	// the system roots: there is no separate management CA setting here (the stream
+	// connection's TLS configuration is Config.TLS).
 	ManagementURL string
 	// ManagementUsername and ManagementPassword authenticate to it (default: the stream user's).
 	ManagementUsername string

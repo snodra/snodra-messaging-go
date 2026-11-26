@@ -402,6 +402,23 @@ func TestTheNativeDeadLetterStreamTakesALetter(t *testing.T) {
 	}
 }
 
+// An event over the 1 MiB frame is refused for good; a missing source is a failure another try
+// may survive.
+func TestPublishRefusesAnOversizedEventAndAFailureIsRetryable(t *testing.T) {
+	broker := rabbitBroker(t)
+	source := broker.stream(t)
+	store := broker.store(t)
+	oversized := event(source, "oversized", nil)
+	oversized.Payload = make([]byte, (1<<20)+1)
+	if err := store.Publish(t.Context(), oversized); !errors.Is(err, snodra.ErrRejected) {
+		t.Fatalf("an event over 1 MiB: %v, want ErrRejected", err)
+	}
+	missing := uniqueName("missing")
+	if err := store.Publish(t.Context(), event(missing, "missing", nil)); !errors.Is(err, snodra.ErrFailed) {
+		t.Fatalf("publishing to a missing stream: %v, want ErrFailed", err)
+	}
+}
+
 func strPtr(value string) *string { return &value }
 
 func closeSubscription(t *testing.T, sub snodra.EventSubscription) {

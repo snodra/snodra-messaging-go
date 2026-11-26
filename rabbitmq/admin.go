@@ -258,8 +258,18 @@ func (a *admin) Apply(ctx context.Context, ranges []snodra.ReplayRange) error {
 		}
 		moves = append(moves, move{part: found, from: from})
 	}
+	connections := make(map[string]*streamwire.Conn, len(moves))
+	defer func() {
+		for _, connection := range connections {
+			_ = connection.Close()
+		}
+	}()
 	for _, move := range moves {
-		address, err := a.leader(ctx, move.part.part.stream)
+		stream := move.part.part.stream
+		if connections[stream] != nil {
+			continue
+		}
+		address, err := a.leader(ctx, stream)
 		if err != nil {
 			return err
 		}
@@ -267,33 +277,55 @@ func (a *admin) Apply(ctx context.Context, ranges []snodra.ReplayRange) error {
 		if err != nil {
 			return err
 		}
-		err = connection.StoreOffset(a.spec.Name, move.part.part.stream, move.from)
-		_ = connection.Close()
-		if err != nil {
+		connections[stream] = connection
+	}
+	for _, move := range moves {
+		connection := connections[move.part.part.stream]
+		if err := connection.StoreOffset(a.spec.Name, move.part.part.stream, move.from); err != nil {
 			return classify("store offset", err)
 		}
 	}
-	// Read back once all are stored: an instance that joined meanwhile and stored its own
-	// position undoes the reset, which then fails.
+	// Read every offset back on the connection that stored it, waiting for the broker's
+	// asynchronous store instead of reading a fresh connection too early. An instance that
+	// joined meanwhile and stored its own position undoes the reset, which then fails.
 	for _, move := range moves {
-		address, err := a.leader(ctx, move.part.part.stream)
-		if err != nil {
+		connection := connections[move.part.part.stream]
+		if err := a.waitStored(ctx, connection, move.part.part.stream, move.from, members); err != nil {
 			return err
-		}
-		connection, err := a.store.dial(ctx, address, storeConnection)
-		if err != nil {
-			return err
-		}
-		stored, found, err := connection.QueryOffset(ctx, a.spec.Name, move.part.part.stream)
-		_ = connection.Close()
-		if err != nil {
-			return classify("query offset", err)
-		}
-		if !found || stored != move.from {
-			return &snodra.SubscribersActiveError{Members: members}
 		}
 	}
 	return nil
+}
+
+// waitStored waits until the broker reads back exactly want, or reports another writer or a
+// store that never became visible within storeWait.
+func (a *admin) waitStored(ctx context.Context, connection *streamwire.Conn, stream string, want uint64, members []string) error {
+	deadline := time.Now().Add(storeWait)
+	for {
+		queryCtx, cancel := context.WithDeadline(ctx, deadline)
+		stored, found, err := connection.QueryOffset(queryCtx, a.spec.Name, stream)
+		cancel()
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err == nil {
+			switch {
+			case found && stored == want:
+				return nil
+			case found && stored != want:
+				return &snodra.SubscribersActiveError{Members: members}
+			}
+		}
+		if time.Now().After(deadline) {
+			if err == nil {
+				return fmt.Errorf("%w: the offset of %s on %s was stored as %d but no read-back came within %v",
+					snodra.ErrFailed, a.spec.Name, stream, want, storeWait)
+			}
+			return fmt.Errorf("%w: the offset of %s on %s was stored as %d but did not read back within %v: %w",
+				snodra.ErrFailed, a.spec.Name, stream, want, storeWait, err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 func (a *admin) leader(ctx context.Context, stream string) (string, error) {
@@ -414,10 +446,9 @@ func offsetAt(ctx context.Context, store *EventStore, part nowPart, timestampMs 
 		return 0, classify("subscribe", err)
 	}
 	deadline := time.Now().Add(adminBudget)
+	timer := time.NewTimer(time.Until(deadline))
+	defer timer.Stop()
 	for {
-		if time.Now().After(deadline) {
-			return part.head, nil
-		}
 		select {
 		case frame := <-frames:
 			header, err := streamwire.ParseChunkHeader(frame)
@@ -434,8 +465,12 @@ func offsetAt(ctx context.Context, store *EventStore, part nowPart, timestampMs 
 			if header.FirstOffset+uint64(header.Records) >= part.head {
 				return part.head, nil
 			}
+			_ = connection.Credit(1, 1)
 		case <-ctx.Done():
 			return 0, ctx.Err()
+		case <-timer.C:
+			return 0, fmt.Errorf("%w: the timestamp read of %s did not reach %d within %v",
+				snodra.ErrFailed, part.part.stream, timestampMs, adminBudget)
 		}
 	}
 }

@@ -152,11 +152,17 @@ func (c *Conn) Metadata(ctx context.Context, streams ...string) (Metadata, error
 		})
 	}
 	streamCount := d.u32()
+	if streamCount > 1<<16 {
+		return Metadata{}, fmt.Errorf("rabbitmq stream: a metadata answer names %d streams", streamCount)
+	}
 	for i := uint32(0); i < streamCount; i++ {
 		name := d.str()
 		code := d.u16()
 		leader := d.u16()
 		replicaCount := d.u32()
+		if replicaCount > 1<<16 {
+			return Metadata{}, fmt.Errorf("rabbitmq stream: a metadata answer names %d replicas", replicaCount)
+		}
 		replicas := make([]uint16, 0, replicaCount)
 		for j := uint32(0); j < replicaCount; j++ {
 			replicas = append(replicas, d.u16())

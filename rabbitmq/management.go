@@ -141,8 +141,14 @@ func parseConsumers(body any) ([]consumer, error) {
 		if !ok {
 			return nil, shape("a consumer without properties")
 		}
-		name, _ := properties["name"].(string)
-		member, _ := properties[memberProperty].(string)
+		name, err := text(properties["name"])
+		if err != nil {
+			return nil, err
+		}
+		member, err := text(properties[memberProperty])
+		if err != nil {
+			return nil, err
+		}
 		if member == "" {
 			// Another client's consumer (the official Go client cannot set the property): its
 			// connection and subscription id tell it apart.
@@ -154,4 +160,16 @@ func parseConsumers(body any) ([]consumer, error) {
 		all = append(all, consumer{name: name, stream: stream, member: member})
 	}
 	return all, nil
+}
+
+// text is an optional string property: absent is empty, another type is a malformed answer.
+func text(value any) (string, error) {
+	switch value := value.(type) {
+	case nil:
+		return "", nil
+	case string:
+		return value, nil
+	default:
+		return "", fmt.Errorf("%w: the RabbitMQ management API's consumer list has an unexpected shape: a property is %T, not a string", snodra.ErrFailed, value)
+	}
 }

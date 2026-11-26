@@ -132,11 +132,13 @@ func Dial(ctx context.Context, cfg Config) (*Conn, error) {
 		return nil, fmt.Errorf("rabbitmq stream: connecting to %s: %w", cfg.Address, err)
 	}
 	if cfg.TLS != nil {
-		tlsConn := tls.Client(raw, cfg.TLS)
-		if deadline, ok := ctx.Deadline(); ok {
+		handshakeCtx, cancel := context.WithTimeout(ctx, cfg.RequestTimeout)
+		defer cancel()
+		tlsConn := tls.Client(raw, clientTLS(cfg.TLS, cfg.Address))
+		if deadline, ok := handshakeCtx.Deadline(); ok {
 			_ = tlsConn.SetDeadline(deadline)
 		}
-		if err := tlsConn.HandshakeContext(ctx); err != nil {
+		if err := tlsConn.HandshakeContext(handshakeCtx); err != nil {
 			_ = raw.Close()
 			return nil, fmt.Errorf("rabbitmq stream: the TLS handshake with %s: %w", cfg.Address, err)
 		}
@@ -158,6 +160,19 @@ func Dial(ctx context.Context, cfg Config) (*Conn, error) {
 		return nil, err
 	}
 	return c, nil
+}
+
+// clientTLS is the configuration one connection uses: a clone, with the dial address's host
+// as ServerName when the caller set none (a bare configuration cannot verify a certificate
+// without it).
+func clientTLS(config *tls.Config, address string) *tls.Config {
+	cloned := config.Clone()
+	if cloned.ServerName == "" {
+		if host, _, err := net.SplitHostPort(address); err == nil {
+			cloned.ServerName = strings.Trim(host, "[]")
+		}
+	}
+	return cloned
 }
 
 // SetDeliverHandler sets what receives a deliver frame.
@@ -269,13 +284,17 @@ func (c *Conn) handshake(ctx context.Context) error {
 	}
 
 	var tune tuneFrame
+	tuneCtx, tuneCancel := context.WithTimeout(ctx, c.requestTimeout())
 	select {
 	case tune = <-c.tune:
-	case <-ctx.Done():
-		return ctx.Err()
+	case <-tuneCtx.Done():
+		tuneCancel()
+		return fmt.Errorf("rabbitmq stream: the broker did not tune within %v: %w", c.requestTimeout(), tuneCtx.Err())
 	case <-c.done:
+		tuneCancel()
 		return fmt.Errorf("rabbitmq stream: the connection closed during the handshake: %w", c.Err())
 	}
+	tuneCancel()
 	maxFrame := uint32(MaxFrame)
 	if tune.maxFrame != 0 && tune.maxFrame < maxFrame {
 		maxFrame = tune.maxFrame
@@ -344,6 +363,7 @@ func (c *Conn) readLoop() {
 			}
 			c.pendingMu.Lock()
 			waiting := c.pending[frame.CorrelationID]
+			delete(c.pending, frame.CorrelationID)
 			c.pendingMu.Unlock()
 			if waiting != nil {
 				select {
@@ -474,10 +494,24 @@ func readFrame(r *bufio.Reader) (Frame, error) {
 	return frame, nil
 }
 
-// Request sends a request and waits for its response (or the context, or the connection).
+// requestTimeout is how long one request waits when its context names no deadline.
+func (c *Conn) requestTimeout() time.Duration {
+	if c.cfg.RequestTimeout > 0 {
+		return c.cfg.RequestTimeout
+	}
+	return 10 * time.Second
+}
+
+// Request sends a request and waits for its response (or the context, or the connection). A
+// context without a deadline gets one of the connection's request timeout.
 func (c *Conn) Request(ctx context.Context, key uint16, content []byte) (Frame, error) {
 	if c.IsClosed() {
 		return Frame{}, fmt.Errorf("rabbitmq stream: the connection is closed: %w", c.Err())
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, c.requestTimeout())
+		defer cancel()
 	}
 	correlationID := c.nextCorr.Add(1)
 	waiting := make(chan result, 1)
@@ -522,7 +556,7 @@ func (c *Conn) SendFrame(key, version uint16, content []byte) error {
 	binary.BigEndian.PutUint16(head[6:], version)
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	_ = c.netConn.SetWriteDeadline(time.Now().Add(c.cfg.RequestTimeout))
+	_ = c.netConn.SetWriteDeadline(time.Now().Add(c.requestTimeout()))
 	if _, err := c.writer.Write(head[:]); err != nil {
 		return err
 	}
