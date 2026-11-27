@@ -732,8 +732,9 @@ settled; where an entry is settled its behaviour is the specification. The code 
   processor an instance does not report; nothing says what a library does with a reset handler registered for a
   processor that never runs.
 - **This library:** `App.Start` fails naming the processor ("the reset handler for processor X needs an event handler
-  in that processor"). The reference registers reset handlers per processor and a processor with no event handler
-  and no saga never starts, so its handler is dead without an error
-  (`snodra-messaging@64dde1e:snodra-messaging/src/main/kotlin/com/damoreira/snodra/messaging/control/ProcessorControl.kt:384`).
+  in that processor"). The reference builds its processors from the handlers that run, so a processor with no event
+  handler and no saga never starts and its reset handler is dead without an error
+  (`snodra-messaging@64dde1e:snodra-messaging/src/main/kotlin/com/damoreira/snodra/messaging/events/LocalEventDispatcher.kt:80`,
+  `snodra-messaging@64dde1e:snodra-messaging/src/main/kotlin/com/damoreira/snodra/messaging/events/EventProcessors.kt:51`).
 - **Question:** refuse at startup (this library), ignore the handler, or run a processor that exists only to hold
   reset handlers?

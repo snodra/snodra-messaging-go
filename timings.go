@@ -57,6 +57,9 @@ type timings struct {
 	// resetStopLimit is how long a reset prepare or a poll waits for a consumer to leave its
 	// subscription (the reference waits 30 s for the record in hand).
 	resetStopLimit time.Duration
+	// resetLeaseRenew is how often an executing reset renews its lease, at most a third of the
+	// lease (the reference renews every 10 s).
+	resetLeaseRenew time.Duration
 	// dnsRefresh is how often a dns:/// target is resolved again.
 	dnsRefresh time.Duration
 }
@@ -167,6 +170,7 @@ func defaultTimings() timings {
 		failingWindow:      60 * time.Second,
 		resetExecuteLimit:  120 * time.Second,
 		resetStopLimit:     30 * time.Second,
+		resetLeaseRenew:    resetLeaseExtension,
 		dnsRefresh:         30 * time.Second,
 	}
 }

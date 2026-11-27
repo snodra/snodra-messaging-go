@@ -77,6 +77,28 @@ func sendControl(t *testing.T, s *fakehub.Stream, msg *hubpb.ServerMessage) *hub
 	return s.RecvControlReply(t)
 }
 
+// l3ServingAt is l3Serving on a given application clock, set before Start so the store and the
+// processors stamp and compare the same times.
+func l3ServingAt(t *testing.T, hub *fakehub.Hub, now func() time.Time, register func(*App), opts ...Option) (*App, *fakehub.Stream) {
+	t.Helper()
+	base := []Option{
+		Hubs(hub.Addr()), WithStore(NewMemoryMessageStore()), WithEventStore(NewMemoryEventStore()),
+		withEventSettings(consumerSettings()), withTimings(controlTimings()), OutboxEnabled(false),
+	}
+	app := newApp(t, append(base, opts...)...)
+	app.now = now
+	register(app)
+	if err := app.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	s := hub.Next(t)
+	s.RecvRegister(t)
+	s.Recv(t)
+	s.Ack(t, fakehub.Ack("hub-1"))
+	is(t, app.Ready(ctxWithin(t, time.Second)), nil)
+	return app, s
+}
+
 // waitSubscriptionMembers waits until the subscription has want members.
 func waitSubscriptionMembers(t *testing.T, events EventStore, spec SubscriptionSpec, want int) {
 	t.Helper()
@@ -412,8 +434,9 @@ func TestAResetLeaseRenewalAndExpiry(t *testing.T) {
 	hub := fakehub.Start(t)
 	store := NewMemoryMessageStore()
 	events := NewMemoryEventStore()
+	clock := newStoreClock()
 	var handled atomic.Int64
-	app, s := l3Serving(t, hub, func(app *App) {
+	app, s := l3ServingAt(t, hub, clock.Now, func(app *App) {
 		if err := HandleEvent(app, func(context.Context, OrderPlaced) error {
 			handled.Add(1)
 			return nil
@@ -422,13 +445,14 @@ func TestAResetLeaseRenewalAndExpiry(t *testing.T) {
 		}
 	}, WithStore(store), WithEventStore(events))
 	okReply(t, sendControl(t, s, resetPrepareControl("prepare-1", DefaultProcessor, "op-1", 1000)), "prepare")
-	time.Sleep(300 * time.Millisecond)
+	clock.Advance(400 * time.Millisecond)
 	okReply(t, sendControl(t, s, resetPrepareControl("prepare-2", DefaultProcessor, "op-1", 1000)), "renewal")
-	time.Sleep(500 * time.Millisecond)
+	clock.Advance(700 * time.Millisecond) // past the first lease, inside the renewed one
 	state, err := store.Control().Get(context.Background(), DefaultProcessor)
 	if err != nil || state.Operation == nil || state.Operation.ID != "op-1" {
 		t.Fatalf("the renewed lease was released too early: %+v, %v", state, err)
 	}
+	clock.Advance(400 * time.Millisecond) // past the renewed lease too
 	waitUntil(t, "the lease to pass and the processor to run again", func() bool {
 		state, err := store.Control().Get(context.Background(), DefaultProcessor)
 		return err == nil && state.Operation == nil &&
@@ -716,27 +740,46 @@ func TestAResetExtendsItsLeaseWhileExecuting(t *testing.T) {
 	hub := fakehub.Start(t)
 	store := NewMemoryMessageStore()
 	events := NewMemoryEventStore()
+	clock := newStoreClock()
+	entered := make(chan struct{})
+	release := make(chan struct{})
 	var renewed atomic.Bool
-	_, s := l3Serving(t, hub, func(app *App) {
+	var initial time.Time
+	timings := controlTimings()
+	timings.resetLeaseRenew = time.Millisecond
+	_, s := l3ServingAt(t, hub, clock.Now, func(app *App) {
 		if err := HandleEvent(app, func(context.Context, OrderPlaced) error { return nil }); err != nil {
 			t.Fatal(err)
 		}
 		if err := HandleReset(app, DefaultProcessor, func(ctx context.Context, reset ResetContext) error {
-			time.Sleep(700 * time.Millisecond)
+			close(entered)
+			<-release
 			state, err := store.Control().Get(ctx, DefaultProcessor)
 			if err == nil && state.Operation != nil && state.Operation.ID == reset.OperationID &&
-				state.Operation.LeaseUntil.After(time.Now().Add(300*time.Millisecond)) {
+				state.Operation.LeaseUntil.After(initial) {
 				renewed.Store(true)
 			}
 			return nil
 		}); err != nil {
 			t.Fatal(err)
 		}
-	}, WithStore(store), WithEventStore(events))
+	}, WithStore(store), WithEventStore(events), withTimings(timings))
 	publishTestEvent(t, events, "evt-1", "orders.OrderPlaced", nil, nil)
 	okReply(t, sendControl(t, s, resetPrepareControl("prepare-1", DefaultProcessor, "op-1", 1000)), "prepare")
-	reply := sendControl(t, s, resetExecuteControl("execute-1", DefaultProcessor, "op-1", targetEarliest()))
-	if reply.GetReset_() == nil {
+	state, err := store.Control().Get(context.Background(), DefaultProcessor)
+	if err != nil || state.Operation == nil {
+		t.Fatalf("the prepared lock: %+v, %v", state, err)
+	}
+	initial = state.Operation.LeaseUntil
+	clock.Advance(500 * time.Millisecond)
+	s.Send(t, resetExecuteControl("execute-1", DefaultProcessor, "op-1", targetEarliest()))
+	<-entered
+	waitUntil(t, "the execute to extend its lease", func() bool {
+		state, err := store.Control().Get(context.Background(), DefaultProcessor)
+		return err == nil && state.Operation != nil && state.Operation.LeaseUntil.After(initial)
+	})
+	close(release)
+	if reply := s.RecvControlReply(t); reply.GetReset_() == nil {
 		t.Fatalf("a slow reset with a renewed lease: %v", reply)
 	}
 	if !renewed.Load() {
@@ -985,14 +1028,18 @@ func TestAResetThatOutlivesItsLimitLosesTheLease(t *testing.T) {
 	hub := fakehub.Start(t)
 	store := NewMemoryMessageStore()
 	events := NewMemoryEventStore()
+	clock := newStoreClock()
+	entered := make(chan struct{})
+	release := make(chan struct{})
 	timings := controlTimings()
 	timings.resetExecuteLimit = 100 * time.Millisecond
-	_, s := l3Serving(t, hub, func(app *App) {
+	_, s := l3ServingAt(t, hub, clock.Now, func(app *App) {
 		if err := HandleEvent(app, func(context.Context, OrderPlaced) error { return nil }); err != nil {
 			t.Fatal(err)
 		}
 		if err := HandleReset(app, DefaultProcessor, func(context.Context, ResetContext) error {
-			time.Sleep(250 * time.Millisecond)
+			close(entered)
+			<-release
 			return nil
 		}); err != nil {
 			t.Fatal(err)
@@ -1000,7 +1047,11 @@ func TestAResetThatOutlivesItsLimitLosesTheLease(t *testing.T) {
 	}, WithStore(store), WithEventStore(events), withTimings(timings))
 	publishTestEvent(t, events, "evt-1", "orders.OrderPlaced", nil, nil)
 	okReply(t, sendControl(t, s, resetPrepareControl("prepare-1", DefaultProcessor, "op-1", 1000)), "prepare")
-	refused := refusedReply(t, sendControl(t, s, resetExecuteControl("execute-1", DefaultProcessor, "op-1", targetEarliest())),
+	s.Send(t, resetExecuteControl("execute-1", DefaultProcessor, "op-1", targetEarliest()))
+	<-entered
+	clock.Advance(200 * time.Millisecond) // past the 100 ms execute limit
+	close(release)
+	refused := refusedReply(t, s.RecvControlReply(t),
 		hubpb.ControlRefusal_CONTROL_REFUSAL_FAILED, "an execute past its limit")
 	if !strings.Contains(refused.GetMessage(), "ran longer than") ||
 		!strings.Contains(refused.GetMessage(), "reset handlers ran (1)") {
@@ -1044,4 +1095,362 @@ func TestAFinishAfterATakeoverIsNotPrepared(t *testing.T) {
 	waitUntil(t, "the consumer after the takeover", func() bool {
 		return processorStatusOf(t, app, DefaultProcessor).GetOperationId() == ""
 	})
+}
+
+// extendFailingControl fails every lease extension while fail is set.
+type extendFailingControl struct {
+	ProcessorControlStore
+	fail  atomic.Bool
+	calls atomic.Int64
+	gets  atomic.Int64
+}
+
+func (c *extendFailingControl) Get(ctx context.Context, processor string) (ProcessorControlState, error) {
+	c.gets.Add(1)
+	return c.ProcessorControlStore.Get(ctx, processor)
+}
+
+func (c *extendFailingControl) Extend(ctx context.Context, processor, operation string, leaseUntil, now time.Time) (bool, error) {
+	c.calls.Add(1)
+	if c.fail.Load() {
+		return false, errText("the control store is down")
+	}
+	return c.ProcessorControlStore.Extend(ctx, processor, operation, leaseUntil, now)
+}
+
+type extendFailingStore struct {
+	MessageStore
+	control *extendFailingControl
+}
+
+func (s *extendFailingStore) Control() ProcessorControlStore { return s.control }
+
+// L3-RESET: while an execute runs without a renewable lease, the expired persisted lease never
+// lets the consumer rejoin before the execute refuses; nothing moves after the loss.
+func TestAnExecuteThatLostItsLeaseKeepsTheConsumerOut(t *testing.T) {
+	hub := fakehub.Start(t)
+	inner := NewMemoryMessageStore()
+	control := &extendFailingControl{ProcessorControlStore: inner.Control()}
+	store := &extendFailingStore{MessageStore: inner, control: control}
+	events := NewMemoryEventStore()
+	clock := newStoreClock()
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var handled atomic.Int64
+	timings := controlTimings()
+	timings.resetLeaseRenew = time.Millisecond
+	app, s := l3ServingAt(t, hub, clock.Now, func(app *App) {
+		if err := HandleEvent(app, func(context.Context, OrderPlaced) error {
+			handled.Add(1)
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := HandleReset(app, DefaultProcessor, func(context.Context, ResetContext) error {
+			close(entered)
+			<-release
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}, WithStore(store), WithEventStore(events), withTimings(timings))
+	publishTestEvent(t, events, "evt-1", "orders.OrderPlaced", nil, nil)
+	waitUntil(t, "the record before the reset", func() bool { return handled.Load() == 1 })
+	okReply(t, sendControl(t, s, resetPrepareControl("prepare-1", DefaultProcessor, "op-1", 1000)), "prepare")
+	control.fail.Store(true)
+	s.Send(t, resetExecuteControl("execute-1", DefaultProcessor, "op-1", targetEarliest()))
+	<-entered
+	waitUntil(t, "the failed lease extension", func() bool { return control.calls.Load() > 0 })
+	// The persisted lease passes while the reset handler still runs.
+	clock.Advance(2 * time.Second)
+	before := control.gets.Load()
+	waitUntil(t, "polls after the lease passed", func() bool { return control.gets.Load() >= before+3 })
+	status := processorStatusOf(t, app, DefaultProcessor)
+	if status.GetState() != hubpb.ProcessorState_PROCESSOR_STOPPED || status.GetOperationId() != "op-1" {
+		t.Fatalf("the executing processor left its stop: %v %v", status.GetState(), status.GetOperationId())
+	}
+	waitSubscriptionMembers(t, events, SubscriptionSpec{
+		Name: ProcessorSubscription("orders-service", DefaultProcessor), Source: DefaultEventsSource,
+	}, 0)
+	publishTestEvent(t, events, "evt-2", "orders.OrderPlaced", nil, nil)
+	neverWithin(t, 100*time.Millisecond, "a record under a lost reset lock", func() bool {
+		return handled.Load() > 1
+	})
+	close(release)
+	refused := refusedReply(t, s.RecvControlReply(t),
+		hubpb.ControlRefusal_CONTROL_REFUSAL_FAILED, "the execute reply after the loss")
+	if !strings.Contains(refused.GetMessage(), "lease lost") {
+		t.Fatalf("the lost execute: %q", refused.GetMessage())
+	}
+	if exists, err := store.Processed().Exists(context.Background(), ProcessorMarker(DefaultProcessor, "evt-1")); err != nil || !exists {
+		t.Fatalf("a lost execute deleted the marker: %v, %v", exists, err)
+	}
+	okReply(t, sendControl(t, s, resetFinishControl("finish-1", DefaultProcessor, "op-1", true)), "finish aborted")
+	waitUntil(t, "the record after the finish", func() bool { return handled.Load() == 2 })
+}
+
+// L3-RESET: a non-executor applies the persisted replay ranges and pause on its finish before it
+// consumes again: the replayed records skip DisallowReplay and stay paused.
+func TestANonExecutorFinishAppliesTheReplayRangesAndPause(t *testing.T) {
+	hub := fakehub.Start(t)
+	store := NewMemoryMessageStore()
+	events, err := NewMemoryEventStoreWithSegments(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	timings := controlTimings()
+	timings.controlPoll = 5 * time.Second // the finish must apply the state, not a poll
+	normal := newSeenCounts()
+	noReplay := newSeenCounts()
+	// The non-executor starts first, so it holds the single segment.
+	app2, s2 := l3Serving(t, hub, func(app *App) {
+		if err := HandleEvent(app, func(ctx context.Context, event OrderPlaced) error {
+			normal.add(event.OrderID)
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := HandleEvent(app, func(ctx context.Context, event OrderPlaced) error {
+			noReplay.add(event.OrderID)
+			return nil
+		}, DisallowReplay()); err != nil {
+			t.Fatal(err)
+		}
+	}, Instance("i-2"), WithStore(store), WithEventStore(events), withTimings(timings))
+	app1, s1 := l3Serving(t, hub, func(app *App) {
+		if err := HandleEvent(app, func(context.Context, OrderPlaced) error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+	}, Instance("i-1"), WithStore(store), WithEventStore(events), withTimings(timings))
+	publishTestEvent(t, events, "evt-1", "orders.OrderPlaced", nil, nil)
+	publishTestEvent(t, events, "evt-2", "orders.OrderPlaced", nil, nil)
+	waitUntil(t, "both live handlers on both records", func() bool {
+		return normal.total() == 2 && noReplay.total() == 2
+	})
+
+	okReply(t, sendControl(t, s2, resetPrepareControl("prepare-2", DefaultProcessor, "op-1", 30000)), "prepare the non-executor")
+	okReply(t, sendControl(t, s1, resetPrepareControl("prepare-1", DefaultProcessor, "op-1", 30000)), "prepare the executor")
+	if reply := sendControl(t, s1, resetExecuteControl("execute-1", DefaultProcessor, "op-1", targetEarliest())); reply.GetReset_() == nil {
+		t.Fatalf("execute: %v", reply)
+	}
+	// The executor leaves; the non-executor still holds the prepared operation.
+	if err := app1.Shutdown(ctxWithin(t, 5*s)); err != nil {
+		t.Fatalf("shutting the executor down: %v", err)
+	}
+	if err := store.Control().SetPaused(context.Background(), DefaultProcessor, true, "test", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	okReply(t, sendControl(t, s2, resetFinishControl("finish-2", DefaultProcessor, "op-1", false)), "finish the non-executor")
+	waitUntil(t, "paused with the replay ranges after the finish", func() bool {
+		status := processorStatusOf(t, app2, DefaultProcessor)
+		return status.GetState() == hubpb.ProcessorState_PROCESSOR_PAUSED && status.GetOperationId() == ""
+	})
+	neverWithin(t, 100*time.Millisecond, "a replay before the resume", func() bool { return normal.total() > 2 })
+	okReply(t, sendControl(t, s2, resumeControl("resume-2", DefaultProcessor)), "resume")
+	waitUntil(t, "the replayed records", func() bool { return normal.total() == 4 })
+	is(t, noReplay.total(), 2)
+}
+
+// flipMembersAdmin answers no member on its first call and one on its second: a consumer that
+// rejoined between the execute's plan and the move.
+type flipMembersAdmin struct {
+	SubscriptionAdmin
+	calls   atomic.Int64
+	applied atomic.Int64
+}
+
+func (a *flipMembersAdmin) Members(context.Context) ([]string, error) {
+	if a.calls.Add(1) == 1 {
+		return nil, nil
+	}
+	return []string{"a-reader"}, nil
+}
+
+func (a *flipMembersAdmin) Apply(ctx context.Context, ranges []ReplayRange) error {
+	a.applied.Add(1)
+	return a.SubscriptionAdmin.Apply(ctx, ranges)
+}
+
+type flipMembersStore struct {
+	EventStore
+	admin *flipMembersAdmin
+}
+
+func (s *flipMembersStore) Admin(spec SubscriptionSpec) (SubscriptionAdmin, error) {
+	inner, err := s.EventStore.Admin(spec)
+	if err != nil {
+		return nil, err
+	}
+	s.admin = &flipMembersAdmin{SubscriptionAdmin: inner}
+	return s.admin, nil
+}
+
+// L3-RESET: a reader that reappears between the plan and the move is refused immediately before
+// Apply, and the positions do not move.
+func TestAResetRechecksTheMembersBeforeMoving(t *testing.T) {
+	hub := fakehub.Start(t)
+	inner := NewMemoryEventStore()
+	events := &flipMembersStore{EventStore: inner}
+	store := NewMemoryMessageStore()
+	_, s := l3Serving(t, hub, func(app *App) {
+		if err := HandleEvent(app, func(context.Context, OrderPlaced) error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+	}, WithStore(store), WithEventStore(events))
+	publishTestEvent(t, inner, "evt-1", "orders.OrderPlaced", nil, nil)
+	okReply(t, sendControl(t, s, resetPrepareControl("prepare-1", DefaultProcessor, "op-1", 30000)), "prepare")
+	refusedReply(t, sendControl(t, s, resetExecuteControl("execute-1", DefaultProcessor, "op-1", targetEarliest())),
+		hubpb.ControlRefusal_CONTROL_REFUSAL_SUBSCRIBERS_ACTIVE, "a reader that reappeared")
+	if events.admin == nil || events.admin.calls.Load() < 2 {
+		t.Fatalf("members rechecked before apply: %+v", events.admin)
+	}
+	if applied := events.admin.applied.Load(); applied != 0 {
+		t.Fatalf("the positions moved with a reader present: %d applies", applied)
+	}
+	okReply(t, sendControl(t, s, resetFinishControl("finish-1", DefaultProcessor, "op-1", true)), "finish aborted")
+}
+
+// staleReadControl blocks one control-state read after its state was taken, so a test can write
+// the store before the poll applies the old read.
+type staleReadControl struct {
+	ProcessorControlStore
+	block    atomic.Bool
+	captured chan struct{}
+	release  chan struct{}
+	once     sync.Once
+	gets     atomic.Int64
+}
+
+func (c *staleReadControl) Get(ctx context.Context, processor string) (ProcessorControlState, error) {
+	c.gets.Add(1)
+	state, err := c.ProcessorControlStore.Get(ctx, processor)
+	if c.block.Load() {
+		c.once.Do(func() {
+			close(c.captured)
+			<-c.release
+		})
+	}
+	return state, err
+}
+
+type staleReadStore struct {
+	MessageStore
+	control *staleReadControl
+}
+
+func (s *staleReadStore) Control() ProcessorControlStore { return s.control }
+
+// L3-RESET: a poll whose read predates a prepare does not clear the lock or wake the consumer.
+func TestAStalePollDoesNotUndoAPrepare(t *testing.T) {
+	hub := fakehub.Start(t)
+	inner := NewMemoryMessageStore()
+	control := &staleReadControl{
+		ProcessorControlStore: inner.Control(),
+		captured:              make(chan struct{}),
+		release:               make(chan struct{}),
+	}
+	store := &staleReadStore{MessageStore: inner, control: control}
+	events := NewMemoryEventStore()
+	app, s := l3Serving(t, hub, func(app *App) {
+		if err := HandleEvent(app, func(context.Context, OrderPlaced) error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+	}, WithStore(store), WithEventStore(events))
+	control.block.Store(true)
+	<-control.captured
+	okReply(t, sendControl(t, s, resetPrepareControl("prepare-1", DefaultProcessor, "op-1", 30000)), "prepare")
+	close(control.release)
+	waitUntil(t, "polls after the stale read", func() bool { return control.gets.Load() >= 5 })
+	status := processorStatusOf(t, app, DefaultProcessor)
+	if status.GetState() != hubpb.ProcessorState_PROCESSOR_STOPPED || status.GetOperationId() != "op-1" {
+		t.Fatalf("the stale poll undid the prepare: %v %v", status.GetState(), status.GetOperationId())
+	}
+	waitSubscriptionMembers(t, events, SubscriptionSpec{
+		Name: ProcessorSubscription("orders-service", DefaultProcessor), Source: DefaultEventsSource,
+	}, 0)
+	okReply(t, sendControl(t, s, resetFinishControl("finish-1", DefaultProcessor, "op-1", true)), "finish aborted")
+}
+
+// getFailingControl fails the control-state read while fail is set.
+type getFailingControl struct {
+	ProcessorControlStore
+	fail atomic.Bool
+}
+
+func (c *getFailingControl) Get(ctx context.Context, processor string) (ProcessorControlState, error) {
+	if c.fail.Load() {
+		return ProcessorControlState{}, errText("the control store is down")
+	}
+	return c.ProcessorControlStore.Get(ctx, processor)
+}
+
+type getFailingStore struct {
+	MessageStore
+	control *getFailingControl
+}
+
+func (s *getFailingStore) Control() ProcessorControlStore { return s.control }
+
+// L3-RESET: a finish whose lock cannot be read back says so instead of claiming it consumes.
+func TestAFinishWhoseLockCannotBeReadSaysSo(t *testing.T) {
+	hub := fakehub.Start(t)
+	inner := NewMemoryMessageStore()
+	control := &getFailingControl{ProcessorControlStore: inner.Control()}
+	store := &getFailingStore{MessageStore: inner, control: control}
+	events := NewMemoryEventStore()
+	app, s := l3Serving(t, hub, func(app *App) {
+		if err := HandleEvent(app, func(context.Context, OrderPlaced) error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+	}, WithStore(store), WithEventStore(events))
+	okReply(t, sendControl(t, s, resetPrepareControl("prepare-1", DefaultProcessor, "op-1", 30000)), "prepare")
+	control.fail.Store(true)
+	answer := sendControl(t, s, resetFinishControl("finish-1", DefaultProcessor, "op-1", false))
+	if answer.GetOk() == nil || !strings.Contains(answer.GetOk().GetDetail(), "once the lock is read back") {
+		t.Fatalf("a finish that cannot read the lock back: %v", answer)
+	}
+	control.fail.Store(false)
+	waitUntil(t, "the consumer after the control store answers", func() bool {
+		return processorStatusOf(t, app, DefaultProcessor).GetState() == hubpb.ProcessorState_PROCESSOR_RUNNING
+	})
+}
+
+// noRemoveControl reports that another instance removed a passed replay range.
+type noRemoveControl struct {
+	ProcessorControlStore
+	removed atomic.Int64
+}
+
+func (c *noRemoveControl) RemoveRange(context.Context, string, ReplayRange, time.Time) (bool, error) {
+	c.removed.Add(1)
+	return false, nil
+}
+
+type noRemoveStore struct {
+	MessageStore
+	control *noRemoveControl
+}
+
+func (s *noRemoveStore) Control() ProcessorControlStore { return s.control }
+
+// L3-REPLAY: a range another instance removed is dropped locally too.
+func TestAPassedRangeRemovedElsewhereIsDroppedLocally(t *testing.T) {
+	store := &noRemoveStore{
+		MessageStore: NewMemoryMessageStore(),
+		control:      &noRemoveControl{ProcessorControlStore: NewMemoryMessageStore().Control()},
+	}
+	app := eventsApp(t, WithStore(store), WithEventStore(NewMemoryEventStore()),
+		withEventSettings(consumerSettings()), withTimings(controlTimings()), OutboxEnabled(false))
+	p := newProcessor("orders-service", DefaultProcessor, DefaultEventsSource, map[string][]*eventHandler{})
+	sub := &fixedSubscription{shared: []SegmentStatus{{Segment: "0", Position: "5", Committed: "5"}}}
+	p.run.markStarted()
+	p.run.attach(sub)
+	p.run.setReplay([]ReplayRange{{Source: DefaultEventsSource, Segment: "0", From: "0", Until: "3"}})
+	app.closePassedReplayRanges(context.Background(), p, app.now())
+	if ranges := p.run.replayRanges(); len(ranges) != 0 {
+		t.Fatalf("the local replay range was kept: %v", ranges)
+	}
+	if store.control.removed.Load() == 0 {
+		t.Fatal("the range was not submitted for removal")
+	}
 }

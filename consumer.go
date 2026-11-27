@@ -85,6 +85,12 @@ func (a *App) consumeProcessor(ctx context.Context, p *processor) {
 		var failure error
 		subCtx, cancel := context.WithCancel(ctx)
 		done := p.run.beginRead(cancel)
+		if !p.run.runnableNow() {
+			// A reset took the lock after waitRunnable: do not subscribe at all.
+			cancel()
+			p.run.endRead(done)
+			continue
+		}
 		sub, err := a.cfg.eventStore.Subscribe(subCtx, p.subscription)
 		if err != nil {
 			cancel()

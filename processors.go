@@ -51,8 +51,10 @@ type processorRuntime struct {
 	replay []ReplayRange
 	// held is the reset operation this instance prepared; nil when none.
 	held *heldReset
-	// executing is the operation whose execute runs now; empty when none.
-	executing string
+	// executing is the operation whose execute runs now; executingLost says its lease was lost
+	// while it ran, so it must not renew or move anything more.
+	executing     string
+	executingLost bool
 	// finished remembers the operations that ended on this instance, with the time each is
 	// forgotten (a late renewal is NOT_PREPARED).
 	finished map[string]time.Time
@@ -131,6 +133,7 @@ func (r *processorRuntime) replayRanges() []ReplayRange {
 func (r *processorRuntime) setReplay(ranges []ReplayRange) {
 	r.mu.Lock()
 	r.replay = append([]ReplayRange(nil), ranges...)
+	r.changes++
 	r.mu.Unlock()
 }
 
@@ -384,32 +387,45 @@ func (r *processorRuntime) pauseSubscription(paused bool) {
 	}
 }
 
-// applyControl applies a control state read from the store at readAt. A state read before a
-// change made here since is left to the next poll, which reads what that change wrote; the read
-// still proves the store reachable, so the consumer may start. The lock it carries stops the
-// consumer; a released lock wakes it.
-func (r *processorRuntime) applyControl(ctx context.Context, state ProcessorControlState, readAt uint64, now time.Time) {
+// applyControl applies a control state read from the store at readAt and reports whether it
+// applied (a state read before a change made here since is left to the next poll, which reads
+// what that change wrote) and the change count after its own apply. A poll's reconcile step uses
+// that count so a reset write between the two invalidates the read too. While this instance
+// executes a reset, the lock stays reported held even if the persisted lease lapsed: the
+// execute must finish (and refuse) before the consumer can join.
+func (r *processorRuntime) applyControl(ctx context.Context, state ProcessorControlState, readAt uint64, now time.Time) (applied bool, after uint64) {
 	r.mu.Lock()
 	if r.controlKnown && r.changes != readAt {
 		r.markControlKnownLocked()
+		after = r.changes
 		r.mu.Unlock()
-		return
+		return false, after
 	}
 	changed := r.paused != state.Paused
 	r.paused = state.Paused
 	r.replay = append([]ReplayRange(nil), state.Replay...)
 	r.operationID = ""
 	r.lockHolds = false
-	if state.Operation != nil && state.Operation.HoldsAt(now) {
+	if r.executing != "" {
+		// The execute keeps the consumer out until it returns, whether or not the persisted lease
+		// still names it (it can be cleared by a poll between the execute's check and this read).
+		r.operationID = r.executing
+		r.lockHolds = true
+		if state.Operation == nil || state.Operation.ID != r.executing || !state.Operation.HoldsAt(now) {
+			r.executingLost = true
+		}
+	} else if state.Operation != nil && state.Operation.HoldsAt(now) {
 		r.operationID = state.Operation.ID
 		r.lockHolds = true
 	}
 	r.changes++
+	after = r.changes
 	r.markControlKnownLocked()
 	r.mu.Unlock()
 	if changed {
 		r.pauseSubscription(state.Paused)
 	}
+	return true, after
 }
 
 // heldReset is the reset operation this instance prepared.
@@ -424,6 +440,7 @@ func (r *processorRuntime) setHeld(id string, lease time.Duration) {
 	r.held = &heldReset{id: id, lease: lease}
 	r.operationID = id
 	r.lockHolds = true
+	r.changes++
 	r.mu.Unlock()
 }
 
@@ -447,6 +464,7 @@ func (r *processorRuntime) updateHeldLease(id string, lease time.Duration) bool 
 		return false
 	}
 	r.held.lease = lease
+	r.changes++
 	return true
 }
 
@@ -456,6 +474,7 @@ func (r *processorRuntime) clearHeld() *heldReset {
 	defer r.mu.Unlock()
 	held := r.held
 	r.held = nil
+	r.changes++
 	return held
 }
 
@@ -465,6 +484,7 @@ func (r *processorRuntime) setLockState(operationID string, holds bool) {
 	r.mu.Lock()
 	r.operationID = operationID
 	r.lockHolds = holds
+	r.changes++
 	r.mu.Unlock()
 }
 
@@ -472,6 +492,13 @@ func (r *processorRuntime) setLockState(operationID string, holds bool) {
 func (r *processorRuntime) setExecuting(id string) {
 	r.mu.Lock()
 	r.executing = id
+	r.executingLost = false
+	if id != "" {
+		// From here until the execute returns the consumer stays out, even if a poll clears the
+		// prepared operation concurrently.
+		r.operationID = id
+		r.lockHolds = true
+	}
 	r.mu.Unlock()
 }
 
@@ -482,6 +509,25 @@ func (r *processorRuntime) isExecuting(id string) bool {
 	return r.executing == id
 }
 
+// markExecutingLost records that the execute of id lost its lease: it may not renew or move
+// anything more, and the consumer stays out until the execute returns and a poll proves the lock
+// gone.
+func (r *processorRuntime) markExecutingLost(id string) {
+	r.mu.Lock()
+	if r.executing == id {
+		r.executingLost = true
+		r.changes++
+	}
+	r.mu.Unlock()
+}
+
+// executingIsLost reports whether the execute of id lost its lease.
+func (r *processorRuntime) executingIsLost(id string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.executing == id && r.executingLost
+}
+
 // rememberEnded remembers an operation that ended on this instance for max(2*lease, 60s), at
 // most a day; a late renewal is refused NOT_PREPARED while it is remembered.
 func (r *processorRuntime) rememberEnded(id string, lease time.Duration, now time.Time) {
@@ -489,11 +535,11 @@ func (r *processorRuntime) rememberEnded(id string, lease time.Duration, now tim
 		return
 	}
 	keep := 2 * lease
-	if keep < 60*time.Second {
-		keep = 60 * time.Second
+	if keep < resetFinishedKept {
+		keep = resetFinishedKept
 	}
-	if keep > 24*time.Hour {
-		keep = 24 * time.Hour
+	if keep > resetFinishedKeptMax {
+		keep = resetFinishedKeptMax
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()

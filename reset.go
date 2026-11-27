@@ -216,7 +216,7 @@ func (c *controlPlane) resetExecute(ctx context.Context, req *hubpb.ControlReque
 // deadline (a handler that outlives it lets the lease lapse so another instance can recover); the
 // returned function stops it.
 func (c *controlPlane) extendResetLease(ctx context.Context, p *processor, op string, lease time.Duration, deadline time.Time) func() {
-	period := resetLeaseExtension
+	period := c.app.cfg.timings.resetLeaseRenew
 	if third := lease / 3; third < period {
 		period = third
 	}
@@ -238,7 +238,9 @@ func (c *controlPlane) extendResetLease(ctx context.Context, p *processor, op st
 				if !now.Before(deadline) {
 					return // the execute outlived its limit: let the lease lapse
 				}
-				if _, err := c.app.cfg.store.Control().Extend(ctx, p.name, op, now.Add(lease), now); err != nil {
+				extended, err := c.app.cfg.store.Control().Extend(ctx, p.name, op, now.Add(lease), now)
+				if err != nil || !extended {
+					p.run.markExecutingLost(op)
 					return
 				}
 			}
@@ -325,6 +327,17 @@ func (c *controlPlane) runReset(ctx context.Context, req *hubpb.ControlRequest, 
 	if lost := c.resetLeaseLost(ctx, p, op, lease, deadline); lost != "" {
 		return c.resetChangedRefusal(req, hubpb.ControlRefusal_CONTROL_REFUSAL_FAILED, lost, changed)
 	}
+	// A consumer may have rejoined through a stale read or another instance: prove it gone again
+	// immediately before the positions move.
+	members, err = admin.Members(ctx)
+	if err != nil {
+		return c.resetStoreRefusal(req, err, changed)
+	}
+	if len(members) > 0 {
+		return c.resetChangedRefusal(req, hubpb.ControlRefusal_CONTROL_REFUSAL_SUBSCRIBERS_ACTIVE,
+			fmt.Sprintf("subscription %s still has %d subscriber(s): %s",
+				p.subscription.Name, len(members), strings.Join(members, ", ")), changed)
+	}
 	if err := admin.Apply(ctx, plan); err != nil {
 		return c.resetStoreRefusal(req, err, changed)
 	}
@@ -344,15 +357,21 @@ func (c *controlPlane) runReset(ctx context.Context, req *hubpb.ControlRequest, 
 // resetLeaseLost extends the lease before a step and returns why it cannot go on, empty when it
 // can.
 func (c *controlPlane) resetLeaseLost(ctx context.Context, p *processor, op string, lease time.Duration, deadline time.Time) string {
+	if p.run.executingIsLost(op) {
+		return "lease lost: the reset could not renew its lease"
+	}
 	now := c.app.now()
 	if !now.Before(deadline) {
+		p.run.markExecutingLost(op)
 		return fmt.Sprintf("lease lost: the reset ran longer than %s", c.app.cfg.timings.resetExecuteLimit)
 	}
 	extended, err := c.app.cfg.store.Control().Extend(ctx, p.name, op, now.Add(lease), now)
 	if err != nil {
+		p.run.markExecutingLost(op)
 		return "lease lost: cannot extend it: " + err.Error()
 	}
 	if !extended {
+		p.run.markExecutingLost(op)
 		return "lease lost: operation " + op + " no longer holds the lock of processor " + p.name
 	}
 	return ""
@@ -430,10 +449,13 @@ func (c *controlPlane) resetFinish(ctx context.Context, req *hubpb.ControlReques
 						state.Operation.ID, p.name, op))
 			}
 		}
-		c.settleAfterFinish(ctx, p, now)
+		resumed := c.settleAfterFinish(ctx, p, now)
 		a.log.Info("a processor's reset was finished", "processor", p.name, "operation", op,
 			"aborted", finish.GetAborted())
-		return controlOK(req, "released, consuming again")
+		if resumed {
+			return controlOK(req, "released, consuming again")
+		}
+		return controlOK(req, "released; consuming once the lock is read back")
 	}
 	state, err := control.Get(ctx, p.name)
 	if err != nil {
@@ -464,8 +486,11 @@ func (c *controlPlane) resetFinish(ctx context.Context, req *hubpb.ControlReques
 						current.Operation.ID, p.name, op))
 			}
 		}
-		c.settleAfterFinish(ctx, p, now)
-		return controlOK(req, "released, consuming again")
+		resumed := c.settleAfterFinish(ctx, p, now)
+		if resumed {
+			return controlOK(req, "released, consuming again")
+		}
+		return controlOK(req, "released; consuming once the lock is read back")
 	default:
 		return controlRefused(req, hubpb.ControlRefusal_CONTROL_REFUSAL_NOT_PREPARED,
 			fmt.Sprintf("operation %s holds the lock of processor %s, not %s",
@@ -473,23 +498,24 @@ func (c *controlPlane) resetFinish(ctx context.Context, req *hubpb.ControlReques
 	}
 }
 
-// settleAfterFinish records the lock state after a finish and starts or keeps the consumer
-// stopped accordingly.
-func (c *controlPlane) settleAfterFinish(ctx context.Context, p *processor, now time.Time) {
+// settleAfterFinish applies the control state after a finish — the persisted pause and replay
+// ranges, and the lock — exactly as the poll would, then starts the consumer only when the lock is
+// proven gone. It reports whether the consumer may start now.
+func (c *controlPlane) settleAfterFinish(ctx context.Context, p *processor, now time.Time) bool {
 	state, err := c.app.cfg.store.Control().Get(ctx, p.name)
 	if err != nil {
 		// The store cannot prove the lock gone: keep the consumer out until a poll can.
 		p.run.setLockState("", true)
 		_ = c.app.stopForReset(ctx, p)
-		return
+		return false
 	}
-	if state.Operation != nil && state.Operation.HoldsAt(now) {
-		p.run.setLockState(state.Operation.ID, true)
+	p.run.applyControl(ctx, state, p.run.changeCount(), now)
+	if p.run.holdsLock() {
 		_ = c.app.stopForReset(ctx, p)
-		return
+		return false
 	}
-	p.run.setLockState("", false)
 	p.run.signalWake()
+	return true
 }
 
 // stopForReset waits for the consumer to leave its subscription, at most the reset stop limit.

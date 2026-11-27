@@ -58,8 +58,11 @@ func (a *App) readProcessorControl(ctx context.Context) {
 			}
 			continue
 		}
-		p.run.applyControl(ctx, state, readAt, now)
-		a.reconcileResetHold(ctx, p, state, now)
+		applied, after := p.run.applyControl(ctx, state, readAt, now)
+		if !applied {
+			continue // a reset write came after this read: the next poll reads the truth
+		}
+		a.reconcileResetHold(ctx, p, state, now, after)
 		a.closePassedReplayRanges(ctx, p, now)
 		if p.run.holdsLock() {
 			if err := a.stopForReset(ctx, p); err != nil && ctx.Err() == nil {
@@ -73,10 +76,25 @@ func (a *App) readProcessorControl(ctx context.Context) {
 }
 
 // reconcileResetHold lets go of the operation this instance held when another instance released
-// it, and releases a lease that passed without a renewal, so the consumer joins again.
-func (a *App) reconcileResetHold(ctx context.Context, p *processor, state ProcessorControlState, now time.Time) {
+// it, and releases a lease that passed without a renewal, so the consumer joins again. readAt is
+// the change count after the poll's apply: a reset write since makes this read stale, and nothing
+// here acts on it.
+func (a *App) reconcileResetHold(ctx context.Context, p *processor, state ProcessorControlState, now time.Time, readAt uint64) {
+	if p.run.changeCount() != readAt {
+		return
+	}
 	held := p.run.heldOperation()
 	if held == nil {
+		return
+	}
+	if p.run.isExecuting(held.id) {
+		// The executing reset must finish (and refuse) before the consumer can join, even when
+		// the persisted lease lapsed or another operation took the lock.
+		if state.Operation == nil || state.Operation.ID != held.id || !state.Operation.HoldsAt(now) {
+			p.run.markExecutingLost(held.id)
+		}
+		p.run.setLockState(held.id, true)
+		_ = a.stopForReset(ctx, p)
 		return
 	}
 	if state.Operation == nil || state.Operation.ID != held.id {
@@ -86,7 +104,7 @@ func (a *App) reconcileResetHold(ctx context.Context, p *processor, state Proces
 			"processor", p.name, "operation", held.id)
 		return
 	}
-	if state.Operation.HoldsAt(now) || p.run.isExecuting(held.id) {
+	if state.Operation.HoldsAt(now) {
 		return
 	}
 	changed, err := a.cfg.store.Control().Expire(ctx, p.name, held.id, now)
@@ -152,8 +170,10 @@ func (a *App) closePassedReplayRanges(ctx context.Context, p *processor, now tim
 			}
 			continue
 		}
+		// Another instance may have removed it already (removed false): the local state still has
+		// the range and must drop it too.
+		p.run.removeReplay(replay)
 		if removed {
-			p.run.removeReplay(replay)
 			a.log.Info("the processor replayed a segment to its range's end",
 				"processor", p.name, "segment", replay.Segment, "source", replay.Source, "until", replay.Until)
 		}
