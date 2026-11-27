@@ -132,11 +132,10 @@ func (g *memoryGroup) leave(member uint64) {
 // Name returns "memory".
 func (s *MemoryEventStore) Name() string { return memoryEventStoreName }
 
-// Capabilities returns the capabilities the store declares: CapabilityReplay and
-// CapabilityLag. A fresh slice is returned on every call.
-// Capabilities is what the memory store offers: replay and lag. Like the reference in-memory
+// Capabilities returns what the memory store offers: replay and lag. Like the reference in-memory
 // event stores, it does not declare native-dead-letter, so the event-store dead-letter mode needs
-// a durable event store (or a test store that declares the capability).
+// a durable event store (or a test store that declares the capability). A fresh slice is returned
+// on every call.
 func (s *MemoryEventStore) Capabilities() []Capability {
 	return []Capability{CapabilityReplay, CapabilityLag}
 }
