@@ -312,15 +312,35 @@ jobs:
             exit 0
           fi
           last=$(git tag --merged HEAD --list 'v*' | scripts/last-tag.sh)
-          # A release is all six tags on one commit; a lone vX.Y.Z was not made here.
+          # A release is all six tags on one commit. A legacy release from before all add-on modules
+          # were released together has either no add-on tags or only observability/ (from when it was
+          # the only add-on module). If any of the other add-on tags exists, or if all five exist,
+          # require all five on the same commit; if none exist (or only legacy observability/), accept it.
           if [ -n "$last" ]; then
             last_commit=$(git rev-parse "$last^{commit}")
+            found=0
+            has_new=0
             for m in observability kafka sql mongo rabbitmq; do
-              if [ "$(git rev-parse -q --verify "refs/tags/$m/$last^{commit}" || true)" != "$last_commit" ]; then
-                echo "::error::the last release tag has no $m/ tag on the same commit"
-                exit 1
+              if git rev-parse -q --verify "refs/tags/$m/$last^{commit}" >/dev/null 2>&1; then
+                found=$((found + 1))
+                if [ "$m" != "observability" ]; then
+                  has_new=1
+                fi
               fi
             done
+            if [ "$has_new" -gt 0 ] || [ "$found" -gt 1 ]; then
+              for m in observability kafka sql mongo rabbitmq; do
+                if [ "$(git rev-parse -q --verify "refs/tags/$m/$last^{commit}" || true)" != "$last_commit" ]; then
+                  echo "::error::the last release tag has no $m/ tag on the same commit"
+                  exit 1
+                fi
+              done
+            elif [ "$found" -eq 1 ] && [ "$has_new" -eq 0 ]; then
+              if [ "$(git rev-parse -q --verify "refs/tags/observability/$last^{commit}" || true)" != "$last_commit" ]; then
+                echo "::error::the last release tag has no observability/ tag on the same commit"
+                exit 1
+              fi
+            fi
           fi
           range=${last:+$last..}HEAD
           version=$(
