@@ -14,10 +14,11 @@ const (
 	// DeadLetterModeCollection parks it in the message store's dead letters, the default: an
 	// operator lists, retries and discards it through the hub.
 	DeadLetterModeCollection = "collection"
-	// DeadLetterModeEventStore publishes it to the event store's dead-letter source; it arrives
-	// with that mode.
+	// DeadLetterModeEventStore publishes it to the event store's dead-letter source
+	// (<source>.dlt); the event store must declare CapabilityNativeDeadLetter (the in-memory one
+	// does not, as the reference memory stores do not).
 	DeadLetterModeEventStore = "event-store"
-	// DeadLetterModeLog logs it and skips it; it arrives with that mode.
+	// DeadLetterModeLog logs it and skips it; nothing is parked or published.
 	DeadLetterModeLog = "log"
 )
 

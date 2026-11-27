@@ -335,20 +335,19 @@ func (s *Store) Outbox() snodra.OutboxStore { return mongoOutbox{store: s} }
 // Processed returns the processed-event markers.
 func (s *Store) Processed() snodra.ProcessedStore { return mongoProcessed{store: s} }
 
-// DeadLetters returns the dead-letter port, which this level does not implement yet: every
-// operation fails with snodra.ErrUnsupported.
+// DeadLetters returns the dead-letter port, implemented on the shared dead_letters collection.
 func (s *Store) DeadLetters() snodra.DeadLetterStore { return mongoDeadLetters{store: s} }
 
-// Control returns the processor-control port, which this level does not implement yet: every
-// operation fails with snodra.ErrUnsupported.
+// Control returns the processor-control port, implemented on the shared processor_control
+// collection.
 func (s *Store) Control() snodra.ProcessorControlStore { return mongoControl{store: s} }
 
-// ExternalCalls returns the external-call port, which this level does not implement yet: every
-// operation fails with snodra.ErrUnsupported.
+// ExternalCalls returns the external-call port, which this store does not implement yet (level 4):
+// every operation fails with snodra.ErrUnsupported.
 func (s *Store) ExternalCalls() snodra.ExternalCallStore { return unsupportedExternalCalls{} }
 
-// Sagas returns the saga ports, which this level does not implement yet: every operation fails
-// with snodra.ErrUnsupported.
+// Sagas returns the saga ports, which this store does not implement yet (level 4): every
+// operation fails with snodra.ErrUnsupported.
 func (s *Store) Sagas() snodra.SagaStores {
 	return snodra.SagaStores{
 		Sagas:     unsupportedSagas{},

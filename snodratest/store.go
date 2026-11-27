@@ -28,6 +28,9 @@ const storeLongLease = 60 * time.Second
 // The store must be the kit's alone while it runs. A check that fails names the check and the
 // store; the other checks run in the Rust kit's order and the first failure stops the kit.
 // Every check is exported, so a failing one can be run by itself.
+//
+// TODO(follow-up): a level-2-only entry point for a third-party store that has not implemented
+// the level-3 ports; this kit now always runs the 17 level-2 and level-3 checks.
 func MessageStore(t *testing.T, open func() snodra.MessageStore) {
 	t.Helper()
 	if open == nil {
