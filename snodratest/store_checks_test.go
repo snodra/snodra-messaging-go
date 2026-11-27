@@ -10,7 +10,8 @@ import (
 // rustMessageStoreGoChecks is a literal copy of the level-2 and level-3 store checks in the Rust
 // message-store conformance kit's run_store_conformance (snodra-messaging-rs,
 // src/store/conformance.rs), pinned on 2026-11-27, in the Rust order: delete_markers (level 3, the
-// Rust list places it among the level-2 checks) and the seven level-3 checks at the end. The Rust
+// Rust list places it among the level-2 checks), the seven level-3 checks and the eleven level-4
+// checks at the end. The Rust
 // list is authoritative; when it changes, this copy and store_checks.txt change with it.
 var rustMessageStoreGoChecks = []string{
 	"appended_entry_is_claimed_in_created_seq_order",
@@ -30,6 +31,17 @@ var rustMessageStoreGoChecks = []string{
 	"pause_state_round_trips",
 	"replay_ranges_round_trip",
 	"processor_control_write_inside_rolled_back_transaction_is_kept",
+	"external_call_idempotency_returns_first_result",
+	"saga_ports_round_trip",
+	"two_transactions_starting_one_saga_key_leave_one_live_saga",
+	"two_transactions_updating_one_saga_version_commit_once",
+	"saga_dispatch_store_refuses_an_event_the_outbox_would_refuse",
+	"due_deadline_is_claimed_once_until_its_lease_passes",
+	"an_empty_deadline_correlation_id_reads_as_absent",
+	"two_schedulers_claim_each_due_deadline_once",
+	"dispatch_hands_out_each_saga_in_seq_order",
+	"two_relays_never_hold_one_saga_lease",
+	"concurrent_notice_claims_return_each_notice_once",
 }
 
 // TestStoreChecksTxtMatchesTheRustKit pins the checked-in message-store list to the Rust kit's
@@ -46,7 +58,7 @@ func TestStoreChecksTxtMatchesTheRustKit(t *testing.T) {
 	if ids := StoreCheckIDs(); !slices.Equal(ids, rustMessageStoreGoChecks) {
 		t.Fatalf("the kit runs %v, want the Rust kit's level-2 and level-3 checks %v", ids, rustMessageStoreGoChecks)
 	}
-	if len(rustMessageStoreGoChecks) != 17 {
-		t.Fatalf("the store kit has %d checks, want 17 (9 level-2 and 8 level-3)", len(rustMessageStoreGoChecks))
+	if len(rustMessageStoreGoChecks) != 28 {
+		t.Fatalf("the store kit has %d checks, want 28 (9 level-2, 8 level-3 and 11 level-4)", len(rustMessageStoreGoChecks))
 	}
 }

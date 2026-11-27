@@ -36,8 +36,9 @@
 //		})
 //	}
 //
-// It runs the nine level-2 outbox and processed-event checks and the eight level-3 control and
-// dead-letter checks on a store over empty state. Each check gets its own store (open is called
+// It runs the nine level-2 outbox and processed-event checks, the eight level-3 control and
+// dead-letter checks and the eleven level-4 saga and external-call checks on a store over empty
+// state. Each check gets its own store (open is called
 // once per check), so checks never see each other's data; every check is exported as a function
 // taking a testing.TB and a store, so a failing one can be run by itself.
 //
@@ -47,7 +48,7 @@
 // browser. A store that does not declare browse passes no_browser_without_capability; one that
 // declares browse skips it (the check is vacuous there) and the kit is told the browse checks are
 // a kit difference it cannot run.
-// The message-store kit runs its level-2 and level-3 checks.
+// The message-store kit runs its level-2, level-3 and level-4 checks.
 //
 // The checks run one after the other in the Rust kit's order, each on subscription names (event
 // store) or stores (message store) of its own. The first failing check stops the kit and its
@@ -57,5 +58,5 @@
 // check naming the step.
 //
 // The event-store kit has the nine level-2 checks and the level-3 capability checks above; the
-// message-store kit has its nine level-2 checks and its eight level-3 checks.
+// message-store kit has 28 checks: nine level-2, eight level-3 and eleven level-4.
 package snodratest

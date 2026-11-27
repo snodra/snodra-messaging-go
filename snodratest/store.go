@@ -20,8 +20,8 @@ import (
 // The lease a store check takes when it must not run out while the check runs.
 const storeLongLease = 60 * time.Second
 
-// MessageStore runs the level-2 and level-3 message-store checks on the store open returns, each
-// as a subtest named exactly as the Rust kit names it. open returns one store over empty state
+// MessageStore runs the level-2, level-3 and level-4 message-store checks on the store open
+// returns, each as a subtest named exactly as the Rust kit names it. open returns one store over empty state
 // whose schema is ready; the kit calls it once per check, so the checks never see each other's
 // data.
 //
@@ -30,7 +30,7 @@ const storeLongLease = 60 * time.Second
 // Every check is exported, so a failing one can be run by itself.
 //
 // TODO(follow-up): a level-2-only entry point for a third-party store that has not implemented
-// the level-3 ports; this kit now always runs the 17 level-2 and level-3 checks.
+// the level-3 and level-4 ports; this kit always runs the 28 checks.
 func MessageStore(t *testing.T, open func() snodra.MessageStore) {
 	t.Helper()
 	if open == nil {
@@ -52,8 +52,8 @@ func MessageStore(t *testing.T, open func() snodra.MessageStore) {
 	}
 }
 
-// StoreCheckIDs returns the ids of the message-store checks the Go kit carries (level 2 and level
-// 3), in the Rust kit's order.
+// StoreCheckIDs returns the ids of the message-store checks the Go kit carries (levels 2 to 4), in
+// the Rust kit's order.
 func StoreCheckIDs() []string {
 	ids := make([]string, len(messageStoreChecks))
 	for i, check := range messageStoreChecks {
@@ -95,6 +95,17 @@ var messageStoreChecks = []struct {
 	{"pause_state_round_trips", PauseStateRoundTrips},
 	{"replay_ranges_round_trip", ReplayRangesRoundTrip},
 	{"processor_control_write_inside_rolled_back_transaction_is_kept", ProcessorControlWriteInsideRolledBackTransactionIsKept},
+	{"external_call_idempotency_returns_first_result", ExternalCallIdempotencyReturnsFirstResult},
+	{"saga_ports_round_trip", SagaPortsRoundTrip},
+	{"two_transactions_starting_one_saga_key_leave_one_live_saga", TwoTransactionsStartingOneSagaKeyLeaveOneLiveSaga},
+	{"two_transactions_updating_one_saga_version_commit_once", TwoTransactionsUpdatingOneSagaVersionCommitOnce},
+	{"saga_dispatch_store_refuses_an_event_the_outbox_would_refuse", SagaDispatchStoreRefusesAnEventTheOutboxWouldRefuse},
+	{"due_deadline_is_claimed_once_until_its_lease_passes", DueDeadlineIsClaimedOnceUntilItsLeasePasses},
+	{"an_empty_deadline_correlation_id_reads_as_absent", AnEmptyDeadlineCorrelationIDReadsAsAbsent},
+	{"two_schedulers_claim_each_due_deadline_once", TwoSchedulersClaimEachDueDeadlineOnce},
+	{"dispatch_hands_out_each_saga_in_seq_order", DispatchHandsOutEachSagaInSeqOrder},
+	{"two_relays_never_hold_one_saga_lease", TwoRelaysNeverHoldOneSagaLease},
+	{"concurrent_notice_claims_return_each_notice_once", ConcurrentNoticeClaimsReturnEachNoticeOnce},
 }
 
 // appendedEntryIsClaimedInCreatedSeqOrder runs the check for a testing.TB or a recorder.
