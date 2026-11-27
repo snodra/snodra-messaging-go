@@ -25,7 +25,8 @@ func clearEnv(t *testing.T) {
 		"SNODRA_SERVER_OAUTH2_CLIENT_SECRET_FILE", "SNODRA_SERVER_OAUTH2_SCOPE", "SNODRA_SERVER_OAUTH2_CA",
 		"SNODRA_EVENTS_SOURCE", "SNODRA_OUTBOX_ENABLED", "SNODRA_OUTBOX_POLL_INTERVAL_MS",
 		"SNODRA_OUTBOX_BATCH_SIZE", "SNODRA_OUTBOX_MAX_ATTEMPTS", "SNODRA_OUTBOX_LEASE_MS",
-		"SNODRA_CONSUMER_ENABLED", "SNODRA_CONSUMER_MAX_ATTEMPTS", "SNODRA_STORE_INIT_SCHEMA",
+		"SNODRA_CONSUMER_ENABLED", "SNODRA_CONSUMER_MAX_ATTEMPTS", "SNODRA_DEAD_LETTER_MODE",
+		"SNODRA_STORE_INIT_SCHEMA",
 	} {
 		t.Setenv(name, "")
 	}
@@ -315,6 +316,7 @@ func TestFromEnvEventSettings(t *testing.T) {
 	is(t, app.cfg.events.sendTimeout, 40*time.Second)
 	is(t, app.cfg.events.consumerEnabled, true)
 	is(t, app.cfg.events.consumerTries, 5)
+	is(t, app.cfg.events.deadLetterMode, DeadLetterModeCollection)
 	is(t, app.cfg.events.storeInitSchema, true)
 
 	t.Setenv("SNODRA_EVENTS_SOURCE", "orders.events")
@@ -325,6 +327,7 @@ func TestFromEnvEventSettings(t *testing.T) {
 	t.Setenv("SNODRA_OUTBOX_LEASE_MS", "60000")
 	t.Setenv("SNODRA_CONSUMER_ENABLED", "false")
 	t.Setenv("SNODRA_CONSUMER_MAX_ATTEMPTS", "2")
+	t.Setenv("SNODRA_DEAD_LETTER_MODE", "log")
 	t.Setenv("SNODRA_STORE_INIT_SCHEMA", "false")
 	app, err = New(FromEnv())
 	is(t, err, nil)
@@ -336,6 +339,7 @@ func TestFromEnvEventSettings(t *testing.T) {
 	is(t, app.cfg.events.lease, time.Minute)
 	is(t, app.cfg.events.consumerEnabled, false)
 	is(t, app.cfg.events.consumerTries, 2)
+	is(t, app.cfg.events.deadLetterMode, DeadLetterModeLog)
 	is(t, app.cfg.events.storeInitSchema, false)
 
 	// The lease must outlast one send (40 s).

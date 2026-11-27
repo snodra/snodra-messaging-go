@@ -34,15 +34,18 @@ retries and timeouts.
   every instance publishes it to the event store, at least once. `Key` is the order key.
 - **Event handlers** with processed-event markers: `HandleEvent` runs in the `default` processor or in a named one
   (`InProcessor`), and the handler's writes and its marker commit together, so a redelivery is skipped.
-- **Add-ons**: Kafka and RabbitMQ Streams for the event store; MongoDB and SQL (PostgreSQL, MySQL) for the outbox and
-  the markers; in-memory stores for tests. Each add-on is a module of its own, and `snodratest` is the add-on kit.
+- **Add-ons**: Kafka and RabbitMQ Streams for the event store; MongoDB and SQL (PostgreSQL, MySQL) for the outbox, the
+  markers, the dead letters and the processor control; in-memory stores for tests. Each add-on is a module of its own,
+  and `snodratest` is the add-on kit.
 - **The hub connection**: registration, heartbeats, reconnects, flow control, several hubs and an ordered shutdown.
 - **Credentials and identity**: a token (static, or a file read again), an OAuth2 JWT (renewed) or a client
   certificate (rolled over to a renewed pair); the caller's token verified against the issuer's keys, and guards on
   handlers.
 - **Telemetry** behind an interface, with an OpenTelemetry implementation in the separate `observability` module.
 - **Feature level 2**, proved by the 33 level-1 checks of the conformance runner and by the level-2 event-store and
-  message-store kits. Processor control, dead letters and sagas (levels 3 and 4) are not in it yet.
+  message-store kits. Processor control, the three dead-letter modes and the level-3 store checks are implemented on
+  `main`; level 3 is not claimed publicly until the release that publishes them for every library. Sagas (level 4) are
+  not in it yet.
 
 ## Install
 

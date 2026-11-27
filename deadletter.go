@@ -77,6 +77,72 @@ func deadLetterErrorOf(err error) DeadLetterError {
 	return NewDeadLetterError(typeName, err.Error())
 }
 
+// The six headers a record gains when it is published to the event store's dead-letter source.
+const (
+	headerDLTProcessor       = "snodra-dlt-processor"
+	headerDLTReason          = "snodra-dlt-reason"
+	headerDLTError           = "snodra-dlt-error"
+	headerDLTOriginalSource  = "snodra-dlt-original-topic"
+	headerDLTOriginalSegment = "snodra-dlt-original-partition"
+	headerDLTOriginalOffset  = "snodra-dlt-original-offset"
+)
+
+// nativeDeadLetterHeaders are the six headers a record's own headers are stripped of before the
+// library writes them.
+var nativeDeadLetterHeaders = []string{
+	headerDLTProcessor, headerDLTReason, headerDLTError,
+	headerDLTOriginalSource, headerDLTOriginalSegment, headerDLTOriginalOffset,
+}
+
+// nativeDeadLetter is the event a record becomes in the event-store dead-letter mode: its key,
+// payload and headers (minus the six the library writes), its id header or
+// "<source>-<segment>-<position>", and the six snodra-dlt-* headers saying why and where from.
+func (a *App) nativeDeadLetter(p *processor, d Delivery, reason DeadLetterReason, failure DeadLetterError) OutgoingEvent {
+	headers := copyStringMap(d.Headers)
+	if headers == nil {
+		headers = map[string]string{}
+	}
+	for _, name := range nativeDeadLetterHeaders {
+		delete(headers, name)
+	}
+	headers[headerDLTProcessor] = p.name
+	headers[headerDLTReason] = string(reason)
+	headers[headerDLTError] = cutChars(failure.Type+": "+failure.Message, MaxDeadLetterErrorChars)
+	headers[headerDLTOriginalSource] = p.subscription.Source
+	headers[headerDLTOriginalSegment] = d.Segment
+	headers[headerDLTOriginalOffset] = d.Position
+	id := strings.TrimSpace(d.Headers[HeaderID])
+	if id == "" {
+		id = p.subscription.Source + "-" + d.Segment + "-" + d.Position
+	}
+	return OutgoingEvent{
+		Source:  DeadLetterSource(p.subscription.Source),
+		ID:      id,
+		Type:    d.Headers[HeaderType],
+		Key:     copyStringPointer(d.Key),
+		Headers: headers,
+		Payload: append([]byte(nil), d.Payload...),
+	}
+}
+
+// publishDeadLetterWork is the sink action of a record in the event-store mode: publish it to
+// the dead-letter source, once. A redelivery after a failure runs it again; the record stays
+// unacknowledged until the event store took it.
+func (a *App) publishDeadLetterWork(p *processor, d Delivery, reason DeadLetterReason, failure DeadLetterError) func(context.Context) error {
+	event := a.nativeDeadLetter(p, d, reason, failure)
+	return func(ctx context.Context) error {
+		if timeout := a.cfg.events.sendTimeout; timeout > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, timeout)
+			defer cancel()
+		}
+		if err := a.cfg.eventStore.Publish(ctx, event); err != nil {
+			return fmt.Errorf("publishing a record to the dead-letter source %s: %w", event.Source, err)
+		}
+		return nil
+	}
+}
+
 // retryOutcome is what one dead-letter retry did, with the protocol's result names.
 type retryOutcome struct {
 	result string

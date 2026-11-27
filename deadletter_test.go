@@ -1041,13 +1041,216 @@ func TestADeadLetterSummaryKeepsItsLongID(t *testing.T) {
 	}
 }
 
-// The event-store dead-letter mode is refused until its sender exists: no configuration can
-// silently lose the records it would have sent.
-func TestTheEventStoreDeadLetterModeIsRefused(t *testing.T) {
+// The event-store dead-letter mode needs an event store that declares native-dead-letter: no
+// configuration can silently lose the records it would have sent.
+func TestTheEventStoreDeadLetterModeNeedsTheCapability(t *testing.T) {
 	settings := defaultEventSettings()
 	settings.deadLetterMode = DeadLetterModeEventStore
 	_, err := New(Service("orders-service"), Hubs("127.0.0.1:1"), withEventSettings(settings))
-	if err == nil || !strings.Contains(err.Error(), "event-store") {
-		t.Fatalf("the event-store mode: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "native-dead-letter") {
+		t.Fatalf("the event-store mode without an event store: %v", err)
 	}
+	_, err = New(Service("orders-service"), Hubs("127.0.0.1:1"),
+		WithEventStore(NewMemoryEventStore()), withEventSettings(settings))
+	if err == nil || !strings.Contains(err.Error(), "native-dead-letter") {
+		t.Fatalf("the event-store mode without the capability: %v", err)
+	}
+	app, err := New(Service("orders-service"), Hubs("127.0.0.1:1"),
+		WithEventStore(&nativeDeadLetterEvents{MemoryEventStore: NewMemoryEventStore()}),
+		withEventSettings(settings))
+	if err != nil {
+		t.Fatalf("the event-store mode with the capability: %v", err)
+	}
+	is(t, app.cfg.events.deadLetterMode, DeadLetterModeEventStore)
+}
+
+// DeadLetterMode is the public option for the mode, and accepts only the three names.
+func TestDeadLetterModeOption(t *testing.T) {
+	events := &nativeDeadLetterEvents{MemoryEventStore: NewMemoryEventStore()}
+	for _, mode := range []string{DeadLetterModeCollection, DeadLetterModeEventStore, DeadLetterModeLog} {
+		app, err := New(Service("orders-service"), Hubs("127.0.0.1:1"), WithEventStore(events), DeadLetterMode(mode))
+		if err != nil {
+			t.Fatalf("DeadLetterMode(%q): %v", mode, err)
+		}
+		is(t, app.cfg.events.deadLetterMode, mode)
+	}
+	if _, err := New(Service("orders-service"), Hubs("127.0.0.1:1"), DeadLetterMode("topic")); err == nil {
+		t.Fatal("DeadLetterMode accepted an unknown mode")
+	}
+}
+
+// nativeDeadLetterEvents is a memory event store that declares native-dead-letter and keeps every
+// event published through it.
+type nativeDeadLetterEvents struct {
+	*MemoryEventStore
+	mu        sync.Mutex
+	published []OutgoingEvent
+}
+
+func (e *nativeDeadLetterEvents) Capabilities() []Capability {
+	return append([]Capability{CapabilityNativeDeadLetter}, e.MemoryEventStore.Capabilities()...)
+}
+
+func (e *nativeDeadLetterEvents) Publish(ctx context.Context, event OutgoingEvent) error {
+	e.mu.Lock()
+	e.published = append(e.published, event)
+	e.mu.Unlock()
+	return e.MemoryEventStore.Publish(ctx, event)
+}
+
+func (e *nativeDeadLetterEvents) letters() []OutgoingEvent {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]OutgoingEvent(nil), e.published...)
+}
+
+// L3-DEAD-LETTERS (event-store): a record that fails every attempt is published to <source>.dlt
+// with its key, payload and headers and the six snodra-dlt-* headers, and nothing is parked.
+func TestTheEventStoreDeadLetterModePublishesAFailedRecord(t *testing.T) {
+	store := NewMemoryMessageStore()
+	base, err := NewMemoryEventStoreWithSegments(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := &nativeDeadLetterEvents{MemoryEventStore: base}
+	settings := consumerSettings()
+	settings.deadLetterMode = DeadLetterModeEventStore
+	settings.consumerTries = 1
+	app := eventsApp(t, WithStore(store), WithEventStore(events),
+		withEventSettings(settings), withTimings(controlTimings()), OutboxEnabled(false))
+	if err := HandleEvent(app, func(context.Context, OrderPlaced) error {
+		return errors.New("never works")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	key := "order-1"
+	publishTestEvent(t, base, "r-1", "orders.OrderPlaced", &key,
+		map[string]string{"snodra-dlt-processor": "spoofed"})
+	waitUntil(t, "the letter published to the dead-letter source", func() bool {
+		return len(events.letters()) == 1
+	})
+	letter := events.letters()[0]
+	is(t, letter.Source, DeadLetterSource(DefaultEventsSource))
+	is(t, letter.ID, "r-1")
+	is(t, letter.Type, "orders.OrderPlaced")
+	if letter.Key == nil || *letter.Key != key {
+		t.Fatalf("the letter's key: %v", letter.Key)
+	}
+	is(t, string(letter.Payload), `{"orderId":"r-1"}`)
+	for name, want := range map[string]string{
+		HeaderID:                        "r-1",
+		HeaderType:                      "orders.OrderPlaced",
+		HeaderCorrelationID:             "c-r-1",
+		"snodra-dlt-processor":          "default",
+		"snodra-dlt-reason":             string(DeadLetterHandlerFailed),
+		"snodra-dlt-original-topic":     DefaultEventsSource,
+		"snodra-dlt-original-partition": "0",
+		"snodra-dlt-original-offset":    "0",
+	} {
+		is(t, letter.Headers[name], want)
+	}
+	if !strings.Contains(letter.Headers["snodra-dlt-error"], "never works") {
+		t.Fatalf("the error header: %q", letter.Headers["snodra-dlt-error"])
+	}
+	if letters := lettersOf(t, store, DefaultProcessor); len(letters) != 0 {
+		t.Fatalf("letters in event-store mode: %v", letters)
+	}
+	waitUntil(t, "the acknowledgement after the publish", func() bool {
+		segments := processorStatusOf(t, app, DefaultProcessor).GetSegments()
+		return len(segments) == 1 && segments[0].GetCommitted() == "1"
+	})
+}
+
+// L3-DEAD-LETTERS (event-store): a malformed record is published with INVALID and no attempts,
+// and a record without an id gets <source>-<segment>-<position>.
+func TestTheEventStoreDeadLetterModeSendsAMalformedRecord(t *testing.T) {
+	store := NewMemoryMessageStore()
+	base, err := NewMemoryEventStoreWithSegments(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := &nativeDeadLetterEvents{MemoryEventStore: base}
+	settings := consumerSettings()
+	settings.deadLetterMode = DeadLetterModeEventStore
+	app := eventsApp(t, WithStore(store), WithEventStore(events),
+		withEventSettings(settings), withTimings(controlTimings()), OutboxEnabled(false))
+	if err := HandleEvent(app, func(context.Context, OrderPlaced) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	headers := map[string]string{HeaderType: "orders.OrderPlaced", HeaderID: "bad-1"}
+	err = base.Publish(context.Background(), OutgoingEvent{
+		Source: DefaultEventsSource, ID: "bad-1", Type: "orders.OrderPlaced",
+		Headers: headers, Payload: []byte("not a JSON object"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitUntil(t, "the malformed record published", func() bool { return len(events.letters()) == 1 })
+	letter := events.letters()[0]
+	is(t, letter.ID, "bad-1")
+	is(t, letter.Headers["snodra-dlt-reason"], string(DeadLetterInvalid))
+	if !strings.HasPrefix(letter.Headers["snodra-dlt-error"], "InvalidMessage: ") {
+		t.Fatalf("the invalid error header: %q", letter.Headers["snodra-dlt-error"])
+	}
+
+	// A record without an id header is named <source>-<segment>-<position>.
+	err = base.Publish(context.Background(), OutgoingEvent{
+		Source: DefaultEventsSource, Type: "orders.OrderPlaced",
+		Headers: map[string]string{HeaderType: "orders.OrderPlaced"}, Payload: []byte("still not JSON"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitUntil(t, "the anonymous record published", func() bool { return len(events.letters()) == 2 })
+	anonymous := events.letters()[1]
+	is(t, anonymous.ID, DefaultEventsSource+"-0-1")
+}
+
+// L3-DEAD-LETTERS (log): a record that fails every attempt is logged and skipped, never parked or
+// published, and the next record goes on.
+func TestTheLogDeadLetterModeLogsAndSkips(t *testing.T) {
+	store := NewMemoryMessageStore()
+	events, err := NewMemoryEventStoreWithSegments(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := &logRecorder{}
+	settings := consumerSettings()
+	settings.deadLetterMode = DeadLetterModeLog
+	settings.consumerTries = 1
+	app := eventsApp(t, WithStore(store), WithEventStore(events),
+		withEventSettings(settings), withTimings(controlTimings()), OutboxEnabled(false),
+		Logger(slog.New(recorder)))
+	var good atomic.Int64
+	if err := HandleEvent(app, func(_ context.Context, event OrderPlaced) error {
+		if event.OrderID == "bad-1" {
+			return errors.New("never works")
+		}
+		good.Add(1)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	publishTestEvent(t, events, "bad-1", "orders.OrderPlaced", nil, nil)
+	publishTestEvent(t, events, "good-1", "orders.OrderPlaced", nil, nil)
+	waitUntil(t, "the record after the logged one", func() bool { return good.Load() == 1 })
+	if got := recorder.count(slog.LevelError, "an event handler failed on every attempt; skipping the event"); got != 1 {
+		t.Fatalf("the log mode logged %d failures, want 1", got)
+	}
+	if letters := lettersOf(t, store, DefaultProcessor); len(letters) != 0 {
+		t.Fatalf("letters in log mode: %v", letters)
+	}
+	waitUntil(t, "both acknowledgements", func() bool {
+		segments := processorStatusOf(t, app, DefaultProcessor).GetSegments()
+		return len(segments) == 1 && segments[0].GetCommitted() == "2"
+	})
 }

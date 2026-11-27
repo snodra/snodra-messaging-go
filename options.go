@@ -311,6 +311,24 @@ func OutboxEnabled(on bool) Option {
 	}
 }
 
+// DeadLetterMode says where a record its processor cannot handle goes (SNODRA_DEAD_LETTER_MODE):
+// [DeadLetterModeCollection] (the default: park it in the message store's dead letters),
+// [DeadLetterModeEventStore] (publish it to the event store's dead-letter source, which needs an
+// event store with [CapabilityNativeDeadLetter]) or [DeadLetterModeLog] (log it and skip it).
+func DeadLetterMode(mode string) Option {
+	return func(c *config) error {
+		mode = strings.ToLower(strings.TrimSpace(mode))
+		switch mode {
+		case DeadLetterModeCollection, DeadLetterModeEventStore, DeadLetterModeLog:
+			c.events.deadLetterMode = mode
+			return nil
+		default:
+			return fmt.Errorf("snodra: DeadLetterMode needs %q, %q or %q, got %q",
+				DeadLetterModeCollection, DeadLetterModeEventStore, DeadLetterModeLog, mode)
+		}
+	}
+}
+
 // ConsumerEnabled says whether the instances read their event processors' subscriptions
 // (SNODRA_CONSUMER_ENABLED). On by default; a tool that only publishes turns it off.
 func ConsumerEnabled(on bool) Option {
@@ -423,11 +441,17 @@ func (c *config) validateEvents() error {
 	switch c.events.deadLetterMode {
 	case DeadLetterModeCollection, DeadLetterModeLog:
 	case DeadLetterModeEventStore:
-		// The mode that sends a record to the event store's dead-letter destination arrives with
-		// that sender; refusing it here means no configuration can silently lose records.
-		return fmt.Errorf("snodra: the event-store dead-letter mode is not available yet: use collection (the default)")
+		// The mode sends a record to the event store's dead-letter source: without a store that
+		// declares it, no configuration can silently lose the record.
+		if c.eventStore == nil {
+			return fmt.Errorf("snodra: the event-store dead-letter mode needs an event store with the capability %s", CapabilityNativeDeadLetter)
+		}
+		if !Supports(c.eventStore, CapabilityNativeDeadLetter) {
+			return fmt.Errorf("snodra: the event-store dead-letter mode needs an event store with the capability %s: %s lacks it",
+				CapabilityNativeDeadLetter, c.eventStore.Name())
+		}
 	default:
-		return fmt.Errorf("snodra: an unknown dead-letter mode %q (collection or log)",
+		return fmt.Errorf("snodra: an unknown dead-letter mode %q (collection, event-store or log)",
 			c.events.deadLetterMode)
 	}
 	if c.events.deadLetterMode == DeadLetterModeCollection && c.events.deadLetterRetention < time.Second {

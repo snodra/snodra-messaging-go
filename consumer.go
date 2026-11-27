@@ -369,7 +369,14 @@ func (a *App) attemptRecord(ctx context.Context, s *processorSession, d Delivery
 func (a *App) parkFailed(ctx context.Context, s *processorSession, d Delivery, typeName string, failure error, attempts int, undecodable, replay bool) error {
 	s.p.failedTotal.Add(1)
 	s.p.run.markFailed(failure, a.now())
-	if a.cfg.events.deadLetterMode != DeadLetterModeCollection {
+	switch a.cfg.events.deadLetterMode {
+	case DeadLetterModeEventStore:
+		letterError := deadLetterErrorOf(failure)
+		a.log.Error("an event handler failed on every attempt; sending it to the dead-letter source",
+			"processor", s.p.name, "type", typeName, "source", DeadLetterSource(s.p.subscription.Source),
+			"attempts", attempts, "error", failure)
+		return a.toSink(ctx, s, d, a.publishDeadLetterWork(s.p, d, DeadLetterHandlerFailed, letterError))
+	case DeadLetterModeLog:
 		a.log.Error("an event handler failed on every attempt; skipping the event",
 			"processor", s.p.name, "type", typeName, "attempts", attempts, "error", failure)
 		a.acknowledge(s.p, s.sub, d)
@@ -389,7 +396,13 @@ func (a *App) parkFailed(ctx context.Context, s *processorSession, d Delivery, t
 // parkInvalid parks a record that can never be handled (INVALID: no type header, a value that is
 // not a JSON object) and acknowledges it. It blocks no key and can only be discarded.
 func (a *App) parkInvalid(ctx context.Context, s *processorSession, d Delivery, why string) error {
-	if a.cfg.events.deadLetterMode != DeadLetterModeCollection {
+	switch a.cfg.events.deadLetterMode {
+	case DeadLetterModeEventStore:
+		failure := InvalidDeadLetterError(why)
+		a.log.Warn("a malformed record cannot be handled; sending it to the dead-letter source",
+			"processor", s.p.name, "source", DeadLetterSource(s.p.subscription.Source), "reason", why)
+		return a.toSink(ctx, s, d, a.publishDeadLetterWork(s.p, d, DeadLetterInvalid, failure))
+	case DeadLetterModeLog:
 		a.log.Warn("skipping a malformed record", "processor", s.p.name, "reason", why)
 		a.acknowledge(s.p, s.sub, d)
 		return nil

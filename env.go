@@ -60,6 +60,7 @@ const defaultHubAddress = "static://snodra-server:7000"
 //   - SNODRA_CONSUMER_ENABLED: [ConsumerEnabled], true or false (default true)
 //   - SNODRA_CONSUMER_MAX_ATTEMPTS: the handler invocations per record, the first included
 //     (default 5)
+//   - SNODRA_DEAD_LETTER_MODE: [DeadLetterMode], collection (the default), event-store or log
 //   - SNODRA_STORE_INIT_SCHEMA: whether Start prepares the message store's schema, true (the
 //     default) or false when the service applies it itself
 //
@@ -168,6 +169,9 @@ func (c *config) applyEventsEnv(get func(string) (string, bool)) error {
 	}
 	if err := flag("SNODRA_CONSUMER_ENABLED", &c.events.consumerEnabled); err != nil {
 		return err
+	}
+	if v, ok := get("SNODRA_DEAD_LETTER_MODE"); ok {
+		c.events.deadLetterMode = strings.ToLower(v)
 	}
 	if err := flag("SNODRA_STORE_INIT_SCHEMA", &c.events.storeInitSchema); err != nil {
 		return err
