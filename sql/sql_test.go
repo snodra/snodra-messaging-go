@@ -115,10 +115,7 @@ func TestFromEnvReadsTheSQLSettings(t *testing.T) {
 func TestTheUnsupportedPortsSaySo(t *testing.T) {
 	store := &Store{driver: Postgres}
 	var errs []error
-	_, err := store.DeadLetters().Count(context.Background(), "")
-	errs = append(errs, err)
-	errs = append(errs, store.Control().SetPaused(context.Background(), "default", true, "local", time.Now()))
-	_, err = store.ExternalCalls().Reset(context.Background(), "key", "owner")
+	_, err := store.ExternalCalls().Reset(context.Background(), "key", "owner")
 	errs = append(errs, err)
 	errs = append(errs, store.Sagas().Sagas.Insert(context.Background(), snodra.Saga{}))
 	errs = append(errs, store.Sagas().Dispatch.ClearNotice(context.Background(), "id"))

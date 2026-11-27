@@ -8,100 +8,12 @@ import (
 	snodra "github.com/snodra/snodra-messaging-go"
 )
 
-// The ports this level does not implement yet return snodra.ErrUnsupported. The interfaces are
-// frozen at level 2 so a third-party add-on compiles once; the official add-ons implement every
-// port by level 4.
+// The ports this level does not implement yet return snodra.ErrUnsupported: the external-call and
+// saga stores (level 4). The interfaces are frozen at level 2 so a third-party add-on compiles
+// once; the official add-ons implement every port by level 4.
 
 func unsupported(what string) error {
 	return fmt.Errorf("%w: the MongoDB message store does not implement %s yet", snodra.ErrUnsupported, what)
-}
-
-// ---- dead letters -------------------------------------------------------------------------------
-
-type unsupportedDeadLetters struct{}
-
-var _ snodra.DeadLetterStore = unsupportedDeadLetters{}
-
-func (unsupportedDeadLetters) Park(context.Context, snodra.DeadLetter) (snodra.ParkResult, error) {
-	return 0, unsupported("the dead-letter store")
-}
-
-func (unsupportedDeadLetters) Head(context.Context, string, string) (string, bool, error) {
-	return "", false, unsupported("the dead-letter store")
-}
-
-func (unsupportedDeadLetters) Earlier(context.Context, string, string, string) (string, bool, error) {
-	return "", false, unsupported("the dead-letter store")
-}
-
-func (unsupportedDeadLetters) ParkedKeys(context.Context, string, string, []string) ([]string, error) {
-	return nil, unsupported("the dead-letter store")
-}
-
-func (unsupportedDeadLetters) Get(context.Context, string) (*snodra.DeadLetter, error) {
-	return nil, unsupported("the dead-letter store")
-}
-
-func (unsupportedDeadLetters) List(context.Context, string, int) ([]snodra.DeadLetter, error) {
-	return nil, unsupported("the dead-letter store")
-}
-
-func (unsupportedDeadLetters) Summaries(context.Context, string) ([]snodra.DeadLetterSummary, error) {
-	return nil, unsupported("the dead-letter store")
-}
-
-func (unsupportedDeadLetters) Count(context.Context, string) (int64, error) {
-	return 0, unsupported("the dead-letter store")
-}
-
-func (unsupportedDeadLetters) Delete(context.Context, string) (bool, error) {
-	return false, unsupported("the dead-letter store")
-}
-
-func (unsupportedDeadLetters) DeleteIn(context.Context, string) (bool, error) {
-	return false, unsupported("the dead-letter store")
-}
-
-func (unsupportedDeadLetters) RecordFailure(context.Context, string, snodra.DeadLetterError, time.Time) (bool, error) {
-	return false, unsupported("the dead-letter store")
-}
-
-// ---- processor control --------------------------------------------------------------------------
-
-type unsupportedControl struct{}
-
-var _ snodra.ProcessorControlStore = unsupportedControl{}
-
-func (unsupportedControl) Get(context.Context, string) (snodra.ProcessorControlState, error) {
-	return snodra.ProcessorControlState{}, unsupported("the processor-control store")
-}
-
-func (unsupportedControl) SetPaused(context.Context, string, bool, string, time.Time) error {
-	return unsupported("the processor-control store")
-}
-
-func (unsupportedControl) Lock(context.Context, string, string, time.Time, time.Time) (snodra.LockOutcome, error) {
-	return snodra.LockOutcome{}, unsupported("the processor-control store")
-}
-
-func (unsupportedControl) Extend(context.Context, string, string, time.Time, time.Time) (bool, error) {
-	return false, unsupported("the processor-control store")
-}
-
-func (unsupportedControl) Release(context.Context, string, string, time.Time) (bool, error) {
-	return false, unsupported("the processor-control store")
-}
-
-func (unsupportedControl) Expire(context.Context, string, string, time.Time) (bool, error) {
-	return false, unsupported("the processor-control store")
-}
-
-func (unsupportedControl) SetReplay(context.Context, string, []snodra.ReplayRange, time.Time) error {
-	return unsupported("the processor-control store")
-}
-
-func (unsupportedControl) RemoveRange(context.Context, string, snodra.ReplayRange, time.Time) (bool, error) {
-	return false, unsupported("the processor-control store")
 }
 
 // ---- external calls -----------------------------------------------------------------------------

@@ -26,9 +26,10 @@
 //
 // # The stores
 //
-// The outbox and the processed-event markers are implemented. The dead-letter,
-// processor-control, external-call and saga ports of the interface frozen at level 2 return
-// snodra.ErrUnsupported for now; the official add-ons implement every port by level 4.
+// The outbox, the processed-event markers (with a reset's marker deletion), the dead letters and the
+// processor control are implemented. The external-call and saga ports of the interface frozen at
+// level 2 return snodra.ErrUnsupported for now; the official add-ons implement every port by
+// level 4.
 //
 // Times the store stamps itself (a claim's lease, an entry's sending and its failure) come from
 // the application's clock ([Store.UseClock]), never the database's. MongoDB has no notification
@@ -336,11 +337,11 @@ func (s *Store) Processed() snodra.ProcessedStore { return mongoProcessed{store:
 
 // DeadLetters returns the dead-letter port, which this level does not implement yet: every
 // operation fails with snodra.ErrUnsupported.
-func (s *Store) DeadLetters() snodra.DeadLetterStore { return unsupportedDeadLetters{} }
+func (s *Store) DeadLetters() snodra.DeadLetterStore { return mongoDeadLetters{store: s} }
 
 // Control returns the processor-control port, which this level does not implement yet: every
 // operation fails with snodra.ErrUnsupported.
-func (s *Store) Control() snodra.ProcessorControlStore { return unsupportedControl{} }
+func (s *Store) Control() snodra.ProcessorControlStore { return mongoControl{store: s} }
 
 // ExternalCalls returns the external-call port, which this level does not implement yet: every
 // operation fails with snodra.ErrUnsupported.

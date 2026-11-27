@@ -27,9 +27,10 @@
 //
 // # The stores
 //
-// The outbox and the processed-event markers are implemented. The dead-letter, processor-control,
-// external-call and saga ports are part of the interface frozen at level 2 and return
-// snodra.ErrUnsupported for now; the official add-ons implement every port by level 4.
+// The outbox, the processed-event markers (with a reset's marker deletion), the dead letters and the
+// processor control are implemented. The external-call and saga ports are part of the interface
+// frozen at level 2 and return snodra.ErrUnsupported for now; the official add-ons implement every
+// port by level 4.
 //
 // Times the store stamps itself (an entry's sending, a claim's lease) come from the application's
 // clock ([Store.UseClock]), never the database's. On PostgreSQL an append's transaction sends
@@ -346,6 +347,10 @@ func mysqlDSN(url string) (string, error) {
 	config.ParseTime = true
 	config.Loc = time.UTC
 	config.MultiStatements = false
+	// Matched rows, not changed rows: a conditional control write (a lock renewal, a release)
+	// that finds its row succeeded even when the values it wrote are the ones already there, as
+	// the reference's JDBC driver reports it.
+	config.ClientFoundRows = true
 	return config.FormatDSN(), nil
 }
 
@@ -418,11 +423,11 @@ func (s *Store) Processed() snodra.ProcessedStore { return sqlProcessed{store: s
 
 // DeadLetters returns the dead-letter port, which this level does not implement yet: every
 // operation fails with snodra.ErrUnsupported.
-func (s *Store) DeadLetters() snodra.DeadLetterStore { return unsupportedDeadLetters{} }
+func (s *Store) DeadLetters() snodra.DeadLetterStore { return sqlDeadLetters{store: s} }
 
 // Control returns the processor-control port, which this level does not implement yet: every
 // operation fails with snodra.ErrUnsupported.
-func (s *Store) Control() snodra.ProcessorControlStore { return unsupportedControl{} }
+func (s *Store) Control() snodra.ProcessorControlStore { return sqlControl{store: s} }
 
 // ExternalCalls returns the external-call port, which this level does not implement yet: every
 // operation fails with snodra.ErrUnsupported.

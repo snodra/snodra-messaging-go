@@ -20,9 +20,10 @@ import (
 // The lease a store check takes when it must not run out while the check runs.
 const storeLongLease = 60 * time.Second
 
-// MessageStore runs the nine level-2 message-store checks on the store open returns, each as a
-// subtest named exactly as the Rust kit names it. open returns one store over empty state whose
-// schema is ready; the kit calls it once per check, so the checks never see each other's data.
+// MessageStore runs the level-2 and level-3 message-store checks on the store open returns, each
+// as a subtest named exactly as the Rust kit names it. open returns one store over empty state
+// whose schema is ready; the kit calls it once per check, so the checks never see each other's
+// data.
 //
 // The store must be the kit's alone while it runs. A check that fails names the check and the
 // store; the other checks run in the Rust kit's order and the first failure stops the kit.
@@ -48,8 +49,8 @@ func MessageStore(t *testing.T, open func() snodra.MessageStore) {
 	}
 }
 
-// StoreCheckIDs returns the ids of the level-2 message-store checks, in the order the kit runs
-// them.
+// StoreCheckIDs returns the ids of the message-store checks the Go kit carries (level 2 and level
+// 3), in the Rust kit's order.
 func StoreCheckIDs() []string {
 	ids := make([]string, len(messageStoreChecks))
 	for i, check := range messageStoreChecks {
@@ -67,8 +68,9 @@ type storeTB interface {
 	Fatal(args ...any)
 }
 
-// messageStoreChecks is the level-2 set, in the Rust kit's order. store_checks.txt is the
-// checked-in copy of these ids, and a test pins it to a literal copy of the Rust list.
+// messageStoreChecks is the level-2 and level-3 set, in the Rust kit's order. store_checks.txt is
+// the checked-in copy of these ids, and a test pins it to a literal copy of that part of the Rust
+// list (its level-4 checks are not in the Go kit yet).
 var messageStoreChecks = []struct {
 	id  string
 	run func(testing.TB, snodra.MessageStore)
@@ -79,9 +81,17 @@ var messageStoreChecks = []struct {
 	{"rolled_back_transaction_leaves_no_outbox_entry", RolledBackTransactionLeavesNoOutboxEntry},
 	{"rolled_back_handler_leaves_no_processed_marker", RolledBackHandlerLeavesNoProcessedMarker},
 	{"processed_marker_records_once", ProcessedMarkerRecordsOnce},
+	{"delete_markers_removes_only_the_range", DeleteMarkersRemovesOnlyTheRange},
 	{"concurrent_relays_publish_each_entry_once", ConcurrentRelaysPublishEachEntryOnce},
 	{"expired_lease_is_reclaimed", ExpiredLeaseIsReclaimed},
 	{"purge_removes_only_sent_before", PurgeRemovesOnlySentBefore},
+	{"dead_letters_sequence_per_key", DeadLettersSequencePerKey},
+	{"dead_letter_parked_inside_rolled_back_transaction_is_kept", DeadLetterParkedInsideRolledBackTransactionIsKept},
+	{"dead_letter_deleted_in_a_transaction_goes_with_it", DeadLetterDeletedInATransactionGoesWithIt},
+	{"control_lock_is_exclusive_until_lease_expires", ControlLockIsExclusiveUntilLeaseExpires},
+	{"pause_state_round_trips", PauseStateRoundTrips},
+	{"replay_ranges_round_trip", ReplayRangesRoundTrip},
+	{"processor_control_write_inside_rolled_back_transaction_is_kept", ProcessorControlWriteInsideRolledBackTransactionIsKept},
 }
 
 // appendedEntryIsClaimedInCreatedSeqOrder runs the check for a testing.TB or a recorder.

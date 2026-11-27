@@ -551,10 +551,7 @@ func TestTheUnsupportedPortsSaySo(t *testing.T) {
 	store := &Store{}
 	ctx := context.Background()
 	var errs []error
-	_, err := store.DeadLetters().Count(ctx, "")
-	errs = append(errs, err)
-	errs = append(errs, store.Control().SetPaused(ctx, "default", true, "local", time.Now()))
-	_, err = store.ExternalCalls().Reset(ctx, "key", "owner")
+	_, err := store.ExternalCalls().Reset(ctx, "key", "owner")
 	errs = append(errs, err)
 	errs = append(errs, store.Sagas().Sagas.Insert(ctx, snodra.Saga{}))
 	errs = append(errs, store.Sagas().Dispatch.ClearNotice(ctx, "id"))
@@ -655,3 +652,129 @@ func randText() string {
 	}
 	return string(raw)
 }
+
+// The processor_control and dead_letters documents have the published layout's fields and BSON
+// types, so another Snodra add-on reads what this one writes.
+func TestControlAndDeadLetterDocumentsWriteTheLayoutsShape(t *testing.T) {
+	server := mongoContainer(t)
+	store := server.newStore(t, true)
+	ctx := context.Background()
+	at := time.Date(2026, 11, 3, 10, 0, 0, 250_000_000, time.UTC)
+	processor := "conformance-layout"
+	if err := store.Control().SetPaused(ctx, processor, true, "control-1", at); err != nil {
+		t.Fatal(err)
+	}
+	if outcome, err := store.Control().Lock(ctx, processor, "op-1", at.Add(30*time.Second), at.Add(time.Second)); err != nil || !outcome.Taken {
+		t.Fatalf("lock: %+v, %v", outcome, err)
+	}
+	replay := snodra.ReplayRange{Source: "snodra.events", Segment: "0", From: "10", Until: "20"}
+	if err := store.Control().SetReplay(ctx, processor, []snodra.ReplayRange{replay}, at.Add(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := store.Database().Collection(collectionControl).FindOne(ctx, bson.D{{Key: "_id", Value: processor}}).Raw()
+	if err != nil {
+		t.Fatal(err)
+	}
+	typeOf := func(document bson.Raw, name string, want bson.Type) {
+		t.Helper()
+		value, err := document.LookupErr(name)
+		if err != nil {
+			t.Fatalf("%s is missing: %v", name, err)
+		}
+		if value.Type != want {
+			t.Fatalf("%s has BSON type %v, want %v", name, value.Type, want)
+		}
+	}
+	typeOf(raw, "paused", bson.TypeBoolean)
+	typeOf(raw, "pausedAt", bson.TypeDateTime)
+	typeOf(raw, "pausedBy", bson.TypeString)
+	typeOf(raw, "operation", bson.TypeEmbeddedDocument)
+	typeOf(raw, "replay", bson.TypeArray)
+	typeOf(raw, "updatedAt", bson.TypeDateTime)
+	operation := raw.Lookup("operation").Document()
+	if operation.Lookup("id").StringValue() != "op-1" || operation.Lookup("kind").StringValue() != snodra.ResetKind {
+		t.Fatalf("operation: %v", operation)
+	}
+	typeOf(operation, "leaseUntil", bson.TypeDateTime)
+	typeOf(operation, "preparedAt", bson.TypeDateTime)
+	storedRange := raw.Lookup("replay").Array().Index(0).Document()
+	if storedRange.Lookup("topic").StringValue() != replay.Source {
+		t.Fatalf("a replay range's topic: %v", storedRange)
+	}
+	typeOf(storedRange, "partition", bson.TypeInt32)
+	typeOf(storedRange, "from", bson.TypeInt64)
+	typeOf(storedRange, "until", bson.TypeInt64)
+
+	letter := snodra.DeadLetter{
+		ID:            "conformance-layout:snodra.events:1:43",
+		Processor:     "conformance-layout",
+		Source:        "snodra.events",
+		Segment:       "1",
+		Position:      "43",
+		Key:           strPtrLayout("order-7"),
+		EventID:       "evt-8",
+		EventType:     "orders.OrderShipped",
+		Headers:       map[string]string{"type": "orders.OrderShipped", "id": "evt-8"},
+		Payload:       []byte(`{"orderId":"order-7"}`),
+		Reason:        snodra.DeadLetterHandlerFailed,
+		Error:         snodra.NewDeadLetterError("RemoteHandler", "boom"),
+		Attempts:      3,
+		ParkedAt:      at,
+		LastAttemptAt: at,
+		ExpireAt:      at.Add(24 * time.Hour),
+		Replay:        true,
+	}
+	if result, err := store.DeadLetters().Park(ctx, letter); err != nil || result != snodra.ParkNew {
+		t.Fatalf("park: %v, %v", result, err)
+	}
+	raw, err = store.Database().Collection(collectionDeadLetters).FindOne(ctx, bson.D{{Key: "_id", Value: letter.ID}}).Raw()
+	if err != nil {
+		t.Fatal(err)
+	}
+	typeOf(raw, "_id", bson.TypeString)
+	typeOf(raw, "processor", bson.TypeString)
+	typeOf(raw, "topic", bson.TypeString)
+	typeOf(raw, "partition", bson.TypeInt32)
+	typeOf(raw, "offset", bson.TypeInt64)
+	typeOf(raw, "key", bson.TypeString)
+	typeOf(raw, "eventId", bson.TypeString)
+	typeOf(raw, "eventType", bson.TypeString)
+	typeOf(raw, "headers", bson.TypeEmbeddedDocument)
+	typeOf(raw, "payload", bson.TypeString)
+	typeOf(raw, "reason", bson.TypeString)
+	typeOf(raw, "error", bson.TypeEmbeddedDocument)
+	typeOf(raw, "attempts", bson.TypeInt32)
+	typeOf(raw, "parkedAt", bson.TypeDateTime)
+	typeOf(raw, "lastAttemptAt", bson.TypeDateTime)
+	typeOf(raw, "expireAt", bson.TypeDateTime)
+	typeOf(raw, "replay", bson.TypeBoolean)
+
+	binary := letter
+	binary.ID = "conformance-layout:snodra.events:1:44"
+	binary.Payload = []byte{0xff, 0xfe, 0x00, 0x01}
+	binary.Key = nil
+	binary.EventID = ""
+	binary.EventType = ""
+	binary.BlockedBy = ""
+	binary.Replay = false
+	if result, err := store.DeadLetters().Park(ctx, binary); err != nil || result != snodra.ParkNew {
+		t.Fatalf("park binary: %v, %v", result, err)
+	}
+	raw, err = store.Database().Collection(collectionDeadLetters).FindOne(ctx, bson.D{{Key: "_id", Value: binary.ID}}).Raw()
+	if err != nil {
+		t.Fatal(err)
+	}
+	payloadBinary, err := raw.LookupErr("payloadBinary")
+	if err != nil || payloadBinary.Type != bson.TypeBinary {
+		t.Fatalf("payloadBinary: %v, %v", payloadBinary, err)
+	}
+	for _, name := range []string{"key", "eventId", "eventType", "blockedBy", "payload", "replay"} {
+		if value, err := raw.LookupErr(name); err == nil {
+			t.Fatalf("%s is present: %v", name, value)
+		}
+	}
+}
+
+// strPtrLayout is a pointer to value.
+func strPtrLayout(value string) *string { return &value }
