@@ -45,15 +45,16 @@ retries and timeouts.
   retry-all and discard driven from the dashboard; `event-store` publishes it to the `<source>.dlt` source with the
   six `snodra-dlt-*` headers, when the store declares `native-dead-letter`; `log` logs it and moves on.
 - **Add-ons**: Kafka and RabbitMQ Streams for the event store; MongoDB and SQL (PostgreSQL, MySQL) for the outbox, the
-  markers, the dead letters and the processor control; in-memory stores for tests. Each add-on is a module of its own,
-  and `snodratest` is the add-on kit.
+  markers, the dead letters, the processor control, the external calls and the saga records; in-memory stores for
+  tests. Each add-on is a module of its own, and `snodratest` is the add-on kit.
 - **The hub connection**: registration, heartbeats, reconnects, flow control, several hubs and an ordered shutdown.
 - **Credentials and identity**: a token (static, or a file read again), an OAuth2 JWT (renewed) or a client
   certificate (rolled over to a renewed pair); the caller's token verified against the issuer's keys, and guards on
   handlers.
 - **Telemetry** behind an interface, with an OpenTelemetry implementation in the separate `observability` module.
 - **Feature level 3**, proved by the 33 level-1 checks of the conformance runner and by the level-2 and level-3
-  event-store and message-store kits. Sagas (level 4) are not in it yet.
+  event-store and message-store kits. The saga store ports and the level-4 store checks are implemented on `main`; the
+  saga runtime (level 4) is not in it yet.
 
 ## Install
 
