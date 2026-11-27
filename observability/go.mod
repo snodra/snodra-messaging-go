@@ -3,7 +3,7 @@ module github.com/snodra/snodra-messaging-go/observability
 go 1.26.0
 
 require (
-	github.com/snodra/snodra-messaging-go v0.5.2
+	github.com/snodra/snodra-messaging-go v0.6.0
 	go.opentelemetry.io/otel v1.47.0
 	go.opentelemetry.io/otel/metric v1.47.0
 	go.opentelemetry.io/otel/sdk v1.47.0

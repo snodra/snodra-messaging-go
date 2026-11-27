@@ -3,7 +3,7 @@ module github.com/snodra/snodra-messaging-go/mongo
 go 1.26.0
 
 require (
-	github.com/snodra/snodra-messaging-go v0.5.2
+	github.com/snodra/snodra-messaging-go v0.6.0
 	github.com/testcontainers/testcontainers-go v0.45.0
 	github.com/testcontainers/testcontainers-go/modules/mongodb v0.45.0
 	go.mongodb.org/mongo-driver/v2 v2.10.1
