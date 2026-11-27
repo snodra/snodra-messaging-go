@@ -209,6 +209,9 @@ func (c sqlControl) Lock(ctx context.Context, processor, operation string, lease
 			outcome = snodra.LockOutcome{Taken: true}
 			return nil
 		}
+		if s.lockStep != nil {
+			s.lockStep("renewed")
+		}
 		take := s.bind("UPDATE snodra_processor_control SET op_id = ?, op_kind = ?, op_lease_until = ?, op_prepared_at = ?, updated_at = ? " +
 			"WHERE processor = ? AND (op_id IS NULL OR op_lease_until <= ?)")
 		result, err = tx.ExecContext(ctx, take, operation, snodra.ResetKind, millis(leaseUntil), millis(now), millis(now), processor, millis(now))
@@ -218,6 +221,11 @@ func (c sqlControl) Lock(ctx context.Context, processor, operation string, lease
 		if affected, err := result.RowsAffected(); err != nil {
 			return storeError(err)
 		} else if affected == 1 {
+			// The take matched: hold the transaction (and its row lock) here when a test asks,
+			// so another instance's take queues behind this commit.
+			if s.lockStep != nil {
+				s.lockStep("taken")
+			}
 			outcome = snodra.LockOutcome{Taken: true}
 			return nil
 		}

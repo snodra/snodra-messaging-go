@@ -192,6 +192,11 @@ type Store struct {
 	clockMu sync.RWMutex
 	clock   func() time.Time
 
+	// lockStep, when set by a test, is called at two points of Lock: "renewed" after its first
+	// renewal missed, before the conditional take, and "taken" after the take matched but before
+	// the transaction commits. Production leaves it nil.
+	lockStep func(step string)
+
 	closed atomic.Bool
 }
 
