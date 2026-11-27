@@ -2,6 +2,8 @@ package snodratest_test
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 
 	snodra "github.com/snodra/snodra-messaging-go"
@@ -91,4 +93,71 @@ func TestTheAbsentCapabilityChecks(t *testing.T) {
 		}
 		snodratest.NoBrowserWithoutCapability(t, kit)
 	})
+}
+
+// withBrowse declares the browse capability.
+type withBrowse struct {
+	snodra.EventStore
+}
+
+func (s withBrowse) Capabilities() []snodra.Capability {
+	return append(s.EventStore.Capabilities(), snodra.CapabilityBrowse)
+}
+
+// skipRecorder records a check's Skip instead of ending the test, so a skip can be asserted.
+type skipRecorder struct {
+	*testing.T
+	skipped bool
+}
+
+func (s *skipRecorder) Skip(...any) { s.skipped = true }
+
+// The no-browser check does not report a pass for a browse store: it skips, since the Go kit
+// cannot run the browse checks.
+func TestNoBrowserCheckSkipsABrowseStore(t *testing.T) {
+	store := snodra.NewMemoryEventStore()
+	kit := &snodratest.EventStoreKit{
+		Source:  "conformance.l3-absent",
+		Open:    func() snodra.EventStore { return withBrowse{EventStore: store} },
+		Markers: newMarkers(),
+	}
+	recorder := &skipRecorder{T: t}
+	snodratest.NoBrowserWithoutCapability(recorder, kit)
+	if !recorder.skipped {
+		t.Fatal("a store declaring browse must skip the no-browser check, not pass it")
+	}
+}
+
+// wrongCapabilityStore refuses the admin for another capability.
+type wrongCapabilityStore struct {
+	snodra.EventStore
+}
+
+func (s wrongCapabilityStore) Admin(snodra.SubscriptionSpec) (snodra.SubscriptionAdmin, error) {
+	return nil, &snodra.UnsupportedError{Capability: snodra.CapabilityLag}
+}
+
+// failRecorder records a check's Fatalf instead of ending the test.
+type failRecorder struct {
+	*testing.T
+	failed string
+}
+
+func (f *failRecorder) Fatalf(format string, args ...any) {
+	f.failed = fmt.Sprintf(format, args...)
+}
+
+// The admin-without-replay check names the replay capability, not just any Unsupported error.
+func TestAdminWithoutReplayCheckNamesTheCapability(t *testing.T) {
+	store := snodra.NewMemoryEventStore()
+	kit := &snodratest.EventStoreKit{
+		Source:  "conformance.l3-absent",
+		Open:    func() snodra.EventStore { return wrongCapabilityStore{EventStore: store} },
+		Markers: newMarkers(),
+	}
+	recorder := &failRecorder{T: t}
+	snodratest.AdminWithoutReplayIsUnsupported(recorder, kit)
+	if !strings.Contains(recorder.failed, "replay") {
+		t.Fatalf("the check accepted a wrong capability: %q", recorder.failed)
+	}
 }

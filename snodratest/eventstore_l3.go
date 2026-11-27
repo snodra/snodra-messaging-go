@@ -217,7 +217,8 @@ func ReplayFromEarliestRedeliversHistory(tb testing.TB, kit *EventStoreKit) {
 		}
 	}
 	apply(tb, admin, earliest)
-	second := join(tb, events, spec)
+	restarted := kit.instance(tb) // a new instance starts at the reset positions
+	second := join(tb, restarted, spec)
 	second.until(tb, "the acknowledged events replayed", func(r *eventReader) bool { return r.hasAll(all) })
 	second.close(tb)
 }
@@ -233,8 +234,9 @@ func AdminWithoutReplayIsUnsupported(tb testing.TB, kit *EventStoreKit) {
 		_, failure = events.Admin(spec)
 		return nil
 	})
-	if !errors.Is(failure, snodra.ErrUnsupported) {
-		tb.Fatalf("admin without replay: %v", failure)
+	var unsupported *snodra.UnsupportedError
+	if !errors.As(failure, &unsupported) || unsupported.Capability != snodra.CapabilityReplay {
+		tb.Fatalf("admin without replay is unsupported for replay: %v", failure)
 	}
 }
 
@@ -375,8 +377,9 @@ func DeadLetterSourceReceives(tb testing.TB, kit *EventStoreKit) {
 func NoBrowserWithoutCapability(tb testing.TB, kit *EventStoreKit) {
 	tb.Helper()
 	if snodra.Supports(kit.instance(tb), snodra.CapabilityBrowse) {
-		tb.Logf("event store conformance check `no_browser_without_capability`: the store declares browse; the Go kit has no event browser, so the four browse checks are a kit difference")
-		return
+		// The check is vacuous for such a store, and the Go kit cannot run the four browse checks
+		// that would verify it: skip rather than report a pass.
+		tb.Skip("the store declares browse; the Go kit has no event browser, so no_browser_without_capability is not applicable (a kit difference)")
 	}
 }
 

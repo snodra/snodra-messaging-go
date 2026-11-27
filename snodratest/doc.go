@@ -44,7 +44,9 @@
 // The event-store kit runs the nine level-2 checks and the level-3 capability checks: replay (or
 // admin-without-replay), lag (or lag-without-capability), native-dead-letter and the no-browser
 // check. The four browse checks are omitted as a kit difference: the Go library has no event
-// browser. A store that declares browse is told so; a store that does not proves it has none.
+// browser. A store that does not declare browse passes no_browser_without_capability; one that
+// declares browse skips it (the check is vacuous there) and the kit is told the browse checks are
+// a kit difference it cannot run.
 // The message-store kit runs its level-2 checks.
 //
 // The checks run one after the other in the Rust kit's order, each on subscription names (event
