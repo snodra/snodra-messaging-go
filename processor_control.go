@@ -80,17 +80,19 @@ func (a *App) readProcessorControl(ctx context.Context) {
 // the change count after the poll's apply: a reset write since makes this read stale, and nothing
 // here acts on it.
 func (a *App) reconcileResetHold(ctx context.Context, p *processor, state ProcessorControlState, now time.Time, readAt uint64) {
-	if p.run.changeCount() != readAt {
-		return
-	}
-	held := p.run.heldOperation()
-	if held == nil {
+	// The held snapshot and the change count are one read: a prepare that landed before it is
+	// either named by both or has moved the count (so the guard skips), and one that lands after
+	// it is protected by the conditional writes below, which only touch the snapshot's operation.
+	held, at := p.run.heldWithChangeCount()
+	if at != readAt || held == nil {
 		return
 	}
 	if p.run.isExecuting(held.id) {
 		// The executing reset must finish (and refuse) before the consumer can join, even when
 		// the persisted lease lapsed or another operation took the lock.
-		if state.Operation == nil || state.Operation.ID != held.id || !state.Operation.HoldsAt(now) {
+		if state.Operation == nil || state.Operation.ID != held.id {
+			// The extension owns loss: a lease that merely looks passed is renewed (or fails)
+			// there, and the lock stays held here until the execute returns.
 			p.run.markExecutingLost(held.id)
 		}
 		p.run.setLockStateIf(held.id, held.id, true)

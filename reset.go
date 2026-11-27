@@ -342,6 +342,10 @@ func (c *controlPlane) runReset(ctx context.Context, req *hubpb.ControlRequest, 
 	if lost := c.resetLeaseLost(ctx, p, op, lease, deadline); lost != "" {
 		return c.resetChangedRefusal(req, hubpb.ControlRefusal_CONTROL_REFUSAL_FAILED, lost, changed)
 	}
+	// The lost mark can still land between that check and Apply: the extension is concurrent. The
+	// consumer stays out until the execute returns, and Apply refuses while any instance reads
+	// (ErrSubscribersActive), so a takeover cannot move the positions under a reader. Closing this
+	// instant needs a cancelable apply the event-store contract does not have (SG-50).
 	if err := admin.Apply(ctx, plan); err != nil {
 		return c.resetStoreRefusal(req, err, changed)
 	}
@@ -509,15 +513,16 @@ func finishDetail(resumed bool, holder string) string {
 	}
 }
 
-// finishNoLockDetail is the finish reply when nothing held the operation's lock.
+// finishNoLockDetail is the finish reply when nothing held the operation's lock: it never claims
+// the finish released one.
 func finishNoLockDetail(resumed bool, holder string) string {
 	switch {
+	case holder != "":
+		return "another reset holds the lock (operation " + holder + ")"
 	case resumed:
 		return "no operation holds the lock"
-	case holder != "":
-		return "released; another reset holds the lock (operation " + holder + ")"
 	default:
-		return "released; consuming once the lock is read back"
+		return "no operation was held; consuming once the lock is read back"
 	}
 }
 
@@ -540,12 +545,17 @@ func (c *controlPlane) settleAfterFinish(ctx context.Context, p *processor, now 
 		_ = c.app.stopForReset(ctx, p)
 		return false, ""
 	}
-	if p.run.holdsLock() {
-		holder = p.run.operation()
+	if holder, holds := p.run.lockState(); holds {
 		_ = c.app.stopForReset(ctx, p)
 		return false, holder
 	}
 	p.run.signalWake()
+	// A prepare can land between the check and the wake: it owns the lock now, and the reply must
+	// name it (the consumer stays out through the prepare's own stop either way).
+	if holder, holds := p.run.lockState(); holds {
+		_ = c.app.stopForReset(ctx, p)
+		return false, holder
+	}
 	return true, ""
 }
 

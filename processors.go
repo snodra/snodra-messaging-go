@@ -117,9 +117,15 @@ func (r *processorRuntime) hasStarted() bool {
 
 // operation is the reset operation holding the processor's lock, empty when none.
 func (r *processorRuntime) operation() string {
+	operation, _ := r.lockState()
+	return operation
+}
+
+// lockState is the operation named in the status and whether the lock holds, in one read.
+func (r *processorRuntime) lockState() (string, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.operationID
+	return r.operationID, r.lockHolds
 }
 
 // replayRanges is the open replay ranges of the processor's source.
@@ -413,7 +419,9 @@ func (r *processorRuntime) applyControl(ctx context.Context, state ProcessorCont
 		// still names it (it can be cleared by a poll between the execute's check and this read).
 		r.operationID = r.executing
 		r.lockHolds = true
-		if state.Operation == nil || state.Operation.ID != r.executing || !state.Operation.HoldsAt(now) {
+		if state.Operation == nil || state.Operation.ID != r.executing {
+			// The extension is the authoritative owner of loss: a persisted lease that merely
+			// looks passed is renewed (or fails) there, so the poll does not mark it lost.
 			r.executingLost = true
 		}
 	} else if state.Operation != nil && state.Operation.HoldsAt(now) {
@@ -448,13 +456,21 @@ func (r *processorRuntime) setHeld(id string, lease time.Duration) {
 
 // heldOperation is the operation this instance prepared, nil when none.
 func (r *processorRuntime) heldOperation() *heldReset {
+	held, _ := r.heldWithChangeCount()
+	return held
+}
+
+// heldWithChangeCount is the operation held here and the change count in one critical section: a
+// prepare that lands after it moves the count, and one that landed before it is what the count
+// and the snapshot name together.
+func (r *processorRuntime) heldWithChangeCount() (*heldReset, uint64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.held == nil {
-		return nil
+		return nil, r.changes
 	}
 	copied := *r.held
-	return &copied
+	return &copied, r.changes
 }
 
 // updateHeldLease records a renewed lease for the operation held here; false when another

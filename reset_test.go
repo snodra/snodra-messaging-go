@@ -1855,3 +1855,42 @@ func TestALostExecuteDoesNotRenewItsLeaseAfterRefusing(t *testing.T) {
 	}
 	okReply(t, sendControl(t, s, resetFinishControl("finish-1", DefaultProcessor, "op-1", true)), "finish aborted")
 }
+
+// L3-RESET: the guard and the held snapshot are one read. The prepare the poll's state predates
+// can land only after that read; the poll then acts on its old snapshot solely through the
+// conditional writes, which leave the new prepare alone.
+func TestAPrepareBetweenTheGuardAndTheHeldReadSurvives(t *testing.T) {
+	run := newProcessorRuntime()
+	run.setHeld("op-1", time.Second)
+	readAt := run.changeCount()
+
+	held, at := run.heldWithChangeCount()
+	if at != readAt || held == nil || held.id != "op-1" {
+		t.Fatalf("the snapshot for the stale state: %+v at %d, want op-1 at %d", held, at, readAt)
+	}
+	// The prepare lands after the paired read, between it and the reconcile's writes.
+	run.setHeld("op-2", 2*time.Second)
+
+	// Every write the stale reconcile can make is conditional on its snapshot's operation.
+	if run.clearHeldIf(held.id) {
+		t.Fatal("the stale reconcile cleared the new prepare")
+	}
+	if run.clearHeldAndLock(held.id, "", false) {
+		t.Fatal("the stale expire cleared the new prepare")
+	}
+	if run.setLockStateIf(held.id, "", false) {
+		t.Fatal("the stale executing branch touched the new prepare")
+	}
+	if current := run.heldOperation(); current == nil || current.id != "op-2" {
+		t.Fatalf("the new prepare after the stale writes: %+v", current)
+	}
+	if operation := run.operation(); operation != "op-2" {
+		t.Fatalf("the lock named %q after the stale writes", operation)
+	}
+
+	// A read taken now pairs the new operation with a later count, so the guard skips.
+	held, at = run.heldWithChangeCount()
+	if held == nil || held.id != "op-2" || at == readAt {
+		t.Fatalf("the paired read after the prepare: %+v at %d, stale count %d", held, at, readAt)
+	}
+}

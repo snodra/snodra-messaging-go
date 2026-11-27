@@ -723,6 +723,10 @@ settled; where an entry is settled its behaviour is the specification. The code 
   `snodra-messaging@64dde1e:snodra-messaging/src/main/kotlin/com/damoreira/snodra/messaging/events/EventConsumer.kt:243`).
   An OK while the subscription still has a reader is what the execute's subscribers-active check exists to stop, so
   this library refuses instead.
+- **Residual window (execute):** the extension can mark the execute lost between its last lost check and
+  `Apply`. The consumer stays out until the execute returns, and `Apply` refuses with `ErrSubscribersActive`
+  while any instance reads, so a takeover cannot move the positions under a reader. Closing the instant
+  itself needs a cancelable apply the event-store contract does not have.
 - **Question:** should a prepare answer OK (the reference's reply) or a refusal (this library) when the record in
   hand keeps the consumer in the subscription past the stop bound?
 
