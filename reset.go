@@ -198,10 +198,10 @@ func (c *controlPlane) resetExecute(ctx context.Context, req *hubpb.ControlReque
 	}
 	p.run.setExecuting(op)
 	defer p.run.setExecuting("")
-	stopExtension := c.extendResetLease(ctx, p, op, held.lease)
+	deadline := a.now().Add(a.cfg.timings.resetExecuteLimit)
+	stopExtension := c.extendResetLease(ctx, p, op, held.lease, deadline)
 	defer stopExtension()
 
-	deadline := a.now().Add(a.cfg.timings.resetExecuteLimit)
 	changed := &resetChange{}
 	reply := c.runReset(ctx, req, p, op, held.lease, target, deadline, changed)
 	// A whole lease for the finish, unless the lease was lost already.
@@ -212,9 +212,10 @@ func (c *controlPlane) resetExecute(ctx context.Context, req *hubpb.ControlReque
 	return reply
 }
 
-// extendResetLease renews the operation's lease while its execute runs; the returned function
-// stops it.
-func (c *controlPlane) extendResetLease(ctx context.Context, p *processor, op string, lease time.Duration) func() {
+// extendResetLease renews the operation's lease while its execute runs, never past the execute's
+// deadline (a handler that outlives it lets the lease lapse so another instance can recover); the
+// returned function stops it.
+func (c *controlPlane) extendResetLease(ctx context.Context, p *processor, op string, lease time.Duration, deadline time.Time) func() {
 	period := resetLeaseExtension
 	if third := lease / 3; third < period {
 		period = third
@@ -234,6 +235,9 @@ func (c *controlPlane) extendResetLease(ctx context.Context, p *processor, op st
 				return
 			case <-ticker.C:
 				now := c.app.now()
+				if !now.Before(deadline) {
+					return // the execute outlived its limit: let the lease lapse
+				}
 				if _, err := c.app.cfg.store.Control().Extend(ctx, p.name, op, now.Add(lease), now); err != nil {
 					return
 				}
@@ -410,10 +414,22 @@ func (c *controlPlane) resetFinish(ctx context.Context, req *hubpb.ControlReques
 	control := a.cfg.store.Control()
 	if held := p.run.heldOperation(); held != nil && held.id == op {
 		p.run.rememberEnded(op, held.lease, now)
-		if _, err := control.Release(ctx, p.name, op, now); err != nil {
+		released, err := control.Release(ctx, p.name, op, now)
+		if err != nil {
 			return controlRefused(req, hubpb.ControlRefusal_CONTROL_REFUSAL_FAILED, err.Error())
 		}
 		p.run.clearHeld()
+		if !released {
+			// The lease lapsed and another operation took the lock before this finish.
+			if state, err := control.Get(ctx, p.name); err == nil && state.Operation != nil &&
+				state.Operation.HoldsAt(now) && state.Operation.ID != op {
+				p.run.setLockState(state.Operation.ID, true)
+				_ = a.stopForReset(ctx, p)
+				return controlRefused(req, hubpb.ControlRefusal_CONTROL_REFUSAL_NOT_PREPARED,
+					fmt.Sprintf("operation %s holds the lock of processor %s, not %s",
+						state.Operation.ID, p.name, op))
+			}
+		}
 		c.settleAfterFinish(ctx, p, now)
 		a.log.Info("a processor's reset was finished", "processor", p.name, "operation", op,
 			"aborted", finish.GetAborted())
@@ -432,11 +448,22 @@ func (c *controlPlane) resetFinish(ctx context.Context, req *hubpb.ControlReques
 		c.settleAfterFinish(ctx, p, now)
 		return controlOK(req, "no operation holds the lock")
 	case state.Operation.ID == op:
-		if _, err := control.Release(ctx, p.name, op, now); err != nil {
+		released, err := control.Release(ctx, p.name, op, now)
+		if err != nil {
 			return controlRefused(req, hubpb.ControlRefusal_CONTROL_REFUSAL_FAILED, err.Error())
 		}
 		p.run.clearHeld()
 		p.run.rememberEnded(op, 0, now)
+		if !released {
+			if current, err := control.Get(ctx, p.name); err == nil && current.Operation != nil &&
+				current.Operation.HoldsAt(now) && current.Operation.ID != op {
+				p.run.setLockState(current.Operation.ID, true)
+				_ = a.stopForReset(ctx, p)
+				return controlRefused(req, hubpb.ControlRefusal_CONTROL_REFUSAL_NOT_PREPARED,
+					fmt.Sprintf("operation %s holds the lock of processor %s, not %s",
+						current.Operation.ID, p.name, op))
+			}
+		}
 		c.settleAfterFinish(ctx, p, now)
 		return controlOK(req, "released, consuming again")
 	default:

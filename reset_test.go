@@ -978,3 +978,70 @@ func TestARetriedDeadLetterFromAReplaySkipsDisallowReplay(t *testing.T) {
 	is(t, normal.get("evt-1"), 2)
 	is(t, noReplay.get("evt-1"), 1)
 }
+
+// L3-RESET: an execute that outlives its limit lets the lease lapse and says the handlers ran;
+// the extension stops at the deadline.
+func TestAResetThatOutlivesItsLimitLosesTheLease(t *testing.T) {
+	hub := fakehub.Start(t)
+	store := NewMemoryMessageStore()
+	events := NewMemoryEventStore()
+	timings := controlTimings()
+	timings.resetExecuteLimit = 100 * time.Millisecond
+	_, s := l3Serving(t, hub, func(app *App) {
+		if err := HandleEvent(app, func(context.Context, OrderPlaced) error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+		if err := HandleReset(app, DefaultProcessor, func(context.Context, ResetContext) error {
+			time.Sleep(250 * time.Millisecond)
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}, WithStore(store), WithEventStore(events), withTimings(timings))
+	publishTestEvent(t, events, "evt-1", "orders.OrderPlaced", nil, nil)
+	okReply(t, sendControl(t, s, resetPrepareControl("prepare-1", DefaultProcessor, "op-1", 1000)), "prepare")
+	refused := refusedReply(t, sendControl(t, s, resetExecuteControl("execute-1", DefaultProcessor, "op-1", targetEarliest())),
+		hubpb.ControlRefusal_CONTROL_REFUSAL_FAILED, "an execute past its limit")
+	if !strings.Contains(refused.GetMessage(), "ran longer than") ||
+		!strings.Contains(refused.GetMessage(), "reset handlers ran (1)") {
+		t.Fatalf("the outlived execute: %q", refused.GetMessage())
+	}
+	okReply(t, sendControl(t, s, resetFinishControl("finish-1", DefaultProcessor, "op-1", true)), "finish aborted")
+}
+
+// L3-RESET: a finish whose lease lapsed and whose lock another operation took over is
+// NOT_PREPARED and leaves the other lock; a finish for that operation releases it.
+func TestAFinishAfterATakeoverIsNotPrepared(t *testing.T) {
+	hub := fakehub.Start(t)
+	store := NewMemoryMessageStore()
+	events := NewMemoryEventStore()
+	timings := controlTimings()
+	timings.controlPoll = time.Second // keep the poller from clearing the held operation first
+	app, s := l3Serving(t, hub, func(app *App) {
+		if err := HandleEvent(app, func(context.Context, OrderPlaced) error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+	}, WithStore(store), WithEventStore(events), withTimings(timings))
+	okReply(t, sendControl(t, s, resetPrepareControl("prepare-1", DefaultProcessor, "op-1", 30000)), "prepare")
+	now := time.Now()
+	if released, err := store.Control().Release(context.Background(), DefaultProcessor, "op-1", now); err != nil || !released {
+		t.Fatalf("releasing op-1 for the takeover: %v, %v", released, err)
+	}
+	if outcome, err := store.Control().Lock(context.Background(), DefaultProcessor, "op-2", now.Add(30*time.Second), now); err != nil || !outcome.Taken {
+		t.Fatalf("taking over with op-2: %+v, %v", outcome, err)
+	}
+	refused := refusedReply(t, sendControl(t, s, resetFinishControl("finish-1", DefaultProcessor, "op-1", true)),
+		hubpb.ControlRefusal_CONTROL_REFUSAL_NOT_PREPARED, "a finish after a takeover")
+	if !strings.Contains(refused.GetMessage(), "op-2") {
+		t.Fatalf("the refusal names the new holder: %q", refused.GetMessage())
+	}
+	waitUntil(t, "the new operation's status", func() bool {
+		return processorStatusOf(t, app, DefaultProcessor).GetOperationId() == "op-2"
+	})
+	refusedReply(t, sendControl(t, s, resetPrepareControl("prepare-1", DefaultProcessor, "op-1", 30000)),
+		hubpb.ControlRefusal_CONTROL_REFUSAL_NOT_PREPARED, "the ended operation is remembered")
+	okReply(t, sendControl(t, s, resetFinishControl("finish-2", DefaultProcessor, "op-2", false)), "finish op-2")
+	waitUntil(t, "the consumer after the takeover", func() bool {
+		return processorStatusOf(t, app, DefaultProcessor).GetOperationId() == ""
+	})
+}
