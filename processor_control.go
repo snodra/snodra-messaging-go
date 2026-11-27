@@ -94,10 +94,18 @@ func (a *App) reconcileResetHold(ctx context.Context, p *processor, state Proces
 		if ctx.Err() == nil {
 			a.log.Warn("could not expire a passed reset lease", "processor", p.name, "error", err)
 		}
+		// Keep the consumer out until a poll proves the lock gone: a store error must not let it
+		// read under a lock that may still be held.
+		p.run.setLockState(held.id, true)
+		_ = a.stopForReset(ctx, p)
 		return
 	}
 	if !changed {
-		return // renewed meanwhile: the next poll reads it
+		// The lease was renewed between the read and the expire: stay stopped; the next poll sees
+		// the renewed operation.
+		p.run.setLockState(held.id, true)
+		_ = a.stopForReset(ctx, p)
+		return
 	}
 	p.run.clearHeld()
 	p.run.rememberEnded(held.id, held.lease, now)

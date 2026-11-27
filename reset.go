@@ -477,7 +477,13 @@ func (c *controlPlane) resetFinish(ctx context.Context, req *hubpb.ControlReques
 // stopped accordingly.
 func (c *controlPlane) settleAfterFinish(ctx context.Context, p *processor, now time.Time) {
 	state, err := c.app.cfg.store.Control().Get(ctx, p.name)
-	if err == nil && state.Operation != nil && state.Operation.HoldsAt(now) {
+	if err != nil {
+		// The store cannot prove the lock gone: keep the consumer out until a poll can.
+		p.run.setLockState("", true)
+		_ = c.app.stopForReset(ctx, p)
+		return
+	}
+	if state.Operation != nil && state.Operation.HoldsAt(now) {
 		p.run.setLockState(state.Operation.ID, true)
 		_ = c.app.stopForReset(ctx, p)
 		return
