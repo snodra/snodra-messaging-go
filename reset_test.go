@@ -1607,7 +1607,7 @@ type stealOnReleaseControl struct {
 func (c *stealOnReleaseControl) Release(ctx context.Context, processor, operation string, now time.Time) (bool, error) {
 	released, err := c.ProcessorControlStore.Release(ctx, processor, operation, now)
 	if err == nil && released && c.steal.CompareAndSwap(true, false) {
-		_, _ = c.ProcessorControlStore.Lock(ctx, processor, c.other, now.Add(30*time.Second), now)
+		_, _ = c.Lock(ctx, processor, c.other, now.Add(30*time.Second), now)
 	}
 	return released, err
 }
