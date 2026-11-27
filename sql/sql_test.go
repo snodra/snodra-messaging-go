@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
+
 	snodra "github.com/snodra/snodra-messaging-go"
 )
 
@@ -255,5 +257,24 @@ func TestClosingTwiceIsANoOp(t *testing.T) {
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// The MySQL DSN keeps matched-row semantics: a conditional control write (a lock renewal, a
+// release) that finds its row succeeded even when it wrote the values already there.
+func TestMySQLDSNKeepsMatchedRowSemantics(t *testing.T) {
+	dsn, err := mysqlDSN("mysql://user:password@127.0.0.1:3306/orders")
+	if err != nil {
+		t.Fatalf("mysql DSN: %v", err)
+	}
+	config, err := mysql.ParseDSN(dsn)
+	if err != nil {
+		t.Fatalf("parse the DSN: %v", err)
+	}
+	if !config.ClientFoundRows {
+		t.Fatal("the MySQL DSN reports changed rows, not matched rows")
+	}
+	if !config.ParseTime {
+		t.Fatal("the MySQL DSN does not parse times")
 	}
 }

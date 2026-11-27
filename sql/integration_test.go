@@ -23,7 +23,7 @@ func bothServers(t *testing.T, body func(t *testing.T, server *testServer)) {
 	t.Run("mysql", func(t *testing.T) { body(t, mysqlContainer(t)) })
 }
 
-// The nine level-2 message-store checks on both engines.
+// The 17 message-store checks (nine level-2 and eight level-3) on both engines.
 func TestTheSQLMessageStorePassesTheKit(t *testing.T) {
 	bothServers(t, func(t *testing.T, server *testServer) {
 		snodratest.MessageStore(t, server.kitStores(t, len(snodratest.StoreCheckIDs())))
@@ -659,4 +659,34 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// A removal takes every equal range of the processor, as the Rust and Kotlin stores do, and
+// reports whether any was there.
+func TestRemoveRangeRemovesEveryEqualRange(t *testing.T) {
+	bothServers(t, func(t *testing.T, server *testServer) {
+		store := server.newStore(t, true)
+		ctx := context.Background()
+		first := snodra.ReplayRange{Source: "snodra.events", Segment: "0", From: "10", Until: "20"}
+		second := snodra.ReplayRange{Source: "snodra.events", Segment: "1", From: "0", Until: "5"}
+		now := time.Now().Truncate(time.Millisecond)
+		if err := store.Control().SetReplay(ctx, "default", []snodra.ReplayRange{first, second, first}, now); err != nil {
+			t.Fatalf("set replay: %v", err)
+		}
+		removed, err := store.Control().RemoveRange(ctx, "default", first, now)
+		if err != nil || !removed {
+			t.Fatalf("remove range: %t, %v", removed, err)
+		}
+		state, err := store.Control().Get(ctx, "default")
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		if len(state.Replay) != 1 || state.Replay[0] != second {
+			t.Fatalf("the ranges after the removal: %+v, want just %+v", state.Replay, second)
+		}
+		removed, err = store.Control().RemoveRange(ctx, "default", first, now)
+		if err != nil || removed {
+			t.Fatalf("remove range again: %t, %v", removed, err)
+		}
+	})
 }

@@ -399,17 +399,18 @@ func (c sqlControl) RemoveRange(ctx context.Context, processor string, replay sn
 		if err != nil {
 			return err
 		}
-		found := -1
-		for i, open := range ranges {
+		remaining := make([]snodra.ReplayRange, 0, len(ranges))
+		found := false
+		for _, open := range ranges {
 			if open == replay {
-				found = i
-				break
+				found = true
+				continue
 			}
+			remaining = append(remaining, open)
 		}
-		if found < 0 {
+		if !found {
 			return nil
 		}
-		remaining := append(ranges[:found], ranges[found+1:]...)
 		encoded, err := encodeReplay(remaining)
 		if err != nil {
 			return err
