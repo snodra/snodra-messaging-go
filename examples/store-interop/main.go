@@ -61,7 +61,7 @@ func run(logger *slog.Logger) error {
 	}
 	started := 0
 	for _, p := range probes {
-		if err := p.app.Start(ctx); err != nil {
+		if err := p.start(ctx); err != nil {
 			shutDown(probes[:started], logger)
 			return fmt.Errorf("the %s instance could not start: %w", p.family, err)
 		}

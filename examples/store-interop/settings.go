@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	snodra "github.com/snodra/snodra-messaging-go"
 )
 
 // The service name every probe registers: one logical service, several instances per language,
@@ -157,6 +159,16 @@ func settingsFromEnv(getenv func(string) string) (settings, error) {
 
 // databaseName is the one database both languages share for a run.
 func databaseName(run string) string { return "snodra_interop_" + run }
+
+// deadLetterMode is the family's dead-letter mode: the RabbitMQ processor publishes what no
+// handler can take to its dead-letter source (the mode the harness proves end to end); every
+// other family parks letters in its message store.
+func (s settings) deadLetterMode(family string) string {
+	if family == familyRabbitMQ {
+		return snodra.DeadLetterModeEventStore
+	}
+	return snodra.DeadLetterModeCollection
+}
 
 // sourceName is the event store source (a Kafka topic, a RabbitMQ super stream) of one family.
 func sourceName(run, family string) string { return "snodra.interop." + run + "." + family }
