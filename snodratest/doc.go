@@ -1,7 +1,7 @@
 // Package snodratest is the conformance kit for Snodra add-ons: the event-store kit
 // ([EventStore]) and the message-store kit ([MessageStore]). An add-on's own test hands each kit
-// what it needs; the kit runs the level-2 checks as subtests, named exactly as the Rust kit names
-// them. An add-on that implements both interfaces proves both with two calls.
+// what it needs; the kit runs its checks as subtests, named exactly as the Rust kit names them.
+// An add-on that implements both interfaces proves both with two calls.
 //
 // The kit imports only the standard library and the core package, never a store client, so a
 // third-party add-on depends only on the core.
@@ -41,6 +41,12 @@
 // data; every check is exported as a function taking a testing.TB and a store, so a failing one
 // can be run by itself.
 //
+// The event-store kit runs the nine level-2 checks and the level-3 capability checks: replay (or
+// admin-without-replay), lag (or lag-without-capability), native-dead-letter and the no-browser
+// check. The four browse checks are omitted as a kit difference: the Go library has no event
+// browser. A store that declares browse is told so; a store that does not proves it has none.
+// The message-store kit runs its level-2 checks.
+//
 // The checks run one after the other in the Rust kit's order, each on subscription names (event
 // store) or stores (message store) of its own. The first failing check stops the kit and its
 // message names the check and the add-on. Every check is exported, so a failing one can be run by
@@ -48,6 +54,6 @@
 // every call it makes: a publish, a subscribe, a claim or a close that does not answer fails the
 // check naming the step.
 //
-// The checks are the nine level-2 checks of each kit; the capability checks (replay, lag, native
-// dead letter, and the absent-capability checks) and the processor checks come with level 3.
+// The event-store kit has the nine level-2 checks and the level-3 capability checks above; the
+// message-store kit has its nine level-2 checks, with the level-3 store checks coming next.
 package snodratest

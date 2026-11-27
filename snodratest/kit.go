@@ -67,8 +67,12 @@ func (k *EventStoreKit) spec() snodra.SubscriptionSpec {
 	}
 }
 
-// EventStore runs the nine level-2 event-store checks in the Rust kit's order, each as a subtest
-// named exactly as the Rust kit names it. See the package documentation for the arguments.
+// EventStore runs the level-2 event-store checks and the level-3 capability checks in the Rust
+// kit's order, each as a subtest named exactly as the Rust kit names it. A capability check runs
+// in one of its two forms: the capability's check when the store declares it, and the
+// absent-capability check when it does not. The Go kit has no event browser, so the four browse
+// checks are omitted as a kit difference (a store declaring browse is so told).
+// See the package documentation for the arguments.
 func EventStore(t *testing.T, source string, open func() snodra.EventStore, markers snodra.ProcessedEvents) {
 	t.Helper()
 	if source == "" {
@@ -81,20 +85,47 @@ func EventStore(t *testing.T, source string, open func() snodra.EventStore, mark
 		t.Fatal("snodratest: markers is nil; pass the message store's processed-event store")
 	}
 	kit := &EventStoreKit{Source: source, Open: open, Markers: markers}
-	name := kit.instance(t).Name()
-	for _, check := range eventStoreChecks {
-		check := check
-		if !t.Run(check.id, func(t *testing.T) { check.run(t, kit) }) {
-			t.Fatalf("event store conformance check %q failed on event store %q", check.id, name)
+	events := kit.instance(t)
+	name := events.Name()
+	run := func(id string, check func(testing.TB, *EventStoreKit)) {
+		t.Helper()
+		if !t.Run(id, func(t *testing.T) { check(t, kit) }) {
+			t.Fatalf("event store conformance check %q failed on event store %q", id, name)
 		}
+	}
+	for _, check := range eventStoreChecks {
+		run(check.id, check.run)
+	}
+	if snodra.Supports(events, snodra.CapabilityReplay) {
+		run("replay_from_earliest_redelivers_history", ReplayFromEarliestRedeliversHistory)
+	} else {
+		run("admin_without_replay_is_unsupported", AdminWithoutReplayIsUnsupported)
+	}
+	if snodra.Supports(events, snodra.CapabilityLag) {
+		run("lag_counts_unacked", LagCountsUnacked)
+	} else {
+		run("lag_unknown_without_capability", LagUnknownWithoutCapability)
+	}
+	if snodra.Supports(events, snodra.CapabilityNativeDeadLetter) {
+		run("dead_letter_source_receives", DeadLetterSourceReceives)
+	}
+	if snodra.Supports(events, snodra.CapabilityBrowse) {
+		t.Logf("event store conformance: the store declares browse; the Go kit has no event browser, so the four browse checks are a kit difference")
+	} else {
+		run("no_browser_without_capability", NoBrowserWithoutCapability)
 	}
 }
 
-// CheckIDs returns the ids of the level-2 event-store checks, in the order the kit runs them.
+// CheckIDs returns the ids the event-store kit may run: the level-2 checks and the level-3
+// capability checks, in the Rust kit's order (each capability's two forms both appear; a run
+// uses one of them). The four browse checks are not listed: the Go kit has no event browser.
 func CheckIDs() []string {
-	ids := make([]string, len(eventStoreChecks))
-	for i, check := range eventStoreChecks {
-		ids[i] = check.id
+	ids := make([]string, 0, len(eventStoreChecks)+len(eventStoreL3Checks))
+	for _, check := range eventStoreChecks {
+		ids = append(ids, check.id)
+	}
+	for _, check := range eventStoreL3Checks {
+		ids = append(ids, check.id)
 	}
 	return ids
 }
@@ -114,6 +145,21 @@ var eventStoreChecks = []struct {
 	{"unacked_delivery_is_redelivered", UnackedDeliveryIsRedelivered},
 	{"redelivered_after_commit_is_skipped", RedeliveredAfterCommitIsSkipped},
 	{"paused_subscription_receives_nothing_and_resumes_in_place", PausedSubscriptionReceivesNothingAndResumesInPlace},
+}
+
+// eventStoreL3Checks is the level-3 capability list, in the Rust kit's order minus the four
+// browse checks (a kit difference: the Go library has no event browser). A capability's two
+// forms both appear; EventStore runs one of them.
+var eventStoreL3Checks = []struct {
+	id  string
+	run func(testing.TB, *EventStoreKit)
+}{
+	{"replay_from_earliest_redelivers_history", ReplayFromEarliestRedeliversHistory},
+	{"admin_without_replay_is_unsupported", AdminWithoutReplayIsUnsupported},
+	{"lag_counts_unacked", LagCountsUnacked},
+	{"lag_unknown_without_capability", LagUnknownWithoutCapability},
+	{"dead_letter_source_receives", DeadLetterSourceReceives},
+	{"no_browser_without_capability", NoBrowserWithoutCapability},
 }
 
 var freshNumber atomic.Uint64

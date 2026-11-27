@@ -21,7 +21,7 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
-// The nine level-2 event-store checks on a real broker.
+// The level-2 and level-3 event-store checks on a real broker.
 func TestKafkaEventStorePassesTheKit(t *testing.T) {
 	broker := kafkaBroker(t)
 	source := uniqueTopic("snodra.events")

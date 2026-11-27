@@ -27,7 +27,7 @@ func (m *markers) Record(ctx context.Context, marker snodra.ProcessedMarker) (bo
 	return true, nil
 }
 
-// The nine level-2 event-store checks on the in-memory event store.
+// The level-2 and level-3 event-store checks on the in-memory event store.
 func TestMemoryEventStorePassesTheKit(t *testing.T) {
 	store := snodra.NewMemoryEventStore()
 	snodratest.EventStore(t, "conformance.events",

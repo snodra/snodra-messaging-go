@@ -15,7 +15,7 @@ import (
 	"github.com/snodra/snodra-messaging-go/snodratest"
 )
 
-// The nine level-2 event-store checks on a real broker (with the management API, so every
+// The level-2 and level-3 event-store checks on a real broker (with the management API, so every
 // capability is declared).
 func TestRabbitMQEventStorePassesTheKit(t *testing.T) {
 	broker := rabbitBroker(t)
