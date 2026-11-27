@@ -921,3 +921,60 @@ func TestAPrepareWhoseHandlerDoesNotFinishIsRefused(t *testing.T) {
 	})
 	okReply(t, sendControl(t, s, resetFinishControl("finish-1", DefaultProcessor, "op-1", true)), "finish aborted")
 }
+
+// L3-REPLAY: a dead letter parked during a replay is retried as a replay: the DisallowReplay
+// handler stays out of both.
+func TestARetriedDeadLetterFromAReplaySkipsDisallowReplay(t *testing.T) {
+	hub := fakehub.Start(t)
+	store := NewMemoryMessageStore()
+	events := NewMemoryEventStore()
+	normal := newSeenCounts()
+	noReplay := newSeenCounts()
+	var fail atomic.Bool
+	settings := consumerSettings()
+	settings.consumerTries = 1
+	_, s := l3Serving(t, hub, func(app *App) {
+		if err := HandleEvent(app, func(ctx context.Context, event OrderPlaced) error {
+			if fail.Load() && event.OrderID == "evt-1" {
+				return errText("the projection failed in the replay")
+			}
+			normal.add(event.OrderID)
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := HandleEvent(app, func(ctx context.Context, event OrderPlaced) error {
+			noReplay.add(event.OrderID)
+			return nil
+		}, DisallowReplay()); err != nil {
+			t.Fatal(err)
+		}
+	}, WithStore(store), WithEventStore(events), withEventSettings(settings))
+	publishTestEvent(t, events, "evt-1", "orders.OrderPlaced", nil, nil)
+	waitUntil(t, "the first handling", func() bool {
+		return normal.get("evt-1") == 1 && noReplay.get("evt-1") == 1
+	})
+	fail.Store(true)
+	okReply(t, sendControl(t, s, resetPrepareControl("prepare-1", DefaultProcessor, "op-1", 30000)), "prepare")
+	if reply := sendControl(t, s, resetExecuteControl("execute-1", DefaultProcessor, "op-1", targetEarliest())); reply.GetReset_() == nil {
+		t.Fatalf("execute: %v", reply)
+	}
+	okReply(t, sendControl(t, s, resetFinishControl("finish-1", DefaultProcessor, "op-1", false)), "finish")
+	waitUntil(t, "the replay's dead letter", func() bool {
+		return len(lettersOf(t, store, DefaultProcessor)) == 1
+	})
+	letter := lettersOf(t, store, DefaultProcessor)[0]
+	if !letter.Replay {
+		t.Fatal("a letter parked during a replay is marked as a replay")
+	}
+	is(t, normal.get("evt-1"), 1)
+	is(t, noReplay.get("evt-1"), 1)
+
+	fail.Store(false)
+	s.Send(t, deadLetterRetryControl("retry-1", DefaultProcessor, letter.ID))
+	if outcome := s.RecvControlReply(t).GetRetry(); outcome == nil || outcome.GetResult() != retryRetried {
+		t.Fatalf("the replayed letter's retry: %v", outcome)
+	}
+	is(t, normal.get("evt-1"), 2)
+	is(t, noReplay.get("evt-1"), 1)
+}
