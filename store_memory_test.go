@@ -684,20 +684,26 @@ func TestMemoryMessageStoreCopiesWhatItStores(t *testing.T) {
 	is(t, string(again[0].Payload), `{"n":1}`)
 }
 
-func TestMemoryMessageStoreUnsupportedPorts(t *testing.T) {
+func TestMemoryMessageStoreImplementsTheLevelFourPorts(t *testing.T) {
 	store := NewMemoryMessageStore()
 	ctx := context.Background()
-	for name, err := range map[string]error{
-		"external calls": func() error { _, err := store.ExternalCalls().Find(ctx, "k"); return err }(),
-		"sagas":          func() error { _, err := store.Sagas().Sagas.FindByID(ctx, "id"); return err }(),
-		"saga dispatch":  func() error { _, err := store.Sagas().Dispatch.Pending(ctx); return err }(),
-		"saga deadlines": func() error { _, err := store.Sagas().Deadlines.FindScheduled(ctx, "id"); return err }(),
-		"saga failures":  func() error { _, err := store.Sagas().Failures.Find(ctx, "id"); return err }(),
-		"saga markers":   func() error { _, err := store.Sagas().Markers.Exists(ctx, "id"); return err }(),
-	} {
-		if !errors.Is(err, ErrUnsupported) {
-			t.Errorf("%s: got %v, want ErrUnsupported", name, err)
-		}
+	if call, err := store.ExternalCalls().Find(ctx, "k"); err != nil || call != nil {
+		t.Fatalf("external calls: %+v, %v", call, err)
+	}
+	if saga, err := store.Sagas().Sagas.FindByID(ctx, "id"); err != nil || saga != nil {
+		t.Fatalf("sagas: %+v, %v", saga, err)
+	}
+	if pending, err := store.Sagas().Dispatch.Pending(ctx); err != nil || pending != 0 {
+		t.Fatalf("saga dispatch: %d, %v", pending, err)
+	}
+	if deadline, err := store.Sagas().Deadlines.FindScheduled(ctx, "id"); err != nil || deadline != nil {
+		t.Fatalf("saga deadlines: %+v, %v", deadline, err)
+	}
+	if failure, err := store.Sagas().Failures.Find(ctx, "id"); err != nil || failure != nil {
+		t.Fatalf("saga failures: %+v, %v", failure, err)
+	}
+	if exists, err := store.Sagas().Markers.Exists(ctx, "id"); err != nil || exists {
+		t.Fatalf("saga markers: %t, %v", exists, err)
 	}
 }
 

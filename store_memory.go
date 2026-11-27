@@ -16,9 +16,8 @@ const (
 
 // MemoryMessageStore is the in-memory message store: the whole message-store contract inside
 // one process, for tests, local runs and single-process demos, with no database and no
-// infrastructure. It implements the outbox, the processed-event markers, the dead letters and
-// the processors' control state; the external-call and saga ports of this release return
-// ErrUnsupported (the official add-ons implement every store by level 4, and this store follows).
+// infrastructure. It implements the outbox, the processed-event markers, the dead letters, the
+// processors' control state, the external calls and the saga ports.
 //
 //   - Real transactions: Begin hands out a transaction that collects its writes; other readers
 //     see them only once it commits, and a rollback leaves nothing. Reads in the transaction see
@@ -113,19 +112,17 @@ func (s *MemoryMessageStore) DeadLetters() DeadLetterStore { return memoryDeadLe
 // Control returns the processors' control state.
 func (s *MemoryMessageStore) Control() ProcessorControlStore { return memoryControl{store: s} }
 
-// ExternalCalls returns the external-call port, which this store does not implement yet: every
-// operation fails with ErrUnsupported.
-func (s *MemoryMessageStore) ExternalCalls() ExternalCallStore { return memoryExternalCalls{} }
+// ExternalCalls returns the external-call port.
+func (s *MemoryMessageStore) ExternalCalls() ExternalCallStore { return memoryExternalCalls{store: s} }
 
-// Sagas returns the saga ports, which this store does not implement yet: every operation fails
-// with ErrUnsupported.
+// Sagas returns the saga ports.
 func (s *MemoryMessageStore) Sagas() SagaStores {
 	return SagaStores{
-		Sagas:     memorySagas{},
-		Dispatch:  memorySagaDispatch{},
-		Deadlines: memorySagaDeadlines{},
-		Failures:  memorySagaFailures{},
-		Markers:   memorySagaMarkers{},
+		Sagas:     memorySagas{store: s},
+		Dispatch:  memorySagaDispatch{store: s},
+		Deadlines: memorySagaDeadlines{store: s},
+		Failures:  memorySagaFailures{store: s},
+		Markers:   memorySagaMarkers{store: s},
 	}
 }
 
@@ -143,6 +140,24 @@ func (s *MemoryMessageStore) initLocked() {
 	}
 	if s.data.control == nil {
 		s.data.control = make(map[string]*ProcessorControlState)
+	}
+	if s.data.sagas.rows == nil {
+		s.data.sagas.rows = make(map[string]*memoryTableRow[Saga])
+	}
+	if s.data.dispatch.rows == nil {
+		s.data.dispatch.rows = make(map[string]*memoryTableRow[SagaDispatch])
+	}
+	if s.data.leases.rows == nil {
+		s.data.leases.rows = make(map[string]*memoryTableRow[memorySagaLease])
+	}
+	if s.data.deadlines.rows == nil {
+		s.data.deadlines.rows = make(map[string]*memoryTableRow[SagaDeadline])
+	}
+	if s.data.failures.rows == nil {
+		s.data.failures.rows = make(map[string]*memoryTableRow[SagaFailure])
+	}
+	if s.data.external.rows == nil {
+		s.data.external.rows = make(map[string]*memoryTableRow[ExternalCall])
 	}
 	if s.data.reserved == nil {
 		s.data.reserved = make(map[memoryRecordKey]uint64)
@@ -241,6 +256,27 @@ func (t *memoryTable[T]) set(overlay *memoryOverlay[T], data *memoryData, id str
 	overlay.writes[id] = write
 }
 
+// snapshot is the records overlay sees: its writes over the committed rows, a deleted one left
+// out.
+func (t *memoryTable[T]) snapshot(overlay *memoryOverlay[T]) []T {
+	rows := make([]T, 0, len(t.rows))
+	seen := map[string]bool{}
+	if overlay != nil {
+		for id, write := range overlay.writes {
+			seen[id] = true
+			if write.value != nil {
+				rows = append(rows, *write.value)
+			}
+		}
+	}
+	for id, row := range t.rows {
+		if !seen[id] {
+			rows = append(rows, row.value)
+		}
+	}
+	return rows
+}
+
 // stale is the first write of overlay whose record changed since the transaction saw it.
 func (t *memoryTable[T]) stale(overlay *memoryOverlay[T]) (string, bool) {
 	for id, write := range overlay.writes {
@@ -291,7 +327,13 @@ type memoryData struct {
 	// transaction's (the port says so).
 	control map[string]*ProcessorControlState
 	// reserved maps a record a live transaction wrote to that transaction's id.
-	reserved map[memoryRecordKey]uint64
+	reserved  map[memoryRecordKey]uint64
+	sagas     memoryTable[Saga]
+	dispatch  memoryTable[SagaDispatch]
+	leases    memoryTable[memorySagaLease]
+	deadlines memoryTable[SagaDeadline]
+	failures  memoryTable[SagaFailure]
+	external  memoryTable[ExternalCall]
 }
 
 // memoryTx is a transaction of a MemoryMessageStore, held in a Tx: its writes, kept apart until
@@ -307,6 +349,10 @@ type memoryTx struct {
 	outbox      memoryOverlay[memoryOutboxRow]
 	processed   memoryOverlay[ProcessedMarker]
 	deadLetters memoryOverlay[DeadLetter]
+	sagas       memoryOverlay[Saga]
+	dispatch    memoryOverlay[SagaDispatch]
+	deadlines   memoryOverlay[SagaDeadline]
+	failures    memoryOverlay[SagaFailure]
 }
 
 // memoryTxKey is the context key of a transaction.
@@ -320,7 +366,8 @@ func memoryTxOf(ctx context.Context) *memoryTx {
 
 // written is the (table, id) of every record the transaction wrote.
 func (tx *memoryTx) written() []memoryRecordKey {
-	keys := make([]memoryRecordKey, 0, len(tx.outbox.writes)+len(tx.processed.writes)+len(tx.deadLetters.writes))
+	keys := make([]memoryRecordKey, 0, len(tx.outbox.writes)+len(tx.processed.writes)+len(tx.deadLetters.writes)+
+		len(tx.sagas.writes)+len(tx.dispatch.writes)+len(tx.deadlines.writes)+len(tx.failures.writes))
 	for id := range tx.outbox.writes {
 		keys = append(keys, memoryRecordKey{"outbox", id})
 	}
@@ -330,6 +377,18 @@ func (tx *memoryTx) written() []memoryRecordKey {
 	for id := range tx.deadLetters.writes {
 		keys = append(keys, memoryRecordKey{"dead_letters", id})
 	}
+	for id := range tx.sagas.writes {
+		keys = append(keys, memoryRecordKey{"sagas", id})
+	}
+	for id := range tx.dispatch.writes {
+		keys = append(keys, memoryRecordKey{"saga_dispatch", id})
+	}
+	for id := range tx.deadlines.writes {
+		keys = append(keys, memoryRecordKey{"deadlines", id})
+	}
+	for id := range tx.failures.writes {
+		keys = append(keys, memoryRecordKey{"saga_failures", id})
+	}
 	return keys
 }
 
@@ -338,6 +397,10 @@ func (tx *memoryTx) clear() {
 	tx.outbox = memoryOverlay[memoryOutboxRow]{}
 	tx.processed = memoryOverlay[ProcessedMarker]{}
 	tx.deadLetters = memoryOverlay[DeadLetter]{}
+	tx.sagas = memoryOverlay[Saga]{}
+	tx.dispatch = memoryOverlay[SagaDispatch]{}
+	tx.deadlines = memoryOverlay[SagaDeadline]{}
+	tx.failures = memoryOverlay[SagaFailure]{}
 }
 
 // reserve reserves for tx every record it wrote; a conflict when another live transaction holds
@@ -387,9 +450,29 @@ func (d *memoryData) commit(tx *memoryTx) error {
 		return fmt.Errorf("%w: dead_letters record %q changed since the transaction read it",
 			ErrConflict, id)
 	}
+	if id, stale := d.sagas.stale(&tx.sagas); stale {
+		return fmt.Errorf("%w: saga record %q changed since the transaction read it",
+			ErrConflict, id)
+	}
+	if id, stale := d.dispatch.stale(&tx.dispatch); stale {
+		return fmt.Errorf("%w: saga_dispatch record %q changed since the transaction read it",
+			ErrConflict, id)
+	}
+	if id, stale := d.deadlines.stale(&tx.deadlines); stale {
+		return fmt.Errorf("%w: deadline record %q changed since the transaction read it",
+			ErrConflict, id)
+	}
+	if id, stale := d.failures.stale(&tx.failures); stale {
+		return fmt.Errorf("%w: saga_failure record %q changed since the transaction read it",
+			ErrConflict, id)
+	}
 	d.outbox.apply(&tx.outbox, d)
 	d.processed.apply(&tx.processed, d)
 	d.deadLetters.apply(&tx.deadLetters, d)
+	d.sagas.apply(&tx.sagas, d)
+	d.dispatch.apply(&tx.dispatch, d)
+	d.deadlines.apply(&tx.deadlines, d)
+	d.failures.apply(&tx.failures, d)
 	return nil
 }
 
@@ -801,190 +884,6 @@ func (p memoryPosition) within(from, until memoryPosition) bool {
 			from.text <= p.text && p.text < until.text
 	}
 	return from.number <= p.number && p.number < until.number
-}
-
-// ---- the ports this release does not implement -------------------------------------------------
-
-// memoryExternalCalls is the external-call port until it is implemented.
-type memoryExternalCalls struct{}
-
-func (memoryExternalCalls) Insert(context.Context, ExternalCall) (bool, error) {
-	return false, unsupportedMemory("external calls")
-}
-
-func (memoryExternalCalls) Find(context.Context, string) (*ExternalCall, error) {
-	return nil, unsupportedMemory("external calls")
-}
-
-func (memoryExternalCalls) TakeOver(context.Context, ExternalCall, string, time.Time, time.Time) (*ExternalCall, error) {
-	return nil, unsupportedMemory("external calls")
-}
-
-func (memoryExternalCalls) Expire(context.Context, ExternalCall, time.Time) (bool, error) {
-	return false, unsupportedMemory("external calls")
-}
-
-func (memoryExternalCalls) Succeed(context.Context, string, string, string, time.Time) (bool, error) {
-	return false, unsupportedMemory("external calls")
-}
-
-func (memoryExternalCalls) Fail(context.Context, string, string, string, time.Time) (bool, error) {
-	return false, unsupportedMemory("external calls")
-}
-
-func (memoryExternalCalls) MarkUnknown(context.Context, string, string, time.Time) (bool, error) {
-	return false, unsupportedMemory("external calls")
-}
-
-func (memoryExternalCalls) Reset(context.Context, string, string) (bool, error) {
-	return false, unsupportedMemory("external calls")
-}
-
-// memorySagas is the saga repository until it is implemented.
-type memorySagas struct{}
-
-func (memorySagas) FindByID(context.Context, string) (*Saga, error) {
-	return nil, unsupportedMemory("sagas")
-}
-
-func (memorySagas) FindLive(context.Context, string, string, string) ([]Saga, error) {
-	return nil, unsupportedMemory("sagas")
-}
-
-func (memorySagas) Insert(context.Context, Saga) error {
-	return unsupportedMemory("sagas")
-}
-
-func (memorySagas) Update(context.Context, Saga, int64) (bool, error) {
-	return false, unsupportedMemory("sagas")
-}
-
-func (memorySagas) CountLiveByType(context.Context) (map[string]int64, error) {
-	return nil, unsupportedMemory("sagas")
-}
-
-// memorySagaDispatch is the saga dispatch port until it is implemented.
-type memorySagaDispatch struct{}
-
-func (memorySagaDispatch) Record(context.Context, []SagaDispatch) error {
-	return unsupportedMemory("saga dispatch")
-}
-
-func (memorySagaDispatch) DueSagas(context.Context, time.Time, []string, int) ([]string, error) {
-	return nil, unsupportedMemory("saga dispatch")
-}
-
-func (memorySagaDispatch) NextPending(context.Context, string) (*SagaDispatch, error) {
-	return nil, unsupportedMemory("saga dispatch")
-}
-
-func (memorySagaDispatch) MarkDispatched(context.Context, string, time.Time) error {
-	return unsupportedMemory("saga dispatch")
-}
-
-func (memorySagaDispatch) ScheduleRetry(context.Context, string, int, time.Time) error {
-	return unsupportedMemory("saga dispatch")
-}
-
-func (memorySagaDispatch) MarkFailed(context.Context, string, DispatchFailure) error {
-	return unsupportedMemory("saga dispatch")
-}
-
-func (memorySagaDispatch) ClaimDueNotice(context.Context, time.Time, time.Time) (*SagaDispatch, error) {
-	return nil, unsupportedMemory("saga dispatch")
-}
-
-func (memorySagaDispatch) ClearNotice(context.Context, string) error {
-	return unsupportedMemory("saga dispatch")
-}
-
-func (memorySagaDispatch) ScheduleNoticeRetry(context.Context, string, int, time.Time) error {
-	return unsupportedMemory("saga dispatch")
-}
-
-func (memorySagaDispatch) ClaimLease(context.Context, string, string, time.Time, time.Time) (bool, error) {
-	return false, unsupportedMemory("saga dispatch")
-}
-
-func (memorySagaDispatch) RenewLease(context.Context, string, string, time.Time) (bool, error) {
-	return false, unsupportedMemory("saga dispatch")
-}
-
-func (memorySagaDispatch) ReleaseLease(context.Context, string, string) error {
-	return unsupportedMemory("saga dispatch")
-}
-
-func (memorySagaDispatch) Pending(context.Context) (int64, error) {
-	return 0, unsupportedMemory("saga dispatch")
-}
-
-// memorySagaDeadlines is the deadline port until it is implemented.
-type memorySagaDeadlines struct{}
-
-func (memorySagaDeadlines) Insert(context.Context, SagaDeadline) error {
-	return unsupportedMemory("saga deadlines")
-}
-
-func (memorySagaDeadlines) FindScheduled(context.Context, string) (*SagaDeadline, error) {
-	return nil, unsupportedMemory("saga deadlines")
-}
-
-func (memorySagaDeadlines) Cancel(context.Context, string, string, time.Time) error {
-	return unsupportedMemory("saga deadlines")
-}
-
-func (memorySagaDeadlines) CancelByName(context.Context, string, string, time.Time) error {
-	return unsupportedMemory("saga deadlines")
-}
-
-func (memorySagaDeadlines) CancelAll(context.Context, string, time.Time) error {
-	return unsupportedMemory("saga deadlines")
-}
-
-func (memorySagaDeadlines) MarkFired(context.Context, string, time.Time) (bool, error) {
-	return false, unsupportedMemory("saga deadlines")
-}
-
-func (memorySagaDeadlines) ClaimDue(context.Context, string, time.Time, time.Time) (*SagaDeadline, error) {
-	return nil, unsupportedMemory("saga deadlines")
-}
-
-func (memorySagaDeadlines) CountOverdueByName(context.Context, time.Time) (map[string]int64, error) {
-	return nil, unsupportedMemory("saga deadlines")
-}
-
-// memorySagaFailures is the failure port until it is implemented.
-type memorySagaFailures struct{}
-
-func (memorySagaFailures) Find(context.Context, string) (*SagaFailure, error) {
-	return nil, unsupportedMemory("saga failures")
-}
-
-func (memorySagaFailures) Save(context.Context, SagaFailure) error {
-	return unsupportedMemory("saga failures")
-}
-
-func (memorySagaFailures) Delete(context.Context, string) (bool, error) {
-	return false, unsupportedMemory("saga failures")
-}
-
-func (memorySagaFailures) FailedAgain(context.Context, string, string, int, time.Time) (bool, error) {
-	return false, unsupportedMemory("saga failures")
-}
-
-func (memorySagaFailures) List(context.Context, string) ([]SagaFailure, error) {
-	return nil, unsupportedMemory("saga failures")
-}
-
-// memorySagaMarkers is the saga marker port until it is implemented.
-type memorySagaMarkers struct{}
-
-func (memorySagaMarkers) Exists(context.Context, string) (bool, error) {
-	return false, unsupportedMemory("saga markers")
-}
-
-func (memorySagaMarkers) Insert(context.Context, string, string, time.Time) error {
-	return unsupportedMemory("saga markers")
 }
 
 var (
