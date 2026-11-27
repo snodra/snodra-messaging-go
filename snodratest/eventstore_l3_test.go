@@ -157,7 +157,7 @@ func TestAdminWithoutReplayCheckNamesTheCapability(t *testing.T) {
 	}
 	recorder := &failRecorder{T: t}
 	snodratest.AdminWithoutReplayIsUnsupported(recorder, kit)
-	if !strings.Contains(recorder.failed, "replay") {
+	if !strings.Contains(recorder.failed, "lag") || !strings.Contains(recorder.failed, "want replay") {
 		t.Fatalf("the check accepted a wrong capability: %q", recorder.failed)
 	}
 }

@@ -235,8 +235,11 @@ func AdminWithoutReplayIsUnsupported(tb testing.TB, kit *EventStoreKit) {
 		return nil
 	})
 	var unsupported *snodra.UnsupportedError
-	if !errors.As(failure, &unsupported) || unsupported.Capability != snodra.CapabilityReplay {
-		tb.Fatalf("admin without replay is unsupported for replay: %v", failure)
+	switch {
+	case !errors.As(failure, &unsupported):
+		tb.Fatalf("admin without replay: %v, want an UnsupportedError", failure)
+	case unsupported.Capability != snodra.CapabilityReplay:
+		tb.Fatalf("admin without replay: the store named capability %q, want replay", unsupported.Capability)
 	}
 }
 

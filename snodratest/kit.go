@@ -71,7 +71,7 @@ func (k *EventStoreKit) spec() snodra.SubscriptionSpec {
 // kit's order, each as a subtest named exactly as the Rust kit names it. A capability check runs
 // in one of its two forms: the capability's check when the store declares it, and the
 // absent-capability check when it does not. The Go kit has no event browser, so the four browse
-// checks are omitted as a kit difference (a store declaring browse is so told).
+// checks are omitted as a kit difference (a store declaring browse skips the no-browser check).
 // See the package documentation for the arguments.
 func EventStore(t *testing.T, source string, open func() snodra.EventStore, markers snodra.ProcessedEvents) {
 	t.Helper()
@@ -109,11 +109,9 @@ func EventStore(t *testing.T, source string, open func() snodra.EventStore, mark
 	if snodra.Supports(events, snodra.CapabilityNativeDeadLetter) {
 		run("dead_letter_source_receives", DeadLetterSourceReceives)
 	}
-	if snodra.Supports(events, snodra.CapabilityBrowse) {
-		t.Logf("event store conformance: the store declares browse; the Go kit has no event browser, so the four browse checks are a kit difference")
-	} else {
-		run("no_browser_without_capability", NoBrowserWithoutCapability)
-	}
+	// A store that declares browse skips this check itself (the Go kit has no event browser); one
+	// that does not declares it by passing. The four browse checks are a kit difference.
+	run("no_browser_without_capability", NoBrowserWithoutCapability)
 }
 
 // CheckIDs returns the ids the event-store kit may run: the level-2 checks and the level-3
