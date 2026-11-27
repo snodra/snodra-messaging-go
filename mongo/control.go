@@ -206,6 +206,18 @@ func (c mongoControl) Lock(ctx context.Context, processor, operation string, lea
 	if err != nil {
 		return snodra.LockOutcome{}, err
 	}
+	if state.Operation != nil && state.Operation.ID == operation {
+		// Another instance prepared the same operation concurrently: this call's renewal ran
+		// before that prepare committed. The operation holds the lock either way, so renew it
+		// now; a prepare for an operation that holds the lock is a renewal, never a refusal.
+		extended, err := c.Extend(ctx, processor, operation, leaseUntil, now)
+		if err != nil {
+			return snodra.LockOutcome{}, err
+		}
+		if extended {
+			return snodra.LockOutcome{Taken: true}, nil
+		}
+	}
 	outcome := snodra.LockOutcome{}
 	if state.Operation != nil {
 		outcome.Holder = *state.Operation

@@ -225,6 +225,22 @@ func (c sqlControl) Lock(ctx context.Context, processor, operation string, lease
 		if err != nil {
 			return err
 		}
+		if state.Operation != nil && state.Operation.ID == operation {
+			// Another instance prepared the same operation concurrently: this transaction's
+			// renewal snapshot ran before that prepare committed, so the row now holds the
+			// operation without this renewal. A fresh statement sees the commit; the prepare is a
+			// renewal of the same operation, never a lock held by another.
+			result, err = tx.ExecContext(ctx, renew, millis(leaseUntil), millis(now), processor, operation)
+			if err != nil {
+				return storeError(err)
+			}
+			if affected, err := result.RowsAffected(); err != nil {
+				return storeError(err)
+			} else if affected == 1 {
+				outcome = snodra.LockOutcome{Taken: true}
+				return nil
+			}
+		}
 		outcome = snodra.LockOutcome{}
 		if state.Operation != nil {
 			outcome.Holder = *state.Operation
