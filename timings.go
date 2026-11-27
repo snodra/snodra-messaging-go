@@ -51,6 +51,12 @@ type timings struct {
 	deadLetterSample time.Duration
 	// failingWindow is how long an exhausted record keeps a processor FAILING.
 	failingWindow time.Duration
+	// resetExecuteLimit is how long one reset's execute may run before its lease is treated as
+	// lost (the hub gives up at 120 s).
+	resetExecuteLimit time.Duration
+	// resetStopLimit is how long a reset prepare or a poll waits for a consumer to leave its
+	// subscription (the reference waits 30 s for the record in hand).
+	resetStopLimit time.Duration
 	// dnsRefresh is how often a dns:/// target is resolved again.
 	dnsRefresh time.Duration
 }
@@ -159,6 +165,8 @@ func defaultTimings() timings {
 		controlPoll:        5 * time.Second,
 		deadLetterSample:   30 * time.Second,
 		failingWindow:      60 * time.Second,
+		resetExecuteLimit:  120 * time.Second,
+		resetStopLimit:     30 * time.Second,
 		dnsRefresh:         30 * time.Second,
 	}
 }

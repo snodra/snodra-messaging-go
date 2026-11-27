@@ -44,8 +44,24 @@ type processorRuntime struct {
 	// operationID is the reset operation holding the processor's lock, as the control poller
 	// last read it; empty when none.
 	operationID string
+	// lockHolds is true while an unexpired reset operation holds the lock: the consumer leaves
+	// or stays out of the subscription until it is released or its lease passes.
+	lockHolds bool
 	// replay is the open replay ranges of the processor's source.
 	replay []ReplayRange
+	// held is the reset operation this instance prepared; nil when none.
+	held *heldReset
+	// executing is the operation whose execute runs now; empty when none.
+	executing string
+	// finished remembers the operations that ended on this instance, with the time each is
+	// forgotten (a late renewal is NOT_PREPARED).
+	finished map[string]time.Time
+	// readDone is closed when the consumer finished its current subscription attempt; subCancel
+	// stops the subscription it is reading (a reset prepare leaves the subscription).
+	readDone  chan struct{}
+	subCancel context.CancelFunc
+	// wake tells the consumer to look at the lock again.
+	wake chan struct{}
 }
 
 // processorSnapshot is a processor's runtime state at one moment.
@@ -58,11 +74,16 @@ type processorSnapshot struct {
 	lastError    string
 	lastErrorAt  time.Time
 	operationID  string
+	lockHolds    bool
 	replay       []ReplayRange
 }
 
 func newProcessorRuntime() *processorRuntime {
-	return &processorRuntime{controlReady: make(chan struct{})}
+	return &processorRuntime{
+		controlReady: make(chan struct{}),
+		finished:     map[string]time.Time{},
+		wake:         make(chan struct{}, 1),
+	}
 }
 
 // markStarted is called when the processor's consumer loop begins.
@@ -97,6 +118,113 @@ func (r *processorRuntime) operation() string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.operationID
+}
+
+// replayRanges is the open replay ranges of the processor's source.
+func (r *processorRuntime) replayRanges() []ReplayRange {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]ReplayRange(nil), r.replay...)
+}
+
+// setReplay replaces the open replay ranges.
+func (r *processorRuntime) setReplay(ranges []ReplayRange) {
+	r.mu.Lock()
+	r.replay = append([]ReplayRange(nil), ranges...)
+	r.mu.Unlock()
+}
+
+// removeReplay drops one open replay range, when it is still there.
+func (r *processorRuntime) removeReplay(replay ReplayRange) {
+	r.mu.Lock()
+	for i, open := range r.replay {
+		if open == replay {
+			r.replay = append(r.replay[:i], r.replay[i+1:]...)
+			break
+		}
+	}
+	r.mu.Unlock()
+}
+
+// holdsLock reports whether an unexpired reset operation holds the processor's lock.
+func (r *processorRuntime) holdsLock() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.lockHolds
+}
+
+// signalWake tells the consumer to look at the lock and at the control state again.
+func (r *processorRuntime) signalWake() {
+	select {
+	case r.wake <- struct{}{}:
+	default:
+	}
+}
+
+// runnableNow reports whether no reset operation holds the lock now.
+func (r *processorRuntime) runnableNow() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return !r.lockHolds
+}
+
+// waitRunnable waits until no reset operation holds the lock, and false when ctx ends first.
+func (r *processorRuntime) waitRunnable(ctx context.Context) bool {
+	for {
+		r.mu.Lock()
+		runnable := !r.lockHolds
+		r.mu.Unlock()
+		if runnable {
+			return true
+		}
+		select {
+		case <-r.wake:
+		case <-ctx.Done():
+			return false
+		}
+	}
+}
+
+// beginRead marks a subscription attempt in flight and returns the channel endRead closes.
+func (r *processorRuntime) beginRead(cancel context.CancelFunc) chan struct{} {
+	r.mu.Lock()
+	done := make(chan struct{})
+	r.readDone = done
+	r.subCancel = cancel
+	r.mu.Unlock()
+	return done
+}
+
+// endRead closes a subscription attempt: the consumer has attached nothing (or closed what it
+// attached), so a stop waiting for it may go on.
+func (r *processorRuntime) endRead(done chan struct{}) {
+	r.mu.Lock()
+	if r.readDone == done {
+		r.readDone = nil
+		r.subCancel = nil
+	}
+	r.mu.Unlock()
+	close(done)
+}
+
+// stopReading stops the subscription being read (or the attempt to build one) and waits until
+// the consumer left it. It returns ctx's error when the consumer did not finish in time.
+func (r *processorRuntime) stopReading(ctx context.Context) error {
+	r.mu.Lock()
+	cancel, done := r.subCancel, r.readDone
+	r.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if done == nil {
+		return nil
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // markAssigned ends a first assignment or a reassignment.
@@ -227,30 +355,40 @@ func (r *processorRuntime) changeCount() uint64 {
 // applyPaused applies a pause or resume made on this instance (a control request): the store was
 // written already, so the state is known.
 func (r *processorRuntime) applyPaused(paused bool) {
-	r.subMu.Lock()
-	defer r.subMu.Unlock()
 	r.mu.Lock()
 	changed := r.paused != paused
 	r.paused = paused
 	r.changes++
 	r.markControlKnownLocked()
+	r.mu.Unlock()
+	if changed {
+		r.pauseSubscription(paused)
+	}
+}
+
+// pauseSubscription applies the pause to the subscription being read, if any. It takes the
+// subscription lock, never the state lock across a subscription call.
+func (r *processorRuntime) pauseSubscription(paused bool) {
+	r.subMu.Lock()
+	defer r.subMu.Unlock()
+	r.mu.Lock()
 	sub := r.sub
 	r.mu.Unlock()
-	if changed && sub != nil {
-		if paused {
-			sub.Pause()
-		} else {
-			sub.Resume()
-		}
+	if sub == nil {
+		return
+	}
+	if paused {
+		sub.Pause()
+	} else {
+		sub.Resume()
 	}
 }
 
 // applyControl applies a control state read from the store at readAt. A state read before a
 // change made here since is left to the next poll, which reads what that change wrote; the read
-// still proves the store reachable, so the consumer may start.
-func (r *processorRuntime) applyControl(state ProcessorControlState, readAt uint64, now time.Time) {
-	r.subMu.Lock()
-	defer r.subMu.Unlock()
+// still proves the store reachable, so the consumer may start. The lock it carries stops the
+// consumer; a released lock wakes it.
+func (r *processorRuntime) applyControl(ctx context.Context, state ProcessorControlState, readAt uint64, now time.Time) {
 	r.mu.Lock()
 	if r.controlKnown && r.changes != readAt {
 		r.markControlKnownLocked()
@@ -260,23 +398,123 @@ func (r *processorRuntime) applyControl(state ProcessorControlState, readAt uint
 	changed := r.paused != state.Paused
 	r.paused = state.Paused
 	r.replay = append([]ReplayRange(nil), state.Replay...)
-	// The reset lock's effects (leaving the subscription, replaying) arrive with the reset
-	// support; the status names the operation that holds it meanwhile.
 	r.operationID = ""
+	r.lockHolds = false
 	if state.Operation != nil && state.Operation.HoldsAt(now) {
 		r.operationID = state.Operation.ID
+		r.lockHolds = true
 	}
 	r.changes++
 	r.markControlKnownLocked()
-	sub := r.sub
 	r.mu.Unlock()
-	if changed && sub != nil {
-		if state.Paused {
-			sub.Pause()
-		} else {
-			sub.Resume()
+	if changed {
+		r.pauseSubscription(state.Paused)
+	}
+}
+
+// heldReset is the reset operation this instance prepared.
+type heldReset struct {
+	id    string
+	lease time.Duration
+}
+
+// setHeld records the operation this instance prepared and its lease.
+func (r *processorRuntime) setHeld(id string, lease time.Duration) {
+	r.mu.Lock()
+	r.held = &heldReset{id: id, lease: lease}
+	r.operationID = id
+	r.lockHolds = true
+	r.mu.Unlock()
+}
+
+// heldOperation is the operation this instance prepared, nil when none.
+func (r *processorRuntime) heldOperation() *heldReset {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.held == nil {
+		return nil
+	}
+	copied := *r.held
+	return &copied
+}
+
+// updateHeldLease records a renewed lease for the operation held here; false when another
+// operation is held now.
+func (r *processorRuntime) updateHeldLease(id string, lease time.Duration) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.held == nil || r.held.id != id {
+		return false
+	}
+	r.held.lease = lease
+	return true
+}
+
+// clearHeld forgets the operation held here and returns it, nil when none.
+func (r *processorRuntime) clearHeld() *heldReset {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	held := r.held
+	r.held = nil
+	return held
+}
+
+// setLockState records what the control poller read: an unexpired operation holds the lock (ours
+// or another instance's) and is named in the status.
+func (r *processorRuntime) setLockState(operationID string, holds bool) {
+	r.mu.Lock()
+	r.operationID = operationID
+	r.lockHolds = holds
+	r.mu.Unlock()
+}
+
+// setExecuting records the operation whose execute runs here.
+func (r *processorRuntime) setExecuting(id string) {
+	r.mu.Lock()
+	r.executing = id
+	r.mu.Unlock()
+}
+
+// isExecuting reports whether id's execute runs here.
+func (r *processorRuntime) isExecuting(id string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.executing == id
+}
+
+// rememberEnded remembers an operation that ended on this instance for max(2*lease, 60s), at
+// most a day; a late renewal is refused NOT_PREPARED while it is remembered.
+func (r *processorRuntime) rememberEnded(id string, lease time.Duration, now time.Time) {
+	if id == "" {
+		return
+	}
+	keep := 2 * lease
+	if keep < 60*time.Second {
+		keep = 60 * time.Second
+	}
+	if keep > 24*time.Hour {
+		keep = 24 * time.Hour
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for ended, until := range r.finished {
+		if !until.After(now) {
+			delete(r.finished, ended)
 		}
 	}
+	r.finished[id] = now.Add(keep)
+}
+
+// hasEnded reports whether id ended on this instance and is still remembered.
+func (r *processorRuntime) hasEnded(id string, now time.Time) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	until, ok := r.finished[id]
+	if ok && !until.After(now) {
+		delete(r.finished, id)
+		return false
+	}
+	return ok
 }
 
 // snapshot is the processor's runtime state now.
@@ -292,6 +530,7 @@ func (r *processorRuntime) snapshot() processorSnapshot {
 		lastError:    r.lastError,
 		lastErrorAt:  r.lastErrorAt,
 		operationID:  r.operationID,
+		lockHolds:    r.lockHolds,
 		replay:       append([]ReplayRange(nil), r.replay...),
 	}
 }

@@ -709,3 +709,31 @@ settled; where an entry is settled its behaviour is the specification. The code 
   (`snodra-messaging@64dde1e:snodra-messaging/src/main/kotlin/com/damoreira/snodra/messaging/control/ProcessorControl.kt:124`).
 - **Question:** should a library refuse to start at level 3 when the store lacks these ports (naming the add-on), or
   degrade to the level-2 behaviour as this one does?
+
+### SG-50: a reset prepare that cannot stop the record in hand
+
+- **Specification:** [protocol.md, Processor control](https://snodra.damoreira.com/docs/library-authors/protocol/#processor-control)
+  says `reset_prepare` "takes the processor's lock ... and leaves the subscription"; no page bounds the wait for a
+  record a handler is still processing.
+- **This library:** waits at most 30 s (the reset stop limit) for the consumer to leave; when it cannot (a handler
+  does not return), the prepare is refused `CONTROL_REFUSAL_FAILED` "the subscription did not stop: ..." and the
+  lock stays, so a finish or the lease can release it. The reference joins its consumer for 30 s and then answers
+  OK even though the reader may still be alive
+  (`snodra-messaging@64dde1e:snodra-messaging/src/main/kotlin/com/damoreira/snodra/messaging/control/ProcessorControl.kt:275`,
+  `snodra-messaging@64dde1e:snodra-messaging/src/main/kotlin/com/damoreira/snodra/messaging/events/EventConsumer.kt:243`).
+  An OK while the subscription still has a reader is what the execute's subscribers-active check exists to stop, so
+  this library refuses instead.
+- **Question:** should a prepare answer OK (the reference's reply) or a refusal (this library) when the record in
+  hand keeps the consumer in the subscription past the stop bound?
+
+### SG-51: a reset handler whose processor has no event handler
+
+- **Specification:** the pages say a reset handler runs when a processor resets, and that the hub ignores a
+  processor an instance does not report; nothing says what a library does with a reset handler registered for a
+  processor that never runs.
+- **This library:** `App.Start` fails naming the processor ("the reset handler for processor X needs an event handler
+  in that processor"). The reference registers reset handlers per processor and a processor with no event handler
+  and no saga never starts, so its handler is dead without an error
+  (`snodra-messaging@64dde1e:snodra-messaging/src/main/kotlin/com/damoreira/snodra/messaging/control/ProcessorControl.kt:384`).
+- **Question:** refuse at startup (this library), ignore the handler, or run a processor that exists only to hold
+  reset handlers?

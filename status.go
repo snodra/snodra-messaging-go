@@ -53,7 +53,7 @@ func (a *App) processorStatus(p *processor, now time.Time) *hubpb.ProcessorStatu
 
 	state := hubpb.ProcessorState_PROCESSOR_STOPPED
 	switch {
-	case !snap.started:
+	case !snap.started, snap.lockHolds:
 	case snap.paused:
 		state = hubpb.ProcessorState_PROCESSOR_PAUSED
 	case !snap.failingSince.IsZero() && now.Sub(snap.failingSince) < a.cfg.timings.failingWindow:
@@ -89,7 +89,7 @@ func (a *App) processorStatus(p *processor, now time.Time) *hubpb.ProcessorStatu
 		Capabilities:   capabilityNames(a.cfg.eventStore.Capabilities()),
 	}
 
-	if !snap.started {
+	if !snap.started || snap.lockHolds {
 		return status
 	}
 	// The subscription's slice may be its own; sort a copy so the status never reorders state

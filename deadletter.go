@@ -179,6 +179,9 @@ func (a *App) retryStage1(ctx context.Context, p *processor, letter *DeadLetter,
 	}
 	handlerCtx := withHandling(txctx, scope)
 	for _, handler := range handlers {
+		if letter.Replay && handler.disallowReplay {
+			continue
+		}
 		if err := handler.call(handlerCtx, a.cfg.codec, letter.Payload); err != nil {
 			_ = tx.Rollback(txctx)
 			return false, false, false, err

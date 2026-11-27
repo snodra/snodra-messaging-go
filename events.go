@@ -82,8 +82,9 @@ type EventOption func(*eventConfig)
 
 // eventConfig is what the [EventOption]s of one event handler set.
 type eventConfig struct {
-	processor string
-	err       error
+	processor      string
+	disallowReplay bool
+	err            error
 }
 
 // InProcessor runs the event handler in the named processor: its own subscription
@@ -155,8 +156,9 @@ func HandleEvent[E Message](app *App, h func(context.Context, E) error, opts ...
 		processor = DefaultProcessor
 	}
 	handler := &eventHandler{
-		processor: processor,
-		name:      name,
+		processor:      processor,
+		name:           name,
+		disallowReplay: cfg.disallowReplay,
 		invoke: func(ctx context.Context, codec PayloadCodec, payload []byte) error {
 			event, err := decodeMessage[E](codec, payload)
 			if err != nil {

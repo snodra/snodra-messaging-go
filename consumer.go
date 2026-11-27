@@ -72,15 +72,23 @@ func (a *App) consumeProcessor(ctx context.Context, p *processor) {
 			return
 		}
 		// A pause persisted before this instance started must not be missed: no subscription
-		// before the control state was read once.
+		// before the control state was read once. A reset lock keeps the processor out of its
+		// subscription until it is released or its lease passes.
 		if !p.run.waitControl(ctx) {
+			return
+		}
+		if !p.run.waitRunnable(ctx) {
 			return
 		}
 		started := a.now()
 		stable := false
 		var failure error
-		sub, err := a.cfg.eventStore.Subscribe(ctx, p.subscription)
+		subCtx, cancel := context.WithCancel(ctx)
+		done := p.run.beginRead(cancel)
+		sub, err := a.cfg.eventStore.Subscribe(subCtx, p.subscription)
 		if err != nil {
+			cancel()
+			p.run.endRead(done)
 			if ctx.Err() != nil {
 				return
 			}
@@ -88,10 +96,25 @@ func (a *App) consumeProcessor(ctx context.Context, p *processor) {
 		} else {
 			session := newProcessorSession(p, sub)
 			p.run.attach(sub)
-			delivered, readErr := a.readProcessor(ctx, session)
+			if !p.run.runnableNow() {
+				// A reset took the lock while the subscription was being built: leave it at
+				// once; the reset prepare waits for exactly this.
+				p.run.detachAndClose(sub, func() { closeEventSubscription(sub) })
+				cancel()
+				p.run.endRead(done)
+				continue
+			}
+			delivered, readErr := a.readProcessor(subCtx, session)
 			p.run.detachAndClose(sub, func() { closeEventSubscription(sub) })
+			cancel()
+			p.run.endRead(done)
 			if ctx.Err() != nil {
 				return
+			}
+			if !p.run.runnableNow() {
+				// A reset lock stopped the subscription, not a failure: wait for the lock, no
+				// re-subscribe backoff.
+				continue
 			}
 			failure = readErr
 			stable = delivered || a.now().Sub(started) >= settings.resubscribeMax
@@ -226,20 +249,21 @@ func (a *App) handleDelivery(ctx context.Context, s *processorSession, d Deliver
 		id = s.p.subscription.Source + "-" + d.Segment + "-" + d.Position
 	}
 	scope := eventHandling(id, typeName, d.Headers)
-	handled, err := a.sequence(ctx, s, d, typeName)
+	replay := a.inReplay(s.p, d)
+	handled, err := a.sequence(ctx, s, d, typeName, replay)
 	if err != nil {
 		return err
 	}
 	if handled {
 		return nil
 	}
-	return a.attemptRecord(ctx, s, d, id, typeName, scope)
+	return a.attemptRecord(ctx, s, d, id, typeName, scope, replay)
 }
 
 // sequence parks a record SEQUENCED when an earlier letter of its key is parked, and
 // acknowledges one whose own letter exists already (parked before a crash). handled reports that
 // the record is done with; err is a store failure (the record is not acknowledged).
-func (a *App) sequence(ctx context.Context, s *processorSession, d Delivery, typeName string) (handled bool, err error) {
+func (a *App) sequence(ctx context.Context, s *processorSession, d Delivery, typeName string, replay bool) (handled bool, err error) {
 	if a.cfg.events.deadLetterMode != DeadLetterModeCollection || d.Key == nil {
 		return false, nil
 	}
@@ -284,7 +308,7 @@ func (a *App) sequence(ctx context.Context, s *processorSession, d Delivery, typ
 	}
 	// The sagas of `default` see a SEQUENCED record even though stage 1 waits; they arrive with
 	// the saga support.
-	sequenced := a.newDeadLetter(s.p, d, DeadLetterSequenced, SequencedDeadLetterError(head), 0, head, false)
+	sequenced := a.newDeadLetter(s.p, d, DeadLetterSequenced, SequencedDeadLetterError(head), 0, head, replay)
 	a.log.Info("a record is parked SEQUENCED behind an earlier letter",
 		"processor", s.p.name, "key", key, "letter", sequenced.ID, "blockedBy", head)
 	return true, a.toSink(ctx, s, d, a.parkWork(s, d, sequenced))
@@ -292,11 +316,11 @@ func (a *App) sequence(ctx context.Context, s *processorSession, d Delivery, typ
 
 // attemptRecord runs the record's stage 1 until it succeeds, a duplicate marker skips it, or its
 // attempts are exhausted (or the payload cannot be decoded) and it is parked.
-func (a *App) attemptRecord(ctx context.Context, s *processorSession, d Delivery, id, typeName string, scope *handling) error {
+func (a *App) attemptRecord(ctx context.Context, s *processorSession, d Delivery, id, typeName string, scope *handling, replay bool) error {
 	markerID := ProcessorMarker(s.p.name, id)
 	settings := a.cfg.events
 	for attempt := 1; ; attempt++ {
-		done, duplicate, failure := a.handleOnce(ctx, s.p, markerID, typeName, d, scope)
+		done, duplicate, failure := a.handleOnce(ctx, s.p, markerID, typeName, d, scope, replay)
 		a.log.Debug("an event attempt ended", "processor", s.p.name, "type", typeName, "id", id,
 			"attempt", attempt, "done", done, "duplicate", duplicate, "error", failure)
 		if duplicate {
@@ -321,10 +345,10 @@ func (a *App) attemptRecord(ctx context.Context, s *processorSession, d Delivery
 		var undecodable *decodeError
 		if errors.As(failure, &undecodable) {
 			// The payload cannot be read as the handler's message type: no retry can change it.
-			return a.parkFailed(ctx, s, d, typeName, failure, attempt, true)
+			return a.parkFailed(ctx, s, d, typeName, failure, attempt, true, replay)
 		}
 		if attempt >= settings.consumerTries {
-			return a.parkFailed(ctx, s, d, typeName, failure, attempt, false)
+			return a.parkFailed(ctx, s, d, typeName, failure, attempt, false, replay)
 		}
 		a.log.Warn("an event handler failed; trying again",
 			"processor", s.p.name, "type", typeName, "id", id, "attempt", attempt,
@@ -336,7 +360,7 @@ func (a *App) attemptRecord(ctx context.Context, s *processorSession, d Delivery
 }
 
 // parkFailed parks a record that exhausted its attempts (HANDLER_FAILED) and acknowledges it.
-func (a *App) parkFailed(ctx context.Context, s *processorSession, d Delivery, typeName string, failure error, attempts int, undecodable bool) error {
+func (a *App) parkFailed(ctx context.Context, s *processorSession, d Delivery, typeName string, failure error, attempts int, undecodable, replay bool) error {
 	s.p.failedTotal.Add(1)
 	s.p.run.markFailed(failure, a.now())
 	if a.cfg.events.deadLetterMode != DeadLetterModeCollection {
@@ -345,7 +369,7 @@ func (a *App) parkFailed(ctx context.Context, s *processorSession, d Delivery, t
 		a.acknowledge(s.p, s.sub, d)
 		return nil
 	}
-	letter := a.newDeadLetter(s.p, d, DeadLetterHandlerFailed, deadLetterErrorOf(failure), attempts, "", false)
+	letter := a.newDeadLetter(s.p, d, DeadLetterHandlerFailed, deadLetterErrorOf(failure), attempts, "", replay)
 	message := "an event handler failed on every attempt; parking it as a dead letter"
 	if undecodable {
 		message = "an event's payload cannot be read by its handler; parking it as a dead letter"
@@ -364,7 +388,8 @@ func (a *App) parkInvalid(ctx context.Context, s *processorSession, d Delivery, 
 		a.acknowledge(s.p, s.sub, d)
 		return nil
 	}
-	letter := a.newDeadLetter(s.p, d, DeadLetterInvalid, InvalidDeadLetterError(why), 0, "", false)
+	replay := a.inReplay(s.p, d)
+	letter := a.newDeadLetter(s.p, d, DeadLetterInvalid, InvalidDeadLetterError(why), 0, "", replay)
 	return a.toSink(ctx, s, d, a.parkWork(s, d, letter))
 }
 
@@ -451,7 +476,7 @@ func forgetParkedKeys(s *processorSession, segments []string) {
 // handleOnce runs one attempt: a transaction, the stage-1 marker, the handlers and the commit.
 // done is true when the marker and the handlers committed; duplicate is true when the marker
 // existed already (nothing ran and nothing must commit); failure says why the attempt failed.
-func (a *App) handleOnce(ctx context.Context, p *processor, markerID, typeName string, d Delivery, scope *handling) (done, duplicate bool, failure error) {
+func (a *App) handleOnce(ctx context.Context, p *processor, markerID, typeName string, d Delivery, scope *handling, replay bool) (done, duplicate bool, failure error) {
 	store := a.cfg.store
 	txctx, tx, err := store.Begin(a.handlerCtx)
 	if err != nil {
@@ -477,6 +502,9 @@ func (a *App) handleOnce(ctx context.Context, p *processor, markerID, typeName s
 	}
 	handlerCtx := withHandling(txctx, scope)
 	for _, handler := range p.handlers[typeName] {
+		if replay && handler.disallowReplay {
+			continue
+		}
 		if err := handler.call(handlerCtx, a.cfg.codec, d.Payload); err != nil {
 			_ = tx.Rollback(txctx)
 			return false, false, err

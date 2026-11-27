@@ -36,6 +36,8 @@ type eventHandler struct {
 	processor string
 	// name is the event's wire type name.
 	name string
+	// disallowReplay keeps the handler from running again inside a replay range.
+	disallowReplay bool
 	// invoke decodes one event and runs the handler.
 	invoke func(ctx context.Context, codec PayloadCodec, payload []byte) error
 }

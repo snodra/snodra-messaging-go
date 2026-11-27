@@ -184,10 +184,12 @@ func (c *controlPlane) guarded(ctx context.Context, req *hubpb.ControlRequest) (
 		return c.deadLetterRetryAll(ctx, req)
 	case *hubpb.ControlRequest_DeadLetterDiscard:
 		return c.deadLetterDiscard(ctx, req, action.DeadLetterDiscard)
-	case *hubpb.ControlRequest_ResetPrepare, *hubpb.ControlRequest_ResetExecute, *hubpb.ControlRequest_ResetFinish:
-		// The leased reset state machine and replay arrive next; the dispatch shape is this one.
-		return controlRefused(req, hubpb.ControlRefusal_CONTROL_REFUSAL_FAILED,
-			"the reset control is not available in this build")
+	case *hubpb.ControlRequest_ResetPrepare:
+		return c.resetPrepare(ctx, req, action.ResetPrepare)
+	case *hubpb.ControlRequest_ResetExecute:
+		return c.resetExecute(ctx, req, action.ResetExecute)
+	case *hubpb.ControlRequest_ResetFinish:
+		return c.resetFinish(ctx, req, action.ResetFinish)
 	default:
 		return controlRefused(req, hubpb.ControlRefusal_CONTROL_REFUSAL_INVALID,
 			"the control request has no action this instance knows")

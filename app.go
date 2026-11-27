@@ -52,10 +52,12 @@ type App struct {
 	handlers                                   map[string]*handler
 	commandTypes, queryTypes, sharedQueryTypes []string
 	subscriptionTypes                          []string // of query_types or shared_query_types
-	// eventHandlers are the event handlers by processor and event type, and processors are
-	// their processors with their subscriptions, both fixed by Start.
+	// eventHandlers are the event handlers by processor and event type, processors are their
+	// processors with their subscriptions, and resetHandlers are the reset handlers by
+	// processor, all fixed by Start.
 	eventHandlers map[string]map[string][]*eventHandler
 	processors    []*processor
+	resetHandlers map[string][]*resetHandler
 	// now is the application's clock: what the library stamps the times it sets itself with,
 	// and what a store implementing StoreLifecycle gets.
 	now       func() time.Time
@@ -152,6 +154,7 @@ func New(opts ...Option) (*App, error) {
 		inflight:       newInflight(),
 		handlers:       map[string]*handler{},
 		eventHandlers:  map[string]map[string][]*eventHandler{},
+		resetHandlers:  map[string][]*resetHandler{},
 		now:            time.Now,
 		calls:          newPendingCalls(),
 		running:        newRunningRequests(),
@@ -228,6 +231,9 @@ func (a *App) warnMemoryStores() {
 // neither store. A service that only publishes is not visible here (a builder cannot know that a
 // service publishes): its first [Publish] fails naming the missing add-on.
 func (a *App) checkEventStartup() error {
+	if err := a.checkResetStartup(); err != nil {
+		return err
+	}
 	if len(a.eventHandlers) == 0 {
 		return nil
 	}
