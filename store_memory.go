@@ -16,9 +16,9 @@ const (
 
 // MemoryMessageStore is the in-memory message store: the whole message-store contract inside
 // one process, for tests, local runs and single-process demos, with no database and no
-// infrastructure. It implements the outbox and the processed-event markers; the dead letters,
-// processor control, external calls and saga ports of this release return ErrUnsupported (the
-// official add-ons implement every store by level 4, and this store follows).
+// infrastructure. It implements the outbox, the processed-event markers, the dead letters and
+// the processors' control state; the external-call and saga ports of this release return
+// ErrUnsupported (the official add-ons implement every store by level 4, and this store follows).
 //
 //   - Real transactions: Begin hands out a transaction that collects its writes; other readers
 //     see them only once it commits, and a rollback leaves nothing. Reads in the transaction see
@@ -33,9 +33,11 @@ const (
 //     rather than at its next poll.
 //   - It has no schema and nothing in the background: StoreLifecycle's InitSchema and CheckSchema
 //     do nothing, and Background waits for the app to end.
-//   - Nothing is ever deleted but what the explicit Purge and DeleteMarkers calls remove: it keeps
-//     everything else it is given until the process ends. It is not durable: one process,
-//     everything lost when it ends. A service builder warns at startup that it is not durable.
+//   - A dead letter whose ExpireAt passed is removed before any dead-letter call reads the
+//     letters, as a database's TTL would (the store's own clock, UseClock). Nothing else is ever
+//     deleted but what the explicit Purge and DeleteMarkers calls remove: it keeps everything
+//     else it is given until the process ends. It is not durable: one process, everything lost
+//     when it ends. A service builder warns at startup that it is not durable.
 //
 // Every reference to one MemoryMessageStore is that store. Do not copy the struct; use the
 // pointer the constructor returns.
@@ -105,13 +107,11 @@ func (s *MemoryMessageStore) Outbox() OutboxStore { return memoryOutbox{store: s
 // Processed returns the processed-event markers.
 func (s *MemoryMessageStore) Processed() ProcessedStore { return memoryProcessed{store: s} }
 
-// DeadLetters returns the dead-letter port, which this store does not implement yet: every
-// operation fails with ErrUnsupported.
-func (s *MemoryMessageStore) DeadLetters() DeadLetterStore { return memoryDeadLetters{} }
+// DeadLetters returns the dead letters.
+func (s *MemoryMessageStore) DeadLetters() DeadLetterStore { return memoryDeadLetters{store: s} }
 
-// Control returns the processor-control port, which this store does not implement yet: every
-// operation fails with ErrUnsupported.
-func (s *MemoryMessageStore) Control() ProcessorControlStore { return memoryControl{} }
+// Control returns the processors' control state.
+func (s *MemoryMessageStore) Control() ProcessorControlStore { return memoryControl{store: s} }
 
 // ExternalCalls returns the external-call port, which this store does not implement yet: every
 // operation fails with ErrUnsupported.
@@ -137,6 +137,12 @@ func (s *MemoryMessageStore) initLocked() {
 	}
 	if s.data.processed.rows == nil {
 		s.data.processed.rows = make(map[string]*memoryTableRow[ProcessedMarker])
+	}
+	if s.data.deadLetters.rows == nil {
+		s.data.deadLetters.rows = make(map[string]*memoryTableRow[DeadLetter])
+	}
+	if s.data.control == nil {
+		s.data.control = make(map[string]*ProcessorControlState)
 	}
 	if s.data.reserved == nil {
 		s.data.reserved = make(map[memoryRecordKey]uint64)
@@ -277,9 +283,13 @@ type memoryRecordKey struct {
 // memoryData is everything the store holds.
 type memoryData struct {
 	// version counts every committed write: a record's version is the count at its last write.
-	version   uint64
-	outbox    memoryTable[memoryOutboxRow]
-	processed memoryTable[ProcessedMarker]
+	version     uint64
+	outbox      memoryTable[memoryOutboxRow]
+	processed   memoryTable[ProcessedMarker]
+	deadLetters memoryTable[DeadLetter]
+	// control is one processor's control state by name; its writes are the store's own, never a
+	// transaction's (the port says so).
+	control map[string]*ProcessorControlState
 	// reserved maps a record a live transaction wrote to that transaction's id.
 	reserved map[memoryRecordKey]uint64
 }
@@ -293,9 +303,10 @@ type memoryTx struct {
 	// doomed: a write met a record another live transaction reserved, so the commit fails.
 	doomed bool
 	// reserved are the records this transaction reserved, for their release.
-	reserved  []memoryRecordKey
-	outbox    memoryOverlay[memoryOutboxRow]
-	processed memoryOverlay[ProcessedMarker]
+	reserved    []memoryRecordKey
+	outbox      memoryOverlay[memoryOutboxRow]
+	processed   memoryOverlay[ProcessedMarker]
+	deadLetters memoryOverlay[DeadLetter]
 }
 
 // memoryTxKey is the context key of a transaction.
@@ -309,12 +320,15 @@ func memoryTxOf(ctx context.Context) *memoryTx {
 
 // written is the (table, id) of every record the transaction wrote.
 func (tx *memoryTx) written() []memoryRecordKey {
-	keys := make([]memoryRecordKey, 0, len(tx.outbox.writes)+len(tx.processed.writes))
+	keys := make([]memoryRecordKey, 0, len(tx.outbox.writes)+len(tx.processed.writes)+len(tx.deadLetters.writes))
 	for id := range tx.outbox.writes {
 		keys = append(keys, memoryRecordKey{"outbox", id})
 	}
 	for id := range tx.processed.writes {
 		keys = append(keys, memoryRecordKey{"processed_events", id})
+	}
+	for id := range tx.deadLetters.writes {
+		keys = append(keys, memoryRecordKey{"dead_letters", id})
 	}
 	return keys
 }
@@ -323,6 +337,7 @@ func (tx *memoryTx) written() []memoryRecordKey {
 func (tx *memoryTx) clear() {
 	tx.outbox = memoryOverlay[memoryOutboxRow]{}
 	tx.processed = memoryOverlay[ProcessedMarker]{}
+	tx.deadLetters = memoryOverlay[DeadLetter]{}
 }
 
 // reserve reserves for tx every record it wrote; a conflict when another live transaction holds
@@ -368,8 +383,13 @@ func (d *memoryData) commit(tx *memoryTx) error {
 		return fmt.Errorf("%w: processed_events record %q changed since the transaction read it",
 			ErrConflict, id)
 	}
+	if id, stale := d.deadLetters.stale(&tx.deadLetters); stale {
+		return fmt.Errorf("%w: dead_letters record %q changed since the transaction read it",
+			ErrConflict, id)
+	}
 	d.outbox.apply(&tx.outbox, d)
 	d.processed.apply(&tx.processed, d)
+	d.deadLetters.apply(&tx.deadLetters, d)
 	return nil
 }
 
@@ -784,88 +804,6 @@ func (p memoryPosition) within(from, until memoryPosition) bool {
 }
 
 // ---- the ports this release does not implement -------------------------------------------------
-
-// memoryDeadLetters is the dead-letter port until it is implemented.
-type memoryDeadLetters struct{}
-
-func (memoryDeadLetters) Park(context.Context, DeadLetter) (ParkResult, error) {
-	return 0, unsupportedMemory("dead letters")
-}
-
-func (memoryDeadLetters) Head(context.Context, string, string) (string, bool, error) {
-	return "", false, unsupportedMemory("dead letters")
-}
-
-func (memoryDeadLetters) Earlier(context.Context, string, string, string) (string, bool, error) {
-	return "", false, unsupportedMemory("dead letters")
-}
-
-func (memoryDeadLetters) ParkedKeys(context.Context, string, string, []string) ([]string, error) {
-	return nil, unsupportedMemory("dead letters")
-}
-
-func (memoryDeadLetters) Get(context.Context, string) (*DeadLetter, error) {
-	return nil, unsupportedMemory("dead letters")
-}
-
-func (memoryDeadLetters) List(context.Context, string, int) ([]DeadLetter, error) {
-	return nil, unsupportedMemory("dead letters")
-}
-
-func (memoryDeadLetters) Summaries(context.Context, string) ([]DeadLetterSummary, error) {
-	return nil, unsupportedMemory("dead letters")
-}
-
-func (memoryDeadLetters) Count(context.Context, string) (int64, error) {
-	return 0, unsupportedMemory("dead letters")
-}
-
-func (memoryDeadLetters) Delete(context.Context, string) (bool, error) {
-	return false, unsupportedMemory("dead letters")
-}
-
-func (memoryDeadLetters) DeleteIn(context.Context, string) (bool, error) {
-	return false, unsupportedMemory("dead letters")
-}
-
-func (memoryDeadLetters) RecordFailure(context.Context, string, DeadLetterError, time.Time) (bool, error) {
-	return false, unsupportedMemory("dead letters")
-}
-
-// memoryControl is the processor-control port until it is implemented.
-type memoryControl struct{}
-
-func (memoryControl) Get(context.Context, string) (ProcessorControlState, error) {
-	return ProcessorControlState{}, unsupportedMemory("processor control")
-}
-
-func (memoryControl) SetPaused(context.Context, string, bool, string, time.Time) error {
-	return unsupportedMemory("processor control")
-}
-
-func (memoryControl) Lock(context.Context, string, string, time.Time, time.Time) (LockOutcome, error) {
-	return LockOutcome{}, unsupportedMemory("processor control")
-}
-
-func (memoryControl) Extend(context.Context, string, string, time.Time, time.Time) (bool, error) {
-	return false, unsupportedMemory("processor control")
-}
-
-func (memoryControl) Release(context.Context, string, string, time.Time) (bool, error) {
-	return false, unsupportedMemory("processor control")
-}
-
-func (memoryControl) Expire(context.Context, string, string, time.Time) (bool, error) {
-	return false, unsupportedMemory("processor control")
-}
-
-func (memoryControl) SetReplay(context.Context, string, []ReplayRange, time.Time) error {
-	return unsupportedMemory("processor control")
-}
-
-func (memoryControl) RemoveRange(context.Context, string, ReplayRange, time.Time) (bool, error) {
-	return false, unsupportedMemory("processor control")
-}
 
 // memoryExternalCalls is the external-call port until it is implemented.
 type memoryExternalCalls struct{}

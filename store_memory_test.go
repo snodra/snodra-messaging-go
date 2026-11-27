@@ -688,14 +688,12 @@ func TestMemoryMessageStoreUnsupportedPorts(t *testing.T) {
 	store := NewMemoryMessageStore()
 	ctx := context.Background()
 	for name, err := range map[string]error{
-		"dead letters":      func() error { _, err := store.DeadLetters().Count(ctx, ""); return err }(),
-		"processor control": func() error { _, err := store.Control().Get(ctx, "p"); return err }(),
-		"external calls":    func() error { _, err := store.ExternalCalls().Find(ctx, "k"); return err }(),
-		"sagas":             func() error { _, err := store.Sagas().Sagas.FindByID(ctx, "id"); return err }(),
-		"saga dispatch":     func() error { _, err := store.Sagas().Dispatch.Pending(ctx); return err }(),
-		"saga deadlines":    func() error { _, err := store.Sagas().Deadlines.FindScheduled(ctx, "id"); return err }(),
-		"saga failures":     func() error { _, err := store.Sagas().Failures.Find(ctx, "id"); return err }(),
-		"saga markers":      func() error { _, err := store.Sagas().Markers.Exists(ctx, "id"); return err }(),
+		"external calls": func() error { _, err := store.ExternalCalls().Find(ctx, "k"); return err }(),
+		"sagas":          func() error { _, err := store.Sagas().Sagas.FindByID(ctx, "id"); return err }(),
+		"saga dispatch":  func() error { _, err := store.Sagas().Dispatch.Pending(ctx); return err }(),
+		"saga deadlines": func() error { _, err := store.Sagas().Deadlines.FindScheduled(ctx, "id"); return err }(),
+		"saga failures":  func() error { _, err := store.Sagas().Failures.Find(ctx, "id"); return err }(),
+		"saga markers":   func() error { _, err := store.Sagas().Markers.Exists(ctx, "id"); return err }(),
 	} {
 		if !errors.Is(err, ErrUnsupported) {
 			t.Errorf("%s: got %v, want ErrUnsupported", name, err)
