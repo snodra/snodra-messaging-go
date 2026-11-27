@@ -395,6 +395,8 @@ func (a *App) parkFailed(ctx context.Context, s *processorSession, d Delivery, t
 
 // parkInvalid parks a record that can never be handled (INVALID: no type header, a value that is
 // not a JSON object) and acknowledges it. It blocks no key and can only be discarded.
+//
+// TODO(spec-gap): SG-34 (the level-2 log-and-skip and the level-3 INVALID letter are settled).
 func (a *App) parkInvalid(ctx context.Context, s *processorSession, d Delivery, why string) error {
 	switch a.cfg.events.deadLetterMode {
 	case DeadLetterModeEventStore:

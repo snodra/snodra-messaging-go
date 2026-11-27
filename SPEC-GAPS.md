@@ -475,7 +475,7 @@ settled; where an entry is settled its behaviour is the specification. The code 
 - **Settled:** the level-2 gate adopted five invocations one second apart, then log and acknowledge at level 2; at
   level 3 the same five attempts end in the configured dead-letter mode: `collection` parks a `HANDLER_FAILED` letter,
   `event-store` publishes it to `<source>.dlt`, and `log` logs and acknowledges it. A payload its handler cannot decode
-  is not retried and becomes a `HANDLER_FAILED` letter with error type `InvalidMessage`. No further ruling.
+  is not retried and becomes a `HANDLER_FAILED` letter with error type `InvalidMessage`. No further decision is needed.
 - **This library:** five invocations, one second apart (`SNODRA_CONSUMER_MAX_ATTEMPTS`); the exhaustion check is
   `consumer.go:356` and `parkFailed` (`consumer.go:369-394`) switches on `SNODRA_DEAD_LETTER_MODE` (`env.go:63`); the
   undecodable payload path is `consumer.go:351-354`. The references use the same count and wait (Kotlin
@@ -497,7 +497,7 @@ settled; where an entry is settled its behaviour is the specification. The code 
   library does with such a record.
 - **Settled:** the level-2 gate adopted log-and-acknowledge without a marker at level 2; at level 3 the record is an
   `INVALID` letter in `collection`, is published to `<source>.dlt` in `event-store`, and is logged and acknowledged in
-  `log`. An `INVALID` letter blocks no key and is never retried; it can only be discarded. No further ruling.
+  `log`. An `INVALID` letter blocks no key and is never retried; it can only be discarded. No further decision is needed.
 - **This library:** `parkInvalid` (`consumer.go:398-413`) handles a missing type header (`consumer.go:234-238`) and a
   payload that is not a JSON object (`consumer.go:249-251`); the mode switch is `consumer.go:399-409`. The reference
   marks it `INVALID` and sends it to its sink (the type check at
