@@ -28,6 +28,19 @@ func TestRabbitMQEventStorePassesTheKit(t *testing.T) {
 		markers)
 }
 
+// The level-2 and level-3 event-store checks without the management API: `replay` is not declared,
+// so the kit's absent-capability form proves Admin refuses it; lag and native dead letters stay.
+func TestRabbitMQEventStoreWithoutManagementPassesTheKit(t *testing.T) {
+	broker := rabbitBroker(t)
+	source := broker.superStream(t, 4)
+	broker.streamNamed(t, source+".dlt")
+	store := broker.storeWithoutManagement(t)
+	markers := snodra.NewMemoryMessageStore().Processed()
+	snodratest.EventStore(t, source,
+		func() snodra.EventStore { return store },
+		markers)
+}
+
 // A key lands on the partition the stream clients' hash routing gives it (murmur3 x86_32, seed
 // 104729, unsigned, modulo the partitions), so every publisher of one key writes to one
 // partition whatever the library is; an unkeyed event routes by its id.
