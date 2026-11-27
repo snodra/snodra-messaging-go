@@ -5,8 +5,8 @@
 <h1 align="center">Snodra Messaging (Go)</h1>
 
 <p align="center">
-  Commands, queries, streams, scatter-gathers and subscriptions — and events through an outbox —
-  for Go services, routed by Snodra Server.
+  Commands, queries, streams, scatter-gathers and subscriptions — events through an outbox, processors with
+  control — for Go services, routed by Snodra Server.
 </p>
 
 <p align="center">
@@ -33,7 +33,17 @@ retries and timeouts.
 - **Events** through an outbox: `Publish` appends the event in the transaction the context carries, and a relay in
   every instance publishes it to the event store, at least once. `Key` is the order key.
 - **Event handlers** with processed-event markers: `HandleEvent` runs in the `default` processor or in a named one
-  (`InProcessor`), and the handler's writes and its marker commit together, so a redelivery is skipped.
+  (`InProcessor`), each with one subscription and `processor:<processor>:<eventId>` markers, so a redelivery is
+  skipped and one processor's failure does not hold another's.
+- **Processors, status and control**: every started processor reports its state, segments, counters and dead-letter
+  count to the hub. The dashboard pauses and resumes it persistently; a leased reset stops its subscription, runs the
+  `HandleReset` handlers when anything replays, deletes the replayed range's markers, and replays from earliest, latest,
+  timestamp or explicit positions. `DisallowReplay()` keeps a handler out of a replay, and all control runs off the hub
+  read loop.
+- **Dead letters**: a record that exhausts its attempts is parked according to `DeadLetterMode`
+  (`SNODRA_DEAD_LETTER_MODE`): `collection` keeps it in the message store's dead letters, with list, retry,
+  retry-all and discard driven from the dashboard; `event-store` publishes it to the `<source>.dlt` source with the
+  six `snodra-dlt-*` headers, when the store declares `native-dead-letter`; `log` logs it and moves on.
 - **Add-ons**: Kafka and RabbitMQ Streams for the event store; MongoDB and SQL (PostgreSQL, MySQL) for the outbox, the
   markers, the dead letters and the processor control; in-memory stores for tests. Each add-on is a module of its own,
   and `snodratest` is the add-on kit.
@@ -42,10 +52,8 @@ retries and timeouts.
   certificate (rolled over to a renewed pair); the caller's token verified against the issuer's keys, and guards on
   handlers.
 - **Telemetry** behind an interface, with an OpenTelemetry implementation in the separate `observability` module.
-- **Feature level 2**, proved by the 33 level-1 checks of the conformance runner and by the level-2 event-store and
-  message-store kits. Processor control, the three dead-letter modes and the level-3 store checks are implemented on
-  `main`; level 3 is not claimed publicly until the release that publishes them for every library. Sagas (level 4) are
-  not in it yet.
+- **Feature level 3**, proved by the 33 level-1 checks of the conformance runner and by the level-2 and level-3
+  event-store and message-store kits. Sagas (level 4) are not in it yet.
 
 ## Install
 
@@ -69,8 +77,8 @@ modules of a release share its version. Each add-on depends on the core and on i
 |---|---|---|
 | Kafka event store | `github.com/snodra/snodra-messaging-go/kafka` | Events, in ordered partitions |
 | RabbitMQ Streams event store | `github.com/snodra/snodra-messaging-go/rabbitmq` | Events, in partitioned streams |
-| MongoDB message store | `github.com/snodra/snodra-messaging-go/mongo` | Outbox, markers, in the shared collections |
-| SQL message store | `github.com/snodra/snodra-messaging-go/sql` | Outbox, markers, in the shared V1 tables |
+| MongoDB message store | `github.com/snodra/snodra-messaging-go/mongo` | Outbox, markers, dead letters and processor control, in the shared collections |
+| SQL message store | `github.com/snodra/snodra-messaging-go/sql` | Outbox, markers, dead letters and processor control, in the shared V1 tables |
 
 A service needs one event store and one message store, each passed to `snodra.New` with `WithEventStore` and
 `WithStore`. The event stores follow the shared wire layouts and declare their capabilities; the message stores follow
