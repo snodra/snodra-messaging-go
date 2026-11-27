@@ -24,16 +24,22 @@ func decimalOf(t testing.TB, text string) int64 {
 	return value
 }
 
-// processorStatusOf is the status of one processor of app.
+// processorStatusOf is the status of one processor of app; it waits briefly for the processor
+// to start, since a processor that never started is not reported.
 func processorStatusOf(t testing.TB, app *App, name string) *hubpb.ProcessorStatus {
 	t.Helper()
-	for _, status := range app.processorStatuses() {
-		if status.GetName() == name {
-			return status
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		for _, status := range app.processorStatuses() {
+			if status.GetName() == name {
+				return status
+			}
 		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no status of processor %s", name)
+		}
+		time.Sleep(time.Millisecond)
 	}
-	t.Fatalf("no status of processor %s", name)
-	return nil
 }
 
 // L3-STATUS: every status tick carries one ProcessorStatus per started processor, with its
@@ -300,4 +306,81 @@ func TestStatusReportsNoDeadLetterCountOutsideCollection(t *testing.T) {
 	if count, err := store.DeadLetters().Count(context.Background(), DefaultProcessor); err != nil || count != 0 {
 		t.Fatalf("a letter in log mode: %d, %v", count, err)
 	}
+}
+
+// fixedSubscription is an EventSubscription a test drives directly; Segments returns its shared
+// slice, as an add-on that keeps its assignment in one slice would.
+type fixedSubscription struct {
+	mu      sync.Mutex
+	shared  []SegmentStatus
+	paused  bool
+	closed  bool
+	pauses  int
+	resumes int
+}
+
+func (s *fixedSubscription) Next(ctx context.Context) (SubscriptionEvent, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (s *fixedSubscription) Ack(string, string) error       { return nil }
+func (s *fixedSubscription) Redeliver(string, string) error { return nil }
+func (s *fixedSubscription) TakeError() string              { return "" }
+func (s *fixedSubscription) Pause()                         { s.mu.Lock(); s.paused = true; s.pauses++; s.mu.Unlock() }
+func (s *fixedSubscription) Resume()                        { s.mu.Lock(); s.paused = false; s.resumes++; s.mu.Unlock() }
+func (s *fixedSubscription) Segments() []SegmentStatus {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.shared
+}
+func (s *fixedSubscription) Close(context.Context) error {
+	s.mu.Lock()
+	s.closed = true
+	s.mu.Unlock()
+	return nil
+}
+
+// L3-STATUS: the status sorts its own copy of the subscription's segments; the add-on's slice
+// keeps its order.
+func TestStatusSortsACopyOfTheSubscriptionsSegments(t *testing.T) {
+	app := eventsApp(t, WithStore(NewMemoryMessageStore()), WithEventStore(NewMemoryEventStore()))
+	p := newProcessor("orders-service", DefaultProcessor, DefaultEventsSource, map[string][]*eventHandler{})
+	shared := []SegmentStatus{{Segment: "1"}, {Segment: "0"}}
+	sub := &fixedSubscription{shared: shared}
+	p.run.markStarted()
+	p.run.attach(sub)
+
+	status := app.processorStatus(p, app.now())
+	if len(shared) != 2 || shared[0].Segment != "1" {
+		t.Fatalf("the subscription's slice was re-ordered in place: %v", shared)
+	}
+	if len(status.GetSegments()) != 2 || status.GetSegments()[0].GetSegment() != "0" ||
+		status.GetSegments()[1].GetSegment() != "1" {
+		t.Fatalf("the status segments are not in segment order: %v", status.GetSegments())
+	}
+}
+
+// L3-STATUS: a processor that never started is not reported; one that started once is reported
+// after it stopped too.
+func TestAProcessorThatNeverStartedIsNotReported(t *testing.T) {
+	app := eventsApp(t, WithStore(NewMemoryMessageStore()), WithEventStore(NewMemoryEventStore()),
+		withEventSettings(consumerSettings()), withTimings(controlTimings()), OutboxEnabled(false))
+	if err := HandleEvent(app, func(context.Context, OrderPlaced) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	app.freezeTypes()
+	is(t, len(app.processors), 1)
+	is(t, len(app.processorStatuses()), 0)
+	if err := app.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitUntil(t, "the started processor's status", func() bool { return len(app.processorStatuses()) == 1 })
+	if err := app.Shutdown(ctxWithin(t, 5*s)); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+	waitUntil(t, "the stopped processor's status", func() bool {
+		statuses := app.processorStatuses()
+		return len(statuses) == 1 && statuses[0].GetState() == hubpb.ProcessorState_PROCESSOR_STOPPED
+	})
 }

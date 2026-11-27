@@ -290,6 +290,7 @@ func TestProcessorsOrderDefaultThenNamed(t *testing.T) {
 	if err := app.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
+	waitUntil(t, "every processor started", func() bool { return len(app.processorStatuses()) == 3 })
 	statuses := app.processorStatuses()
 	names := make([]string, len(statuses))
 	for i, status := range statuses {

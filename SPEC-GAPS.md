@@ -700,8 +700,10 @@ settled; where an entry is settled its behaviour is the specification. The code 
   instance does then.
 - **This library:** starts its processors unpaused and keeps consuming when `Control` is unsupported, and logs and
   acknowledges a record it cannot park when `DeadLetters` is unsupported, as a level-2 instance did, instead of
-  stalling the subscription. A store that supports the ports behaves as the page says. The reference always has both
-  ports and parks
+  stalling the subscription. `pause` and `resume` then answer `CONTROL_REFUSAL_FAILED` naming the missing control
+  port, and `dead_letter_list`, `dead_letter_retry`, `dead_letter_retry_all` and `dead_letter_discard` answer
+  `CONTROL_REFUSAL_FAILED` naming the missing dead-letter port. A store that supports the ports behaves as the page
+  says. The reference always has both ports and parks
   (`snodra-messaging@64dde1e:snodra-messaging/src/main/kotlin/com/damoreira/snodra/messaging/events/EventConsumer.kt:489`)
   and reads its control documents at start
   (`snodra-messaging@64dde1e:snodra-messaging/src/main/kotlin/com/damoreira/snodra/messaging/control/ProcessorControl.kt:124`).

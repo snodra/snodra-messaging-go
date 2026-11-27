@@ -10,9 +10,13 @@ import (
 	"github.com/snodra/snodra-messaging-go/internal/hubpb"
 )
 
-// maxControlTextBytes is where a control reply's texts end (the protocol bounds them like a
-// status).
+// maxControlTextBytes is where a control reply's texts (messages and details) end; the protocol
+// bounds them like a status.
 const maxControlTextBytes = 512
+
+// maxControlTypeBytes is where a control reply's type names end (the protocol bounds types at
+// 256; ids and keys are sent as they are, so a cut id never breaks a retry).
+const maxControlTypeBytes = 256
 
 // maxDeadLetterList is the most letters a DeadLetterList may ask for.
 const maxDeadLetterList = 100
@@ -366,18 +370,20 @@ func deadLetterSummary(letter DeadLetter) *hubpb.DeadLetterSummary {
 		lastAttemptAt = letter.LastAttemptAt.UnixMilli()
 	}
 	return &hubpb.DeadLetterSummary{
-		Id:              cutUTF8Bytes(letter.ID, maxControlTextBytes),
-		Processor:       cutUTF8Bytes(letter.Processor, maxControlTextBytes),
-		Source:          cutUTF8Bytes(letter.Source, maxControlTextBytes),
-		Segment:         cutUTF8Bytes(letter.Segment, maxControlTextBytes),
-		Position:        cutUTF8Bytes(letter.Position, maxControlTextBytes),
-		Key:             cutUTF8Bytes(key, maxControlTextBytes),
-		EventId:         cutUTF8Bytes(letter.EventID, maxControlTextBytes),
-		EventType:       cutUTF8Bytes(letter.EventType, maxControlTextBytes),
+		// The ids, keys and record coordinates are sent whole: the hub matches a retried letter by
+		// its id, so a cut one would not be found.
+		Id:              letter.ID,
+		Processor:       letter.Processor,
+		Source:          letter.Source,
+		Segment:         letter.Segment,
+		Position:        letter.Position,
+		Key:             key,
+		EventId:         letter.EventID,
+		EventType:       cutUTF8Bytes(letter.EventType, maxControlTypeBytes),
 		Reason:          letter.Reason.String(),
-		ErrorType:       cutUTF8Bytes(letter.Error.Type, maxControlTextBytes),
+		ErrorType:       cutUTF8Bytes(letter.Error.Type, maxControlTypeBytes),
 		ErrorMessage:    cutUTF8Bytes(letter.Error.Message, maxControlTextBytes),
-		BlockedBy:       cutUTF8Bytes(letter.BlockedBy, maxControlTextBytes),
+		BlockedBy:       letter.BlockedBy,
 		Attempts:        uint32(attempts),
 		ParkedAtMs:      parkedAt,
 		LastAttemptAtMs: lastAttemptAt,

@@ -21,10 +21,6 @@ const (
 	DeadLetterModeLog = "log"
 )
 
-// errLetterGone is a retry whose letter was retried or discarded meanwhile: the handling rolls
-// back.
-var errLetterGone = errors.New("snodra: the dead letter is gone")
-
 // newDeadLetter builds the letter of a delivered record, ready for DeadLetterStore.Park: the id
 // "<processor>:<source>:<segment>:<position>", the record's key and headers, its id and type
 // headers as EventID and EventType (a blank one is none), its value byte for byte, and ExpireAt

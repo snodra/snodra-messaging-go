@@ -333,6 +333,8 @@ func Supports(store EventStore, capability Capability) bool {
 //     or to this one after Redeliver.
 //   - A failure ends it: an error from Next means the subscription is broken; the caller closes
 //     it and subscribes again after a backoff.
+//   - The core serializes Pause, Resume, Segments and TakeError with Close: once Close returns,
+//     none of them is called again, and Close never runs beside one of them.
 type EventSubscription interface {
 	// Next waits for the next assignment change or delivery. It returns when ctx is done
 	// without losing anything: dropping a pending Next loses nothing.

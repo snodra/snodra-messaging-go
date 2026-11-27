@@ -7,12 +7,18 @@ import (
 )
 
 // processorRuntime is one processor's in-memory state: what its status reports, the pause it
-// applies to its subscription, and the control state it last read. The mutex is held only for
-// memory; nothing here calls the message store or the event subscription while holding it.
+// applies to its subscription, and the control state it last read. mu is held only for memory;
+// subMu is held across a subscription's use (attach, detach and Close, Pause, Resume, Segments)
+// so a closed subscription is never called.
 type processorRuntime struct {
 	mu sync.Mutex
-	// started is true while the processor's consumer loop runs.
-	started bool
+	// subMu serializes the subscription's life against Pause and Resume and the status's
+	// Segments read: a subscription that was detached and closed is never called again.
+	subMu sync.Mutex
+	// started is true while the processor's consumer loop runs; wasStarted stays true once it
+	// ran, so the status still reports a stopped processor.
+	started    bool
+	wasStarted bool
 	// paused stops delivery without leaving the subscription.
 	paused bool
 	// assigned is set by the first Assigned; rebalancing is set between a Revoked and the
@@ -32,10 +38,11 @@ type processorRuntime struct {
 	// and its pause cannot persist.
 	controlUnsupported bool
 	controlReady       chan struct{}
-	// changes counts the changes this instance made to the control state, so a poll that read
-	// the store before a change does not apply its stale copy.
+	// changes counts the control-state changes applied here (a control action, or a poll's read
+	// it applied), so a poll whose read predates one of them is left to the next poll.
 	changes uint64
-	// operationID is the reset operation holding the processor's lock; reset support fills it.
+	// operationID is the reset operation holding the processor's lock, as the control poller
+	// last read it; empty when none.
 	operationID string
 	// replay is the open replay ranges of the processor's source.
 	replay []ReplayRange
@@ -50,7 +57,6 @@ type processorSnapshot struct {
 	failingSince time.Time
 	lastError    string
 	lastErrorAt  time.Time
-	sub          EventSubscription
 	operationID  string
 	replay       []ReplayRange
 }
@@ -63,17 +69,34 @@ func newProcessorRuntime() *processorRuntime {
 func (r *processorRuntime) markStarted() {
 	r.mu.Lock()
 	r.started = true
+	r.wasStarted = true
 	r.mu.Unlock()
 }
 
 // markStopped is called when the consumer loop returns (shutdown).
 func (r *processorRuntime) markStopped() {
+	r.subMu.Lock()
 	r.mu.Lock()
 	r.started = false
 	r.assigned = false
 	r.rebalancing = false
 	r.sub = nil
 	r.mu.Unlock()
+	r.subMu.Unlock()
+}
+
+// hasStarted reports whether the consumer loop ran at least once.
+func (r *processorRuntime) hasStarted() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.wasStarted
+}
+
+// operation is the reset operation holding the processor's lock, empty when none.
+func (r *processorRuntime) operation() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.operationID
 }
 
 // markAssigned ends a first assignment or a reassignment.
@@ -106,6 +129,8 @@ func (r *processorRuntime) markFailed(err error, now time.Time) {
 
 // attach makes sub the subscription being read and applies the pause the processor already has.
 func (r *processorRuntime) attach(sub EventSubscription) {
+	r.subMu.Lock()
+	defer r.subMu.Unlock()
 	r.mu.Lock()
 	r.sub = sub
 	paused := r.paused
@@ -115,13 +140,31 @@ func (r *processorRuntime) attach(sub EventSubscription) {
 	}
 }
 
-// detach forgets sub, when it is still the current one.
-func (r *processorRuntime) detach(sub EventSubscription) {
+// detachAndClose forgets sub and closes it under the subscription lock: a pause, a resume or a
+// status read waits until the close is over and then sees no subscription, never a closed one.
+func (r *processorRuntime) detachAndClose(sub EventSubscription, closeSub func()) {
+	r.subMu.Lock()
+	defer r.subMu.Unlock()
 	r.mu.Lock()
 	if r.sub == sub {
 		r.sub = nil
 	}
 	r.mu.Unlock()
+	closeSub()
+}
+
+// segments is the subscription's assignment, read under the subscription lock so a concurrent
+// close is never raced. It is nil when nothing is being read.
+func (r *processorRuntime) segments() []SegmentStatus {
+	r.subMu.Lock()
+	defer r.subMu.Unlock()
+	r.mu.Lock()
+	sub, started := r.sub, r.started
+	r.mu.Unlock()
+	if sub == nil || !started {
+		return nil
+	}
+	return sub.Segments()
 }
 
 // pausedNow reports whether delivery is paused.
@@ -184,6 +227,8 @@ func (r *processorRuntime) changeCount() uint64 {
 // applyPaused applies a pause or resume made on this instance (a control request): the store was
 // written already, so the state is known.
 func (r *processorRuntime) applyPaused(paused bool) {
+	r.subMu.Lock()
+	defer r.subMu.Unlock()
 	r.mu.Lock()
 	changed := r.paused != paused
 	r.paused = paused
@@ -204,6 +249,8 @@ func (r *processorRuntime) applyPaused(paused bool) {
 // change made here since is left to the next poll, which reads what that change wrote; the read
 // still proves the store reachable, so the consumer may start.
 func (r *processorRuntime) applyControl(state ProcessorControlState, readAt uint64, now time.Time) {
+	r.subMu.Lock()
+	defer r.subMu.Unlock()
 	r.mu.Lock()
 	if r.controlKnown && r.changes != readAt {
 		r.markControlKnownLocked()
@@ -244,7 +291,6 @@ func (r *processorRuntime) snapshot() processorSnapshot {
 		failingSince: r.failingSince,
 		lastError:    r.lastError,
 		lastErrorAt:  r.lastErrorAt,
-		sub:          r.sub,
 		operationID:  r.operationID,
 		replay:       append([]ReplayRange(nil), r.replay...),
 	}
@@ -253,13 +299,16 @@ func (r *processorRuntime) snapshot() processorSnapshot {
 // takeSubscriptionError asks the subscription for the trouble it recovered from by itself and
 // records it as the latest failure.
 func (r *processorRuntime) takeSubscriptionError(now time.Time) {
+	r.subMu.Lock()
 	r.mu.Lock()
 	sub := r.sub
 	r.mu.Unlock()
-	if sub == nil {
-		return
+	message := ""
+	if sub != nil {
+		message = sub.TakeError()
 	}
-	if message := sub.TakeError(); message != "" {
+	r.subMu.Unlock()
+	if message != "" {
 		r.markFailed(errText(message), now)
 	}
 }

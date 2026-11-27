@@ -421,9 +421,13 @@ func (c *config) validateEvents() error {
 			c.events.resubscribeMin, c.events.resubscribeMax)
 	}
 	switch c.events.deadLetterMode {
-	case DeadLetterModeCollection, DeadLetterModeEventStore, DeadLetterModeLog:
+	case DeadLetterModeCollection, DeadLetterModeLog:
+	case DeadLetterModeEventStore:
+		// The mode that sends a record to the event store's dead-letter destination arrives with
+		// that sender; refusing it here means no configuration can silently lose records.
+		return fmt.Errorf("snodra: the event-store dead-letter mode is not available yet: use collection (the default)")
 	default:
-		return fmt.Errorf("snodra: an unknown dead-letter mode %q (collection, event-store or log)",
+		return fmt.Errorf("snodra: an unknown dead-letter mode %q (collection or log)",
 			c.events.deadLetterMode)
 	}
 	if c.events.deadLetterMode == DeadLetterModeCollection && c.events.deadLetterRetention < time.Second {

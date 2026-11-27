@@ -20,10 +20,11 @@ const (
 	maxStatusLastErrorBytes = 512
 )
 
-// processorStatuses is one ProcessorStatus per started processor, built from memory only: it
-// never waits for the event store, the message store or a handler, so it cannot delay a status
-// tick or a consumer. nil when this instance started no processor. Each call also asks the
-// sampler, without waiting, to refresh the dead-letter counts that need the store.
+// processorStatuses is one ProcessorStatus per processor that started at least once (or holds a
+// reset operation), built from memory only: it never waits for the event store, the message
+// store or a handler, so it cannot delay a status tick or a consumer. nil when none did. Each
+// call also asks the sampler, without waiting, to refresh the dead-letter counts that need the
+// store.
 // See https://snodra.damoreira.com/docs/library-authors/protocol/ (Processor status).
 func (a *App) processorStatuses() []*hubpb.ProcessorStatus {
 	if a.cfg.store == nil || a.cfg.eventStore == nil || len(a.processors) == 0 ||
@@ -33,7 +34,13 @@ func (a *App) processorStatuses() []*hubpb.ProcessorStatus {
 	now := a.now()
 	statuses := make([]*hubpb.ProcessorStatus, 0, len(a.processors))
 	for _, p := range a.processors {
+		if !p.run.hasStarted() && p.run.operation() == "" {
+			continue // a processor that never started is not one this instance runs
+		}
 		statuses = append(statuses, a.processorStatus(p, now))
+	}
+	if len(statuses) == 0 {
+		return nil
 	}
 	a.kickDeadLetterSample()
 	return statuses
@@ -82,10 +89,12 @@ func (a *App) processorStatus(p *processor, now time.Time) *hubpb.ProcessorStatu
 		Capabilities:   capabilityNames(a.cfg.eventStore.Capabilities()),
 	}
 
-	if !snap.started || snap.sub == nil {
+	if !snap.started {
 		return status
 	}
-	segments := snap.sub.Segments()
+	// The subscription's slice may be its own; sort a copy so the status never reorders state
+	// under the add-on.
+	segments := append([]SegmentStatus(nil), p.run.segments()...)
 	sort.SliceStable(segments, func(i, j int) bool {
 		return SegmentOrder(segments[i].Segment, segments[j].Segment) < 0
 	})

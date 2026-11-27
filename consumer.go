@@ -89,8 +89,7 @@ func (a *App) consumeProcessor(ctx context.Context, p *processor) {
 			session := newProcessorSession(p, sub)
 			p.run.attach(sub)
 			delivered, readErr := a.readProcessor(ctx, session)
-			p.run.detach(sub)
-			closeEventSubscription(sub)
+			p.run.detachAndClose(sub, func() { closeEventSubscription(sub) })
 			if ctx.Err() != nil {
 				return
 			}
@@ -158,7 +157,11 @@ func (a *App) readProcessor(ctx context.Context, s *processorSession) (delivered
 			if s.p.run.pausedNow() {
 				// Paused after the subscription handed it out: not handled, handed out again on
 				// the resume.
-				_ = s.sub.Redeliver(event.Segment, event.Position)
+				if err := s.sub.Redeliver(event.Segment, event.Position); err != nil {
+					a.log.Debug("could not redeliver a record handed out while pausing",
+						"processor", s.p.name, "segment", event.Segment, "position", event.Position,
+						"error", err)
+				}
 				continue
 			}
 			delivered = true
@@ -168,7 +171,11 @@ func (a *App) readProcessor(ctx context.Context, s *processorSession) (delivered
 				}
 				// The sink could not take it: not acknowledged, handed out again after the
 				// back-off; its pending action runs then, not the handlers again.
-				_ = s.sub.Redeliver(event.Segment, event.Position)
+				if err := s.sub.Redeliver(event.Segment, event.Position); err != nil {
+					a.log.Debug("could not redeliver a record the dead letters did not take",
+						"processor", s.p.name, "segment", event.Segment, "position", event.Position,
+						"error", err)
+				}
 				if !sleepCtx(ctx, settings.consumerBackoff) {
 					return delivered, nil
 				}
@@ -187,8 +194,8 @@ func (a *App) readProcessor(ctx context.Context, s *processorSession) (delivered
 // marker and the handlers in one transaction, and an acknowledgement only after the commit. An
 // event type the processor does not handle is acknowledged and runs nothing; a malformed record
 // and a record that exhausts its attempts become dead letters. A duplicate marker skips the
-// handlers and is acknowledged. The error is a sink failure: the record is not acknowledged and
-// comes again.
+// handlers and is acknowledged. The error is a store failure (the sink, or the dead-letter check
+// of a sequenced record): the record is not acknowledged and comes again.
 func (a *App) handleDelivery(ctx context.Context, s *processorSession, d Delivery) error {
 	key := positionKey{segment: d.Segment, position: d.Position}
 	if work, pending := s.pending[key]; pending {
@@ -219,8 +226,12 @@ func (a *App) handleDelivery(ctx context.Context, s *processorSession, d Deliver
 		id = s.p.subscription.Source + "-" + d.Segment + "-" + d.Position
 	}
 	scope := eventHandling(id, typeName, d.Headers)
-	if handled, err := a.sequence(ctx, s, d, typeName); handled {
+	handled, err := a.sequence(ctx, s, d, typeName)
+	if err != nil {
 		return err
+	}
+	if handled {
+		return nil
 	}
 	return a.attemptRecord(ctx, s, d, id, typeName, scope)
 }
@@ -310,13 +321,9 @@ func (a *App) attemptRecord(ctx context.Context, s *processorSession, d Delivery
 		var undecodable *decodeError
 		if errors.As(failure, &undecodable) {
 			// The payload cannot be read as the handler's message type: no retry can change it.
-			a.log.Error("an event's payload cannot be read by its handler; parking it as a dead letter",
-				"processor", s.p.name, "type", typeName, "id", id, "error", failure)
 			return a.parkFailed(ctx, s, d, typeName, failure, attempt, true)
 		}
 		if attempt >= settings.consumerTries {
-			a.log.Error("an event handler failed on every attempt; parking it as a dead letter",
-				"processor", s.p.name, "type", typeName, "id", id, "attempts", attempt, "error", failure)
 			return a.parkFailed(ctx, s, d, typeName, failure, attempt, false)
 		}
 		a.log.Warn("an event handler failed; trying again",
@@ -334,12 +341,16 @@ func (a *App) parkFailed(ctx context.Context, s *processorSession, d Delivery, t
 	s.p.run.markFailed(failure, a.now())
 	if a.cfg.events.deadLetterMode != DeadLetterModeCollection {
 		a.log.Error("an event handler failed on every attempt; skipping the event",
-			"processor", s.p.name, "type", typeName, "error", failure)
+			"processor", s.p.name, "type", typeName, "attempts", attempts, "error", failure)
 		a.acknowledge(s.p, s.sub, d)
 		return nil
 	}
 	letter := a.newDeadLetter(s.p, d, DeadLetterHandlerFailed, deadLetterErrorOf(failure), attempts, "", false)
-	a.log.Error("an event was parked as a dead letter",
+	message := "an event handler failed on every attempt; parking it as a dead letter"
+	if undecodable {
+		message = "an event's payload cannot be read by its handler; parking it as a dead letter"
+	}
+	a.log.Error(message,
 		"processor", s.p.name, "letter", letter.ID, "type", typeName, "attempts", attempts,
 		"errorType", letter.Error.Type, "error", letter.Error.Message)
 	return a.toSink(ctx, s, d, a.parkWork(s, d, letter))
@@ -354,8 +365,6 @@ func (a *App) parkInvalid(ctx context.Context, s *processorSession, d Delivery, 
 		return nil
 	}
 	letter := a.newDeadLetter(s.p, d, DeadLetterInvalid, InvalidDeadLetterError(why), 0, "", false)
-	a.log.Warn("a malformed record was parked as a dead letter",
-		"processor", s.p.name, "letter", letter.ID, "reason", why)
 	return a.toSink(ctx, s, d, a.parkWork(s, d, letter))
 }
 
@@ -378,7 +387,9 @@ func (a *App) parkWork(s *processorSession, d Delivery, letter DeadLetter) func(
 			s.p.parkedSinceSample.Store(true)
 			a.kickDeadLetterSample()
 		}
-		if d.Key != nil {
+		if d.Key != nil && letter.Reason != DeadLetterInvalid {
+			// An INVALID letter blocks no key: adding it would only cost a useless Head check on
+			// every later record of that key.
 			s.parkedKeys[*d.Key] = struct{}{}
 		}
 		return nil

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -710,5 +711,343 @@ func TestDeadLetterActionsOutsideCollectionAreInvalid(t *testing.T) {
 	if answer := s.RecvControlReply(t).GetRefused(); answer == nil ||
 		answer.GetCode() != hubpb.ControlRefusal_CONTROL_REFUSAL_INVALID {
 		t.Fatalf("retry-all in log mode: %v", answer)
+	}
+}
+
+// faultingDeadLetters fails Head or Get on demand; ParkedKeys, Park, Earlier, List and the rest
+// keep working.
+type faultingDeadLetters struct {
+	DeadLetterStore
+	failHead    atomic.Bool
+	failGet     atomic.Bool
+	failedHeads atomic.Int64
+	failedGets  atomic.Int64
+}
+
+func (f *faultingDeadLetters) Head(ctx context.Context, processor, key string) (string, bool, error) {
+	if f.failHead.Load() {
+		f.failedHeads.Add(1)
+		return "", false, errors.New("the head check failed")
+	}
+	return f.DeadLetterStore.Head(ctx, processor, key)
+}
+
+func (f *faultingDeadLetters) Get(ctx context.Context, id string) (*DeadLetter, error) {
+	if f.failGet.Load() {
+		f.failedGets.Add(1)
+		return nil, errors.New("the letter read failed")
+	}
+	return f.DeadLetterStore.Get(ctx, id)
+}
+
+type faultingStore struct {
+	MessageStore
+	dead *faultingDeadLetters
+}
+
+func (s *faultingStore) DeadLetters() DeadLetterStore { return s.dead }
+
+// L3-DEAD-LETTERS: a store failure while a follower's key is confirmed does not let the follower
+// run stage 1 or be acknowledged: it is redelivered until the store answers, then parked
+// SEQUENCED.
+func TestAFailingSequenceCheckDoesNotHandleTheFollower(t *testing.T) {
+	for _, scenario := range []struct {
+		name string
+		fail func(*faultingDeadLetters, bool)
+	}{
+		{"Head", func(dead *faultingDeadLetters, on bool) { dead.failHead.Store(on) }},
+		{"own letter", func(dead *faultingDeadLetters, on bool) { dead.failGet.Store(on) }},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			inner := NewMemoryMessageStore()
+			dead := &faultingDeadLetters{DeadLetterStore: inner.DeadLetters()}
+			store := &faultingStore{MessageStore: inner, dead: dead}
+			events, err := NewMemoryEventStoreWithSegments(1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			observer := &ackObserver{EventStore: events}
+			settings := consumerSettings()
+			settings.consumerTries = 1
+			var poison, follower atomic.Int64
+			app := eventsApp(t, WithStore(store), WithEventStore(observer),
+				withEventSettings(settings), withTimings(controlTimings()), OutboxEnabled(false))
+			if err := HandleEvent(app, func(ctx context.Context, event OrderPlaced) error {
+				if event.OrderID == "p-1" {
+					poison.Add(1)
+					return errText("poison")
+				}
+				follower.Add(1)
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := app.Start(context.Background()); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			key := "k1"
+			publishTestEvent(t, events, "p-1", "orders.OrderPlaced", &key, nil)
+			waitUntil(t, "the poison letter", func() bool { return len(lettersOf(t, store, DefaultProcessor)) == 1 })
+			scenario.fail(dead, true)
+			publishTestEvent(t, events, "p-2", "orders.OrderPlaced", &key, nil)
+			waitUntil(t, "a failed sequence check", func() bool {
+				if scenario.name == "Head" {
+					return dead.failedHeads.Load() > 0
+				}
+				return dead.failedGets.Load() > 0
+			})
+			neverWithin(t, 100*ms, "the follower's handler while the store fails", func() bool {
+				return follower.Load() > 0
+			})
+			is(t, observer.count(), 1) // only the poison record was acknowledged
+			scenario.fail(dead, false)
+			waitUntil(t, "the follower's SEQUENCED letter", func() bool {
+				return len(lettersOf(t, store, DefaultProcessor)) == 2
+			})
+			waitUntil(t, "the follower's acknowledgement", func() bool { return observer.count() >= 2 })
+			is(t, follower.Load(), int64(0))
+			reasons := map[DeadLetterReason]int{}
+			for _, letter := range lettersOf(t, store, DefaultProcessor) {
+				reasons[letter.Reason]++
+			}
+			is(t, reasons[DeadLetterHandlerFailed], 1)
+			is(t, reasons[DeadLetterSequenced], 1)
+		})
+	}
+}
+
+// headCountingDeadLetters counts the Head checks the consumer makes.
+type headCountingDeadLetters struct {
+	DeadLetterStore
+	heads atomic.Int64
+}
+
+func (h *headCountingDeadLetters) Head(ctx context.Context, processor, key string) (string, bool, error) {
+	h.heads.Add(1)
+	return h.DeadLetterStore.Head(ctx, processor, key)
+}
+
+type headCountingStore struct {
+	MessageStore
+	dead *headCountingDeadLetters
+}
+
+func (s *headCountingStore) DeadLetters() DeadLetterStore { return s.dead }
+
+// L3-DEAD-LETTERS: an INVALID letter blocks no key, so a later record of its key takes the fast
+// path without a Head check.
+func TestAnInvalidLettersKeyIsNotASequencingKey(t *testing.T) {
+	inner := NewMemoryMessageStore()
+	dead := &headCountingDeadLetters{DeadLetterStore: inner.DeadLetters()}
+	store := &headCountingStore{MessageStore: inner, dead: dead}
+	events, err := NewMemoryEventStoreWithSegments(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var handled atomic.Int64
+	app := eventsApp(t, WithStore(store), WithEventStore(events),
+		withEventSettings(consumerSettings()), withTimings(controlTimings()), OutboxEnabled(false))
+	if err := HandleEvent(app, func(context.Context, OrderPlaced) error {
+		handled.Add(1)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	key := "k1"
+	if err := events.Publish(context.Background(), OutgoingEvent{
+		Source: DefaultEventsSource, ID: "invalid-1", Key: &key,
+		Headers: map[string]string{HeaderCorrelationID: "c-1"}, Payload: []byte(`{}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	publishTestEvent(t, events, "good-1", "orders.OrderPlaced", &key, nil)
+	waitUntil(t, "the good record", func() bool { return handled.Load() == 1 })
+	waitUntil(t, "the INVALID letter", func() bool { return len(lettersOf(t, store, DefaultProcessor)) == 1 })
+	is(t, dead.heads.Load(), int64(0))
+}
+
+// unsupportedControlPort answers ErrUnsupported for the state read and the pause write.
+type unsupportedControlPort struct {
+	ProcessorControlStore
+}
+
+func (unsupportedControlPort) Get(context.Context, string) (ProcessorControlState, error) {
+	return ProcessorControlState{}, unsupportedMemory("processor control")
+}
+
+func (unsupportedControlPort) SetPaused(context.Context, string, bool, string, time.Time) error {
+	return unsupportedMemory("processor control")
+}
+
+// unsupportedDeadLetterPort answers ErrUnsupported for the operations the consumer and the
+// control actions use.
+type unsupportedDeadLetterPort struct {
+	DeadLetterStore
+}
+
+func (unsupportedDeadLetterPort) Park(context.Context, DeadLetter) (ParkResult, error) {
+	return 0, unsupportedMemory("dead letters")
+}
+
+func (unsupportedDeadLetterPort) List(context.Context, string, int) ([]DeadLetter, error) {
+	return nil, unsupportedMemory("dead letters")
+}
+
+func (unsupportedDeadLetterPort) Count(context.Context, string) (int64, error) {
+	return 0, unsupportedMemory("dead letters")
+}
+
+func (unsupportedDeadLetterPort) Get(context.Context, string) (*DeadLetter, error) {
+	return nil, unsupportedMemory("dead letters")
+}
+
+func (unsupportedDeadLetterPort) Summaries(context.Context, string) ([]DeadLetterSummary, error) {
+	return nil, unsupportedMemory("dead letters")
+}
+
+func (unsupportedDeadLetterPort) Delete(context.Context, string) (bool, error) {
+	return false, unsupportedMemory("dead letters")
+}
+
+// unsupportedPortsStore is a message store whose control and dead-letter ports are missing.
+type unsupportedPortsStore struct {
+	MessageStore
+	control ProcessorControlStore
+	dead    DeadLetterStore
+}
+
+func (s *unsupportedPortsStore) Control() ProcessorControlStore { return s.control }
+func (s *unsupportedPortsStore) DeadLetters() DeadLetterStore   { return s.dead }
+
+func newUnsupportedPortsStore() *unsupportedPortsStore {
+	inner := NewMemoryMessageStore()
+	return &unsupportedPortsStore{
+		MessageStore: inner,
+		control:      unsupportedControlPort{ProcessorControlStore: inner.Control()},
+		dead:         unsupportedDeadLetterPort{DeadLetterStore: inner.DeadLetters()},
+	}
+}
+
+// SG-49: a store without the control or dead-letter port runs its processors unpaused, and the
+// control answers name the missing port with CONTROL_REFUSAL_FAILED.
+func TestAStoreWithoutThePortsStartsUnpausedAndRefusesControl(t *testing.T) {
+	hub := fakehub.Start(t)
+	store := newUnsupportedPortsStore()
+	events := NewMemoryEventStore()
+	var handled atomic.Int64
+	_, s := l3Serving(t, hub, func(app *App) {
+		if err := HandleEvent(app, func(context.Context, OrderPlaced) error {
+			handled.Add(1)
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}, WithStore(store), WithEventStore(events), Logger(slog.New(&logRecorder{})))
+	// The processor runs unpaused: a record is handled even though its pause cannot be read.
+	publishTestEvent(t, events, "good-1", "orders.OrderPlaced", nil, nil)
+	waitUntil(t, "the record of the unpaused processor", func() bool { return handled.Load() == 1 })
+
+	s.Send(t, pauseControl("pause-1", DefaultProcessor))
+	answer := s.RecvControlReply(t)
+	if answer.GetRefused() == nil ||
+		answer.GetRefused().GetCode() != hubpb.ControlRefusal_CONTROL_REFUSAL_FAILED ||
+		!strings.Contains(answer.GetRefused().GetMessage(), "control port") {
+		t.Fatalf("pause without a control port: %v", answer)
+	}
+	for _, request := range []*hubpb.ServerMessage{
+		deadLetterListControl("list-1", DefaultProcessor, 10),
+		deadLetterRetryControl("retry-1", DefaultProcessor, "default:"+DefaultEventsSource+":0:0"),
+		deadLetterRetryAllControl("retry-all-1", DefaultProcessor),
+		deadLetterDiscardControl("discard-1", DefaultProcessor, "default:"+DefaultEventsSource+":0:0"),
+	} {
+		s.Send(t, request)
+		answer = s.RecvControlReply(t)
+		if answer.GetRefused() == nil ||
+			answer.GetRefused().GetCode() != hubpb.ControlRefusal_CONTROL_REFUSAL_FAILED ||
+			!strings.Contains(answer.GetRefused().GetMessage(), "dead-letter port") {
+			t.Fatalf("a dead-letter action without its port: %v", answer)
+		}
+	}
+}
+
+// SG-49: a record that cannot be parked is logged and acknowledged, as level 2 did.
+func TestARecordThatCannotBeParkedIsSkipped(t *testing.T) {
+	store := newUnsupportedPortsStore()
+	events := NewMemoryEventStore()
+	observer := &ackObserver{EventStore: events}
+	recorder := &logRecorder{}
+	settings := consumerSettings()
+	settings.consumerTries = 1
+	var calls atomic.Int64
+	app := eventsApp(t, WithStore(store), WithEventStore(observer),
+		withEventSettings(settings), withTimings(controlTimings()), OutboxEnabled(false),
+		Logger(slog.New(recorder)))
+	if err := HandleEvent(app, func(context.Context, OrderPlaced) error {
+		calls.Add(1)
+		return errText("never works")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	publishTestEvent(t, events, "bad-1", "orders.OrderPlaced", nil, nil)
+	waitUntil(t, "the record's acknowledgement", func() bool { return observer.count() >= 1 })
+	is(t, calls.Load(), int64(1))
+	if n := recorder.count(slog.LevelError, "the message store keeps no dead letters; skipping the record"); n != 1 {
+		t.Fatalf("the skip was logged %d times", n)
+	}
+	if exists, err := store.Processed().Exists(context.Background(), ProcessorMarker(DefaultProcessor, "bad-1")); err != nil || exists {
+		t.Fatalf("a failed record has a marker: %v, %v", exists, err)
+	}
+}
+
+// L3-DEAD-LETTERS: a letter's id and key travel whole in a summary, so a direct client can retry
+// a letter whose id is longer than the status's 128-byte coordination bound.
+func TestADeadLetterSummaryKeepsItsLongID(t *testing.T) {
+	hub := fakehub.Start(t)
+	store := NewMemoryMessageStore()
+	longSource := strings.Repeat("s", 600)
+	longKey := strings.Repeat("k", 600)
+	letter := letterFor(DefaultProcessor, longSource, "0", "0", longKey, DeadLetterHandlerFailed)
+	letter.EventType = "orders.OrderPlaced"
+	letter.Headers[HeaderType] = "orders.OrderPlaced"
+	if len(letter.ID) <= 128 {
+		t.Fatalf("the test's letter id is too short: %d", len(letter.ID))
+	}
+	if _, err := store.DeadLetters().Park(context.Background(), letter); err != nil {
+		t.Fatal(err)
+	}
+	_, s := l3Serving(t, hub, func(app *App) {
+		if err := HandleEvent(app, func(context.Context, OrderPlaced) error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+	}, WithStore(store))
+
+	s.Send(t, deadLetterListControl("list-1", DefaultProcessor, 10))
+	page := s.RecvControlReply(t).GetDeadLetters()
+	if page == nil || len(page.GetLetters()) != 1 {
+		t.Fatalf("list: %v", page)
+	}
+	summary := page.GetLetters()[0]
+	is(t, summary.GetId(), letter.ID)
+	is(t, summary.GetKey(), longKey)
+	s.Send(t, deadLetterRetryControl("retry-1", DefaultProcessor, summary.GetId()))
+	if outcome := s.RecvControlReply(t).GetRetry(); outcome == nil || outcome.GetResult() != retryRetried {
+		t.Fatalf("retry of a long id: %v", outcome)
+	}
+}
+
+// The event-store dead-letter mode is refused until its sender exists: no configuration can
+// silently lose the records it would have sent.
+func TestTheEventStoreDeadLetterModeIsRefused(t *testing.T) {
+	settings := defaultEventSettings()
+	settings.deadLetterMode = DeadLetterModeEventStore
+	_, err := New(Service("orders-service"), Hubs("127.0.0.1:1"), withEventSettings(settings))
+	if err == nil || !strings.Contains(err.Error(), "event-store") {
+		t.Fatalf("the event-store mode: %v", err)
 	}
 }
