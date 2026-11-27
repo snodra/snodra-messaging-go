@@ -41,7 +41,13 @@ type eventSettings struct {
 	consumerBackoff time.Duration // between two invocations of one record
 	resubscribeMin  time.Duration // after a subscription failed, before subscribing again
 	resubscribeMax  time.Duration // the cap of that wait, and what counts as a stable subscription
-	storeInitSchema bool          // App.Start prepares the message store's schema
+	// deadLetterMode is where a record that exhausts its attempts goes: a letter in the message
+	// store ("collection", the default). The event store's dead-letter source and logging arrive
+	// with the remaining modes.
+	deadLetterMode string
+	// deadLetterRetention is how long a letter stays before its key unblocks ("collection").
+	deadLetterRetention time.Duration
+	storeInitSchema     bool // App.Start prepares the message store's schema
 	// sleep waits d or until ctx ends; false when ctx ended. It is sleepCtx, and a test replaces
 	// it to record the re-subscribe waits without waiting.
 	sleep func(ctx context.Context, d time.Duration) bool
@@ -62,8 +68,11 @@ func defaultEventSettings() eventSettings {
 		consumerBackoff: time.Second,
 		resubscribeMin:  time.Second,
 		resubscribeMax:  30 * time.Second,
-		storeInitSchema: true,
-		sleep:           sleepCtx,
+		deadLetterMode:  DeadLetterModeCollection,
+		// The references keep a letter for 30 days (snodra.messaging.events.dead-letter.retention).
+		deadLetterRetention: 30 * 24 * time.Hour,
+		storeInitSchema:     true,
+		sleep:               sleepCtx,
 	}
 }
 
@@ -113,7 +122,7 @@ func InProcessor(name string) EventOption {
 // and headers) and, through [Publish], the event's correlation id, userId and trace context. An
 // event handler has no caller ([CallerFrom] reports false): an event carries a userId, never a
 // token. Events are handled at least once: a handler that fails is tried again, and a record that
-// fails every attempt is logged and skipped (level 3 parks it as a dead letter instead).
+// fails every attempt is parked as a dead letter (mode collection, the default) and acknowledged.
 //
 // Handlers are registered before [App.Start], like commands, queries and subscription handlers.
 // An event handler needs the message store ([WithStore]) and the event store

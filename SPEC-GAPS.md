@@ -483,22 +483,6 @@ settled; where an entry is settled its behaviour is the specification. The code 
 - **Question:** should the specification name the level-2 attempts and wait, and say explicitly that a level-2 library
   logs and skips what fails them?
 
-### SG-34: a malformed record at level 2
-
-- **Specification:** [messages.md](https://snodra.damoreira.com/docs/library-authors/messages/) says an event has a
-  type name and its payload is a JSON object, and
-  [feature-levels.md, Level 3](https://snodra.damoreira.com/docs/library-authors/feature-levels/#level-3-processors)
-  lists `INVALID` as a dead-letter reason (no type, a payload that is not a JSON object); no page says what a
-  level-2 library does with such a record.
-- **This library:** logs a warning and acknowledges it without a marker: nothing can handle it, and it blocks
-  nothing. Level 3 parks it as an `INVALID` letter instead. The reference marks it `INVALID` and sends it to its
-  sink (the type check at
-  `snodra-messaging@64dde1e:snodra-messaging/src/main/kotlin/com/damoreira/snodra/messaging/events/EventConsumer.kt:359`
-  and the payload check at
-  `snodra-messaging@64dde1e:snodra-messaging/src/main/kotlin/com/damoreira/snodra/messaging/events/EventConsumer.kt:371`).
-- **Question:** settled for level 3 by the dead-letter modes; for a level-2 library the log-and-skip above is the
-  library's.
-
 ### SG-35: the re-subscribe backoff of a failed event subscription
 
 - **Specification:** [event-store-add-ons.md, The operations](https://snodra.damoreira.com/docs/library-authors/event-store-add-ons/#the-operations)
@@ -705,3 +689,21 @@ settled; where an entry is settled its behaviour is the specification. The code 
   the refusal while a subscription reads.
 - **Question:** should a reset roll back (best effort) when a later partition's store fails, or should the
   specification say a failed apply may leave some partitions moved and the planner re-runs it?
+
+### SG-49: a level-3 instance whose message store lacks the dead-letter or control port
+
+- **Specification:** [protocol.md, Processor control](https://snodra.damoreira.com/docs/library-authors/protocol/#processor-control)
+  says an instance reads its processors' control state at start and every 5 s, and
+  [feature-levels.md, Level 3](https://snodra.damoreira.com/docs/library-authors/feature-levels/#level-3-processors)
+  says a record that exhausts its attempts is parked (`collection`). The Go message-store interfaces are frozen at
+  level 2, so a store may still answer `ErrUnsupported` for `DeadLetters` and `Control`; no page says what an
+  instance does then.
+- **This library:** starts its processors unpaused and keeps consuming when `Control` is unsupported, and logs and
+  acknowledges a record it cannot park when `DeadLetters` is unsupported, as a level-2 instance did, instead of
+  stalling the subscription. A store that supports the ports behaves as the page says. The reference always has both
+  ports and parks
+  (`snodra-messaging@64dde1e:snodra-messaging/src/main/kotlin/com/damoreira/snodra/messaging/events/EventConsumer.kt:489`)
+  and reads its control documents at start
+  (`snodra-messaging@64dde1e:snodra-messaging/src/main/kotlin/com/damoreira/snodra/messaging/control/ProcessorControl.kt:124`).
+- **Question:** should a library refuse to start at level 3 when the store lacks these ports (naming the add-on), or
+  degrade to the level-2 behaviour as this one does?

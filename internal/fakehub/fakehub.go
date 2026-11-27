@@ -565,6 +565,12 @@ func (s *Stream) RecvCredentials(t testing.TB) *hubpb.Credentials {
 	return recvKind(t, s, "credentials", (*hubpb.ClientMessage).GetCredentials)
 }
 
+// RecvControlReply returns the next processor control reply.
+func (s *Stream) RecvControlReply(t testing.TB) *hubpb.ControlReply {
+	t.Helper()
+	return recvKind(t, s, "control_reply", (*hubpb.ClientMessage).GetControlReply)
+}
+
 // Heartbeats returns the arrival time of every Heartbeat received so far.
 func (s *Stream) Heartbeats() []time.Time {
 	s.sendMu.Lock()

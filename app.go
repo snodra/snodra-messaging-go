@@ -60,6 +60,11 @@ type App struct {
 	// and what a store implementing StoreLifecycle gets.
 	now       func() time.Time
 	outboxSeq atomic.Int64
+	// deadLetterKick asks the dead-letter sampler to look before its next tick.
+	deadLetterKick chan struct{}
+	// control answers the hub's processor controls, one at a time per processor, off the read
+	// loop.
+	control *controlPlane
 	// Background work: the relay, the consumers and the message store's own work. bgDone is
 	// closed once every one of them returned; nil before Start.
 	bgCtx       context.Context
@@ -133,7 +138,7 @@ func New(opts ...Option) (*App, error) {
 	if cc, ok := cfg.tokenSource.(*clientCredentials); ok {
 		cc.observe = tel.tokenFetched // the copy the options made for this App
 	}
-	return &App{
+	app := &App{
 		tel:            tel,
 		cfg:            cfg,
 		log:            log,
@@ -153,7 +158,10 @@ func New(opts ...Option) (*App, error) {
 		subs:           newServedSubscriptions(cfg.maxSubscriptions, log),
 		identity:       newIdentityResolver(cfg, log),
 		tokens:         tokens,
-	}, nil
+		deadLetterKick: make(chan struct{}, 1),
+	}
+	app.control = newControlPlane(app)
+	return app, nil
 }
 
 // Start opens a connection to every hub and returns at once; each connection registers and
@@ -289,6 +297,13 @@ func (a *App) startBackground() {
 		})
 	}
 	if a.cfg.eventStore != nil {
+		if settings.consumerEnabled {
+			// The control poller reads first: a persisted pause must reach the consumer before it
+			// subscribes, and the consumers wait for the first read.
+			a.control.start(a.bgCtx)
+			a.background("the processor control poller", a.pollProcessorControl)
+			a.background("the dead-letter sampler", a.deadLetterSampler)
+		}
 		if settings.outboxEnabled {
 			relay := newOutboxRelay(a)
 			a.background("the outbox relay", func(ctx context.Context) error {

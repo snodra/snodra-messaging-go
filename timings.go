@@ -45,6 +45,12 @@ type timings struct {
 	creditWait time.Duration
 	// statusInterval is how often every live hub gets an InstanceStatus ([StatusInterval]).
 	statusInterval time.Duration
+	// controlPoll is how often every processor reads its control state from the message store.
+	controlPoll time.Duration
+	// deadLetterSample is how often the processors' dead-letter counts are sampled.
+	deadLetterSample time.Duration
+	// failingWindow is how long an exhausted record keeps a processor FAILING.
+	failingWindow time.Duration
 	// dnsRefresh is how often a dns:/// target is resolved again.
 	dnsRefresh time.Duration
 }
@@ -150,6 +156,9 @@ func defaultTimings() timings {
 		tokenFetchWait:     tokenFetchTimeout + time.Second,
 		creditWait:         10 * time.Minute,
 		statusInterval:     5 * time.Second,
+		controlPoll:        5 * time.Second,
+		deadLetterSample:   30 * time.Second,
+		failingWindow:      60 * time.Second,
 		dnsRefresh:         30 * time.Second,
 	}
 }

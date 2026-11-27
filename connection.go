@@ -601,6 +601,9 @@ func (c *hubConn) serve(sr *streamRun) (reached bool, err error) {
 					break
 				}
 				c.app.dispatch(k.Request, ref, permits)
+			case *hubpb.ServerMessage_Control:
+				// Off this read loop, one at a time per processor; the reply goes back on ref.
+				c.app.control.enqueue(k.Control, ref)
 			default:
 				c.app.route(m)
 			}

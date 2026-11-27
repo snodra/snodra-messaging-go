@@ -248,7 +248,11 @@ func (m memoryDeadLetters) DeleteIn(ctx context.Context, id string) (bool, error
 		if tx != nil {
 			overlay = &tx.deadLetters
 		}
-		if _, exists := data.deadLetters.get(overlay, id); !exists {
+		letter, exists := data.deadLetters.get(overlay, id)
+		if exists && !letter.ExpireAt.IsZero() && letter.ExpireAt.Before(m.store.nowLocked()) {
+			exists = false // its retention passed: a retry finds it gone
+		}
+		if !exists {
 			return nil
 		}
 		data.deadLetters.set(overlay, data, id, nil)

@@ -403,7 +403,8 @@ func (p *pool) reportStatusEvery(interval time.Duration) {
 }
 
 // reportStatus sends one InstanceStatus to every live hub: the ids of the live hubs, the
-// handlers in flight over all hubs, and no processor. A hub being rolled over to a renewed
+// handlers in flight over all hubs, and one processor status per started processor (built from
+// memory, never waiting for a store). A hub being rolled over to a renewed
 // client certificate is out of both while another live hub is not (a hub is taken out of the routing for a
 // rollover only then).
 // See https://snodra.damoreira.com/docs/library-authors/protocol/ (Instance status).
@@ -427,6 +428,7 @@ func (p *pool) reportStatus() {
 	status := &hubpb.InstanceStatus{
 		ConnectedHubIds:  ids,
 		HandlersInFlight: uint32(min(p.app.inflight.count(), math.MaxUint32)),
+		Processors:       p.app.processorStatuses(),
 	}
 	for _, h := range hubs {
 		if ref, _ := h.conn.live(); ref != nil {

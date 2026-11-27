@@ -282,8 +282,9 @@ func TestConsumerAcknowledgesAnUnknownTypeWithoutAMarker(t *testing.T) {
 	}
 }
 
-// A record that fails every attempt is logged and skipped, and the next event goes on.
-func TestConsumerLogsAndSkipsARecordThatFailsEveryAttempt(t *testing.T) {
+// L3-DEAD-LETTERS: a record that fails every attempt is parked as a HANDLER_FAILED letter, and
+// the next event goes on.
+func TestConsumerParksARecordThatFailsEveryAttemptAndMovesOn(t *testing.T) {
 	store := NewMemoryMessageStore()
 	events := NewMemoryEventStore()
 	observer := &ackObserver{EventStore: events}
@@ -312,10 +313,17 @@ func TestConsumerLogsAndSkipsARecordThatFailsEveryAttempt(t *testing.T) {
 	waitUntil(t, "both acknowledgements", func() bool { return observer.count() >= 2 })
 	is(t, badCalls.Load(), int64(2))
 	if exists, err := store.Processed().Exists(context.Background(), ProcessorMarker(DefaultProcessor, "bad-1")); err != nil || exists {
-		t.Fatalf("the skipped event has a marker: %v, %v", exists, err)
+		t.Fatalf("the parked event has a marker: %v, %v", exists, err)
 	}
-	if recorder.count(slog.LevelError, "an event handler failed on every attempt; skipping the event") == 0 {
-		t.Fatal("the skip was not logged at error")
+	letters, err := store.DeadLetters().List(context.Background(), DefaultProcessor, 0)
+	if err != nil || len(letters) != 1 {
+		t.Fatalf("letters: %v, %v", letters, err)
+	}
+	is(t, letters[0].Reason, DeadLetterHandlerFailed)
+	is(t, letters[0].Attempts, 2)
+	is(t, letters[0].Error.Message, "this event never works")
+	if recorder.count(slog.LevelError, "an event handler failed on every attempt; parking it as a dead letter") == 0 {
+		t.Fatal("the park was not logged at error")
 	}
 }
 
@@ -650,9 +658,9 @@ func TestAConsumerFallsBackToTheRecordPlaceForAnEventWithoutID(t *testing.T) {
 	})
 }
 
-// A record without a type header and one whose payload is not a JSON object run no handler, are
-// acknowledged and leave no marker; each is logged at warning.
-func TestConsumerSkipsMalformedRecords(t *testing.T) {
+// L3-DEAD-LETTERS: a record without a type header and one whose payload is not a JSON object run
+// no handler, are acknowledged, leave no marker and are parked INVALID.
+func TestConsumerParksMalformedRecords(t *testing.T) {
 	store := NewMemoryMessageStore()
 	events := NewMemoryEventStore()
 	observer := &ackObserver{EventStore: events}
@@ -683,17 +691,26 @@ func TestConsumerSkipsMalformedRecords(t *testing.T) {
 			t.Fatalf("the malformed record %s has a marker: %v, %v", id, exists, err)
 		}
 	}
-	if n := recorder.count(slog.LevelWarn, "an event record has no type header; skipping it"); n != 1 {
+	letters, err := store.DeadLetters().List(context.Background(), DefaultProcessor, 0)
+	if err != nil || len(letters) != 2 {
+		t.Fatalf("letters: %v, %v", letters, err)
+	}
+	for _, letter := range letters {
+		is(t, letter.Reason, DeadLetterInvalid)
+		is(t, letter.Error.Type, "InvalidMessage")
+	}
+	if n := recorder.count(slog.LevelWarn, "an event record has no type header; parking it as a dead letter"); n != 1 {
 		t.Fatalf("the missing type was logged %d times", n)
 	}
-	if n := recorder.count(slog.LevelWarn, "an event record's payload is not a JSON object; skipping it"); n != 1 {
+	if n := recorder.count(slog.LevelWarn, "an event record's payload is not a JSON object; parking it as a dead letter"); n != 1 {
 		t.Fatalf("the non-object payload was logged %d times", n)
 	}
 }
 
-// A payload that is a JSON object but does not decode into the handler's message type is not
-// retried: no retry can change it. It is logged and skipped, like the reference.
-func TestConsumerSkipsAPayloadItsHandlerCannotReadWithoutRetrying(t *testing.T) {
+// L3-DEAD-LETTERS: a payload that is a JSON object but does not decode into the handler's
+// message type is not retried: no retry can change it. It is parked HANDLER_FAILED, as the
+// reference parks its InvalidMessageException.
+func TestConsumerParksAPayloadItsHandlerCannotReadWithoutRetrying(t *testing.T) {
 	store := newMarkerStore(NewMemoryMessageStore())
 	events := NewMemoryEventStore()
 	observer := &ackObserver{EventStore: events}
@@ -724,9 +741,16 @@ func TestConsumerSkipsAPayloadItsHandlerCannotReadWithoutRetrying(t *testing.T) 
 	if exists, err := store.Processed().Exists(context.Background(), "processor:default:undecodable"); err != nil || exists {
 		t.Fatalf("marker: %v, %v", exists, err)
 	}
-	if n := recorder.count(slog.LevelError, "an event's payload cannot be read by its handler; skipping the event"); n != 1 {
+	if n := recorder.count(slog.LevelError, "an event's payload cannot be read by its handler; parking it as a dead letter"); n != 1 {
 		t.Fatalf("the unreadable payload was logged %d times", n)
 	}
+	letters, err := store.DeadLetters().List(context.Background(), DefaultProcessor, 0)
+	if err != nil || len(letters) != 1 {
+		t.Fatalf("letters: %v, %v", letters, err)
+	}
+	is(t, letters[0].Reason, DeadLetterHandlerFailed)
+	is(t, letters[0].Attempts, 1)
+	is(t, letters[0].Error.Type, "InvalidMessage")
 }
 
 // ConsumerEnabled(false) starts no subscription: the event is relayed but no handler runs and no

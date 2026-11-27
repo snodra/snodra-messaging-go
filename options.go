@@ -420,6 +420,16 @@ func (c *config) validateEvents() error {
 		return fmt.Errorf("snodra: the re-subscribe backoff must be at least 1ms and not above its maximum (got %v and %v)",
 			c.events.resubscribeMin, c.events.resubscribeMax)
 	}
+	switch c.events.deadLetterMode {
+	case DeadLetterModeCollection, DeadLetterModeEventStore, DeadLetterModeLog:
+	default:
+		return fmt.Errorf("snodra: an unknown dead-letter mode %q (collection, event-store or log)",
+			c.events.deadLetterMode)
+	}
+	if c.events.deadLetterMode == DeadLetterModeCollection && c.events.deadLetterRetention < time.Second {
+		return fmt.Errorf("snodra: the dead-letter retention must be at least 1s, got %v",
+			c.events.deadLetterRetention)
+	}
 	if c.events.sleep == nil {
 		c.events.sleep = sleepCtx
 	}

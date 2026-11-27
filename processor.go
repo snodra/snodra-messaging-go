@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"sync/atomic"
 )
 
 // DefaultProcessor is the processor of the event handlers registered without [InProcessor]. Its
@@ -51,8 +52,8 @@ func (h *eventHandler) call(ctx context.Context, codec PayloadCodec, payload []b
 }
 
 // processor is one named event processor: its subscription, its handlers by event type and the
-// types it handles, sorted. The consumer reads the subscription and runs the handlers; level 3
-// adds its status, pause, reset and dead letters on top.
+// types it handles, sorted. The consumer reads the subscription and runs the handlers; the
+// runtime state beside it is what its status reports and what pause acts on.
 type processor struct {
 	name         string
 	subscription SubscriptionSpec
@@ -60,6 +61,16 @@ type processor struct {
 	handlers map[string][]*eventHandler
 	// eventTypes are the types with a handler here, sorted.
 	eventTypes []string
+	// run is the processor's in-memory state: pause, assignment, last error, replay ranges.
+	run *processorRuntime
+	// processedTotal counts the records whose stage 1 completed, handled or duplicate.
+	processedTotal atomic.Uint64
+	// failedTotal counts the records that exhausted their attempts.
+	failedTotal atomic.Uint64
+	// deadLetterCount is the processor's letters, sampled every deadLetterSample.
+	deadLetterCount atomic.Uint64
+	// parkedSinceSample is set when a letter was parked: the sampler looks before its next tick.
+	parkedSinceSample atomic.Bool
 }
 
 // newProcessor builds a processor of name reading source for service, with handlers by type. It
@@ -70,6 +81,7 @@ func newProcessor(service, name, source string, handlers map[string][]*eventHand
 		subscription: SubscriptionSpec{Name: ProcessorSubscription(service, name), Source: source},
 		handlers:     handlers,
 		eventTypes:   make([]string, 0, len(handlers)),
+		run:          newProcessorRuntime(),
 	}
 	for typ, list := range handlers {
 		if len(list) > 0 {
