@@ -161,29 +161,29 @@ type Delivery struct {
 // processor's control state, what it delivered, the dead letters its store lists, the dead-letter
 // events its probe subscription received, and the processed markers the driver asked about.
 type StateReply struct {
-	Instance      string          `json:"instance"`
-	Language      string          `json:"language"`
-	Family        string          `json:"family"`
-	Run           string          `json:"run"`
-	Store         string          `json:"store"`
-	EventStore    string          `json:"eventStore"`
-	Source        string          `json:"source"`
-	Database      string          `json:"database,omitempty"`
-	Subscription  string          `json:"subscription"`
-	OutboxPending int64           `json:"outboxPending"`
-	Handled       int             `json:"handled"`
-	Duplicates    int             `json:"duplicates"`
-	OptedOut      uint64          `json:"optedOut"`
-	Paused        bool            `json:"paused"`
-	PausedBy      string          `json:"pausedBy,omitempty"`
-	OperationID   string          `json:"operationId,omitempty"`
-	Replay        []ReplayRange   `json:"replay,omitempty"`
-	DeadLetters   []LetterBrief   `json:"deadLetters,omitempty"`
-	DeadLetterN   int64           `json:"deadLetterTotal"`
-	Dlt           []DltEvent      `json:"dlt,omitempty"`
-	DltTotal      uint64          `json:"dltTotal"`
-	Deliveries    []Delivery      `json:"deliveries"`
-	Markers       map[string]bool `json:"markers"`
+	Instance        string          `json:"instance"`
+	Language        string          `json:"language"`
+	Family          string          `json:"family"`
+	Run             string          `json:"run"`
+	Store           string          `json:"store"`
+	EventStore      string          `json:"eventStore"`
+	Source          string          `json:"source"`
+	Database        string          `json:"database,omitempty"`
+	Subscription    string          `json:"subscription"`
+	OutboxPending   int64           `json:"outboxPending"`
+	Handled         int             `json:"handled"`
+	Duplicates      int             `json:"duplicates"`
+	OptedOut        uint64          `json:"optedOut"`
+	Paused          bool            `json:"paused"`
+	PausedBy        string          `json:"pausedBy,omitempty"`
+	OperationID     string          `json:"operationId,omitempty"`
+	Replay          []ReplayRange   `json:"replay,omitempty"`
+	DeadLetters     []LetterBrief   `json:"deadLetters,omitempty"`
+	DeadLetterTotal int64           `json:"deadLetterTotal"`
+	Dlt             []DltEvent      `json:"dlt,omitempty"`
+	DltTotal        uint64          `json:"dltTotal"`
+	Deliveries      []Delivery      `json:"deliveries"`
+	Markers         map[string]bool `json:"markers"`
 }
 
 // OrderPlaced is the event the probe publishes. It carries everything a driver assertion reads,

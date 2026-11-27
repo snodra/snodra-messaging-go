@@ -320,6 +320,12 @@ func (p *probe) state(ctx context.Context, query State) (StateReply, error) {
 	if err != nil && !errors.Is(err, snodra.ErrUnsupported) {
 		return StateReply{}, fmt.Errorf("read the dead letters: %w", err)
 	}
+	total, err := p.store.DeadLetters().Count(ctx, processorName(p.family))
+	if errors.Is(err, snodra.ErrUnsupported) {
+		total = 0
+	} else if err != nil {
+		return StateReply{}, fmt.Errorf("count the dead letters: %w", err)
+	}
 	p.dltMu.Lock()
 	dlt := append([]DltEvent(nil), p.dlt...)
 	p.dltMu.Unlock()
@@ -341,29 +347,29 @@ func (p *probe) state(ctx context.Context, query State) (StateReply, error) {
 		operation = control.Operation.ID
 	}
 	return StateReply{
-		Instance:      instanceName(p.language, p.family),
-		Language:      p.language,
-		Family:        p.family,
-		Run:           p.run,
-		Store:         p.store.Name(),
-		EventStore:    p.eventStore.Name(),
-		Source:        p.source,
-		Database:      p.database,
-		Subscription:  subscriptionName(p.family),
-		OutboxPending: pending,
-		Handled:       handled,
-		Duplicates:    duplicates,
-		OptedOut:      p.optedOut.Load(),
-		Paused:        control.Paused,
-		PausedBy:      control.PausedBy,
-		OperationID:   operation,
-		Replay:        replay,
-		DeadLetters:   briefs,
-		DeadLetterN:   int64(len(letters)),
-		Dlt:           dlt,
-		DltTotal:      uint64(len(dlt)),
-		Deliveries:    deliveries,
-		Markers:       markers,
+		Instance:        instanceName(p.language, p.family),
+		Language:        p.language,
+		Family:          p.family,
+		Run:             p.run,
+		Store:           p.store.Name(),
+		EventStore:      p.eventStore.Name(),
+		Source:          p.source,
+		Database:        p.database,
+		Subscription:    subscriptionName(p.family),
+		OutboxPending:   pending,
+		Handled:         handled,
+		Duplicates:      duplicates,
+		OptedOut:        p.optedOut.Load(),
+		Paused:          control.Paused,
+		PausedBy:        control.PausedBy,
+		OperationID:     operation,
+		Replay:          replay,
+		DeadLetters:     briefs,
+		DeadLetterTotal: total,
+		Dlt:             dlt,
+		DltTotal:        uint64(len(dlt)),
+		Deliveries:      deliveries,
+		Markers:         markers,
 	}, nil
 }
 
