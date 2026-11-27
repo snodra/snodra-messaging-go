@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	stdSQL "database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -687,6 +688,30 @@ func TestRemoveRangeRemovesEveryEqualRange(t *testing.T) {
 		removed, err = store.Control().RemoveRange(ctx, "default", first, now)
 		if err != nil || removed {
 			t.Fatalf("remove range again: %t, %v", removed, err)
+		}
+	})
+}
+
+// An error of a statement inside the caller's transaction is the call's error, not a silent
+// success: a duplicate outbox id in a transaction says ErrConflict.
+func TestAStatementErrorInsideTheCallersTransactionIsReported(t *testing.T) {
+	bothServers(t, func(t *testing.T, server *testServer) {
+		store := server.newStore(t, true)
+		entry := snodra.OutboxEntry{ID: "duplicate", Type: "conformance.Happened",
+			Headers: map[string]string{"correlationId": "c-1"}, Payload: []byte(`{"n":1}`),
+			CreatedAt: time.Now().Truncate(time.Millisecond), Seq: 1}
+		txctx, tx, err := store.Begin(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Outbox().Append(txctx, entry); err != nil {
+			t.Fatalf("the first append: %v", err)
+		}
+		if err := store.Outbox().Append(txctx, entry); !errors.Is(err, snodra.ErrConflict) {
+			t.Fatalf("a duplicate id in the transaction: %v, want ErrConflict", err)
+		}
+		if err := tx.Rollback(txctx); err != nil {
+			t.Fatal(err)
 		}
 	})
 }

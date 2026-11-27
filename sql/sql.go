@@ -27,10 +27,9 @@
 //
 // # The stores
 //
-// The outbox, the processed-event markers (with a reset's marker deletion), the dead letters and the
-// processor control are implemented. The external-call and saga ports are part of the interface
-// frozen at level 2 and return snodra.ErrUnsupported for now; the official add-ons implement every
-// port by level 4.
+// Every port is implemented: the outbox, the processed-event markers (with a reset's marker
+// deletion), the dead letters, the processor control, the external calls, the sagas and their
+// dispatch, deadlines and failures.
 //
 // Times the store stamps itself (an entry's sending, a claim's lease) come from the application's
 // clock ([Store.UseClock]), never the database's. On PostgreSQL an append's transaction sends
@@ -432,19 +431,18 @@ func (s *Store) DeadLetters() snodra.DeadLetterStore { return sqlDeadLetters{sto
 // Control returns the processor-control port, implemented on the shared control table.
 func (s *Store) Control() snodra.ProcessorControlStore { return sqlControl{store: s} }
 
-// ExternalCalls returns the external-call port, which this store does not implement yet (level 4):
-// every operation fails with snodra.ErrUnsupported.
-func (s *Store) ExternalCalls() snodra.ExternalCallStore { return unsupportedExternalCalls{} }
+// ExternalCalls returns the external-call port, implemented on the shared external-call table.
+func (s *Store) ExternalCalls() snodra.ExternalCallStore { return sqlExternalCalls{store: s} }
 
-// Sagas returns the saga ports, which this store does not implement yet (level 4): every
-// operation fails with snodra.ErrUnsupported.
+// Sagas returns the saga ports, implemented on the shared saga, dispatch, deadline and failure
+// tables and the processed-event markers.
 func (s *Store) Sagas() snodra.SagaStores {
 	return snodra.SagaStores{
-		Sagas:     unsupportedSagas{},
-		Dispatch:  unsupportedSagaDispatch{},
-		Deadlines: unsupportedSagaDeadlines{},
-		Failures:  unsupportedSagaFailures{},
-		Markers:   unsupportedSagaMarkers{},
+		Sagas:     sqlSagaRepository{store: s},
+		Dispatch:  sqlSagaDispatch{store: s},
+		Deadlines: sqlSagaDeadlines{store: s},
+		Failures:  sqlSagaFailures{store: s},
+		Markers:   sqlSagaMarkers{store: s},
 	}
 }
 
@@ -574,8 +572,9 @@ func (s *Store) scope(ctx context.Context) (executor, func(error) error, error) 
 	}, nil
 }
 
-// noFinish is the finish of a joined transaction: the caller ends it.
-func noFinish(error) error { return nil }
+// noFinish is the finish of a joined transaction: the caller ends it, and the statement's error
+// stays the call's error.
+func noFinish(err error) error { return err }
 
 // finishOwn commits the store's own transaction on success, else rolls it back; a failed commit
 // is the failure.

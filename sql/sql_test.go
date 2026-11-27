@@ -114,23 +114,6 @@ func TestFromEnvReadsTheSQLSettings(t *testing.T) {
 	_ = store.Close()
 }
 
-func TestTheUnsupportedPortsSaySo(t *testing.T) {
-	store := &Store{driver: Postgres}
-	var errs []error
-	_, err := store.ExternalCalls().Reset(context.Background(), "key", "owner")
-	errs = append(errs, err)
-	errs = append(errs, store.Sagas().Sagas.Insert(context.Background(), snodra.Saga{}))
-	errs = append(errs, store.Sagas().Dispatch.ClearNotice(context.Background(), "id"))
-	errs = append(errs, store.Sagas().Deadlines.CancelAll(context.Background(), "saga", time.Now()))
-	errs = append(errs, store.Sagas().Failures.Save(context.Background(), snodra.SagaFailure{}))
-	errs = append(errs, store.Sagas().Markers.Insert(context.Background(), "id", "type", time.Now()))
-	for _, err := range errs {
-		if !errors.Is(err, snodra.ErrUnsupported) {
-			t.Fatalf("%v, want ErrUnsupported", err)
-		}
-	}
-}
-
 func TestMySQLOnAppendRegistersNothing(t *testing.T) {
 	store, err := New(Config{URL: "mysql://root@127.0.0.1:3306/db"})
 	if err != nil {
