@@ -93,13 +93,16 @@ func (a *App) reconcileResetHold(ctx context.Context, p *processor, state Proces
 		if state.Operation == nil || state.Operation.ID != held.id || !state.Operation.HoldsAt(now) {
 			p.run.markExecutingLost(held.id)
 		}
-		p.run.setLockState(held.id, true)
+		p.run.setLockStateIf(held.id, held.id, true)
 		_ = a.stopForReset(ctx, p)
 		return
 	}
 	if state.Operation == nil || state.Operation.ID != held.id {
-		p.run.clearHeld()
+		cleared := p.run.clearHeldIf(held.id)
 		p.run.rememberEnded(held.id, held.lease, now)
+		if !cleared {
+			return // a prepare replaced the operation after this read
+		}
 		a.log.Info("the processor's reset operation ended elsewhere; consuming again",
 			"processor", p.name, "operation", held.id)
 		return
@@ -114,20 +117,22 @@ func (a *App) reconcileResetHold(ctx context.Context, p *processor, state Proces
 		}
 		// Keep the consumer out until a poll proves the lock gone: a store error must not let it
 		// read under a lock that may still be held.
-		p.run.setLockState(held.id, true)
+		p.run.setLockStateIf(held.id, held.id, true)
 		_ = a.stopForReset(ctx, p)
 		return
 	}
 	if !changed {
 		// The lease was renewed between the read and the expire: stay stopped; the next poll sees
 		// the renewed operation.
-		p.run.setLockState(held.id, true)
+		p.run.setLockStateIf(held.id, held.id, true)
 		_ = a.stopForReset(ctx, p)
 		return
 	}
-	p.run.clearHeld()
+	if !p.run.clearHeldAndLock(held.id, "", false) {
+		p.run.rememberEnded(held.id, held.lease, now)
+		return // a prepare replaced the operation after this read
+	}
 	p.run.rememberEnded(held.id, held.lease, now)
-	p.run.setLockState("", false)
 	a.log.Warn("the lease of a reset operation passed without a renewal; released it, consuming again",
 		"processor", p.name, "operation", held.id)
 }

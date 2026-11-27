@@ -204,8 +204,8 @@ func (c *controlPlane) resetExecute(ctx context.Context, req *hubpb.ControlReque
 
 	changed := &resetChange{}
 	reply := c.runReset(ctx, req, p, op, held.lease, target, deadline, changed)
-	// A whole lease for the finish, unless the lease was lost already.
-	if a.now().Before(deadline) {
+	// A whole lease for the finish, unless the execute lost it.
+	if !p.run.executingIsLost(op) && a.now().Before(deadline) {
 		now := a.now()
 		_, _ = a.cfg.store.Control().Extend(ctx, p.name, op, now.Add(held.lease), now)
 	}
@@ -338,6 +338,10 @@ func (c *controlPlane) runReset(ctx context.Context, req *hubpb.ControlRequest, 
 			fmt.Sprintf("subscription %s still has %d subscriber(s): %s",
 				p.subscription.Name, len(members), strings.Join(members, ", ")), changed)
 	}
+	// The extension can fail while Members is being read: the last lost check must follow it.
+	if lost := c.resetLeaseLost(ctx, p, op, lease, deadline); lost != "" {
+		return c.resetChangedRefusal(req, hubpb.ControlRefusal_CONTROL_REFUSAL_FAILED, lost, changed)
+	}
 	if err := admin.Apply(ctx, plan); err != nil {
 		return c.resetStoreRefusal(req, err, changed)
 	}
@@ -449,13 +453,10 @@ func (c *controlPlane) resetFinish(ctx context.Context, req *hubpb.ControlReques
 						state.Operation.ID, p.name, op))
 			}
 		}
-		resumed := c.settleAfterFinish(ctx, p, now)
+		resumed, holder := c.settleAfterFinish(ctx, p, now)
 		a.log.Info("a processor's reset was finished", "processor", p.name, "operation", op,
 			"aborted", finish.GetAborted())
-		if resumed {
-			return controlOK(req, "released, consuming again")
-		}
-		return controlOK(req, "released; consuming once the lock is read back")
+		return controlOK(req, finishDetail(resumed, holder))
 	}
 	state, err := control.Get(ctx, p.name)
 	if err != nil {
@@ -467,8 +468,8 @@ func (c *controlPlane) resetFinish(ctx context.Context, req *hubpb.ControlReques
 			_, _ = control.Release(ctx, p.name, op, now)
 		}
 		p.run.rememberEnded(op, 0, now)
-		c.settleAfterFinish(ctx, p, now)
-		return controlOK(req, "no operation holds the lock")
+		resumed, holder := c.settleAfterFinish(ctx, p, now)
+		return controlOK(req, finishNoLockDetail(resumed, holder))
 	case state.Operation.ID == op:
 		released, err := control.Release(ctx, p.name, op, now)
 		if err != nil {
@@ -486,11 +487,8 @@ func (c *controlPlane) resetFinish(ctx context.Context, req *hubpb.ControlReques
 						current.Operation.ID, p.name, op))
 			}
 		}
-		resumed := c.settleAfterFinish(ctx, p, now)
-		if resumed {
-			return controlOK(req, "released, consuming again")
-		}
-		return controlOK(req, "released; consuming once the lock is read back")
+		resumed, holder := c.settleAfterFinish(ctx, p, now)
+		return controlOK(req, finishDetail(resumed, holder))
 	default:
 		return controlRefused(req, hubpb.ControlRefusal_CONTROL_REFUSAL_NOT_PREPARED,
 			fmt.Sprintf("operation %s holds the lock of processor %s, not %s",
@@ -498,24 +496,57 @@ func (c *controlPlane) resetFinish(ctx context.Context, req *hubpb.ControlReques
 	}
 }
 
+// finishDetail is the finish reply for a released operation: whether the consumer resumed, which
+// other reset holds the lock, or that the lock could not be read back yet.
+func finishDetail(resumed bool, holder string) string {
+	switch {
+	case resumed:
+		return "released, consuming again"
+	case holder != "":
+		return "released; another reset holds the lock (operation " + holder + ")"
+	default:
+		return "released; consuming once the lock is read back"
+	}
+}
+
+// finishNoLockDetail is the finish reply when nothing held the operation's lock.
+func finishNoLockDetail(resumed bool, holder string) string {
+	switch {
+	case resumed:
+		return "no operation holds the lock"
+	case holder != "":
+		return "released; another reset holds the lock (operation " + holder + ")"
+	default:
+		return "released; consuming once the lock is read back"
+	}
+}
+
 // settleAfterFinish applies the control state after a finish — the persisted pause and replay
-// ranges, and the lock — exactly as the poll would, then starts the consumer only when the lock is
-// proven gone. It reports whether the consumer may start now.
-func (c *controlPlane) settleAfterFinish(ctx context.Context, p *processor, now time.Time) bool {
+// ranges, and the lock — exactly as a poll would, then starts the consumer only when the lock is
+// proven gone. It reports whether the consumer may start now, and the operation holding the lock
+// when another does. A poll that wrote since this read wins; the consumer stays out.
+func (c *controlPlane) settleAfterFinish(ctx context.Context, p *processor, now time.Time) (resumed bool, holder string) {
+	readAt := p.run.changeCount()
 	state, err := c.app.cfg.store.Control().Get(ctx, p.name)
 	if err != nil {
 		// The store cannot prove the lock gone: keep the consumer out until a poll can.
 		p.run.setLockState("", true)
 		_ = c.app.stopForReset(ctx, p)
-		return false
+		return false, ""
 	}
-	p.run.applyControl(ctx, state, p.run.changeCount(), now)
-	if p.run.holdsLock() {
+	applied, _ := p.run.applyControl(ctx, state, readAt, now)
+	if !applied {
+		// A poll or a reset wrote after this read: let that state stand; keep the consumer out.
 		_ = c.app.stopForReset(ctx, p)
-		return false
+		return false, ""
+	}
+	if p.run.holdsLock() {
+		holder = p.run.operation()
+		_ = c.app.stopForReset(ctx, p)
+		return false, holder
 	}
 	p.run.signalWake()
-	return true
+	return true, ""
 }
 
 // stopForReset waits for the consumer to leave its subscription, at most the reset stop limit.

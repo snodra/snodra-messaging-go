@@ -395,7 +395,9 @@ func (r *processorRuntime) pauseSubscription(paused bool) {
 // execute must finish (and refuse) before the consumer can join.
 func (r *processorRuntime) applyControl(ctx context.Context, state ProcessorControlState, readAt uint64, now time.Time) (applied bool, after uint64) {
 	r.mu.Lock()
-	if r.controlKnown && r.changes != readAt {
+	if r.changes != readAt {
+		// A reset write came after this read — including before the first read proved the store
+		// reachable. Mark control known so the consumer may start; the next poll reads the truth.
 		r.markControlKnownLocked()
 		after = r.changes
 		r.mu.Unlock()
@@ -488,11 +490,54 @@ func (r *processorRuntime) setLockState(operationID string, holds bool) {
 	r.mu.Unlock()
 }
 
+// setLockStateIf records the lock state only while id is still the operation held here; false
+// when another prepare replaced it, so the caller leaves that one alone.
+func (r *processorRuntime) setLockStateIf(id, operationID string, holds bool) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.held == nil || r.held.id != id {
+		return false
+	}
+	r.operationID = operationID
+	r.lockHolds = holds
+	r.changes++
+	return true
+}
+
+// clearHeldIf clears the operation held here only when it is id, atomically with the check; false
+// when another prepare replaced it.
+func (r *processorRuntime) clearHeldIf(id string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.held == nil || r.held.id != id {
+		return false
+	}
+	r.held = nil
+	r.changes++
+	return true
+}
+
+// clearHeldAndLock clears the operation held here when it is id and sets the lock state, in one
+// critical section; false when another prepare replaced it.
+func (r *processorRuntime) clearHeldAndLock(id, operationID string, holds bool) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.held == nil || r.held.id != id {
+		return false
+	}
+	r.held = nil
+	r.operationID = operationID
+	r.lockHolds = holds
+	r.changes++
+	return true
+}
+
 // setExecuting records the operation whose execute runs here.
 func (r *processorRuntime) setExecuting(id string) {
 	r.mu.Lock()
 	r.executing = id
 	r.executingLost = false
+	r.changes++
 	if id != "" {
 		// From here until the execute returns the consumer stays out, even if a poll clears the
 		// prepared operation concurrently.
