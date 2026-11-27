@@ -16,7 +16,7 @@ import (
 	"github.com/snodra/snodra-messaging-go/snodratest"
 )
 
-// The nine level-2 message-store checks, on a replica set.
+// The 17 message-store checks (nine level-2 and eight level-3), on a replica set.
 func TestTheMongoMessageStorePassesTheKit(t *testing.T) {
 	server := mongoContainer(t)
 	snodratest.MessageStore(t, server.kitStores(t, len(snodratest.StoreCheckIDs())))
@@ -546,7 +546,7 @@ func TestBackgroundHasNothingToRun(t *testing.T) {
 	}
 }
 
-// The ports this level does not implement say so.
+// The level-4 ports this add-on does not implement say so.
 func TestTheUnsupportedPortsSaySo(t *testing.T) {
 	store := &Store{}
 	ctx := context.Background()
@@ -686,6 +686,9 @@ func TestControlAndDeadLetterDocumentsWriteTheLayoutsShape(t *testing.T) {
 			t.Fatalf("%s has BSON type %v, want %v", name, value.Type, want)
 		}
 	}
+	if _, err := raw.LookupErr("_class"); err == nil {
+		t.Fatal("a processor_control document carries _class")
+	}
 	typeOf(raw, "paused", bson.TypeBoolean)
 	typeOf(raw, "pausedAt", bson.TypeDateTime)
 	typeOf(raw, "pausedBy", bson.TypeString)
@@ -742,6 +745,12 @@ func TestControlAndDeadLetterDocumentsWriteTheLayoutsShape(t *testing.T) {
 	typeOf(raw, "eventType", bson.TypeString)
 	typeOf(raw, "headers", bson.TypeEmbeddedDocument)
 	typeOf(raw, "payload", bson.TypeString)
+	if value, err := raw.LookupErr("payloadBinary"); err == nil {
+		t.Fatalf("a text payload also writes payloadBinary: %v", value)
+	}
+	if _, err := raw.LookupErr("_class"); err == nil {
+		t.Fatal("a dead-letter document carries _class")
+	}
 	typeOf(raw, "reason", bson.TypeString)
 	typeOf(raw, "error", bson.TypeEmbeddedDocument)
 	typeOf(raw, "attempts", bson.TypeInt32)
@@ -768,6 +777,9 @@ func TestControlAndDeadLetterDocumentsWriteTheLayoutsShape(t *testing.T) {
 	payloadBinary, err := raw.LookupErr("payloadBinary")
 	if err != nil || payloadBinary.Type != bson.TypeBinary {
 		t.Fatalf("payloadBinary: %v, %v", payloadBinary, err)
+	}
+	if _, err := raw.LookupErr("_class"); err == nil {
+		t.Fatal("a binary dead-letter document carries _class")
 	}
 	for _, name := range []string{"key", "eventId", "eventType", "blockedBy", "payload", "replay"} {
 		if value, err := raw.LookupErr(name); err == nil {

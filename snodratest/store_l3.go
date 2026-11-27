@@ -404,8 +404,11 @@ func controlLockIsExclusiveUntilLeaseExpires(tb storeTB, store snodra.MessageSto
 	if extended, err := control.Extend(context.Background(), processor, "op-2", t0.Add(9*time.Second), t0.Add(3*time.Second)); err != nil || extended {
 		tb.Fatalf("extend another operation: %t, %v", extended, err)
 	}
-	if outcome := lock("op-2", t0.Add(10*time.Second), t0.Add(8999*time.Millisecond)); outcome.Taken {
-		tb.Fatal("the lease had not passed")
+	renewedHolder := snodra.ControlOperation{ID: "op-1", Kind: snodra.ResetKind,
+		LeaseUntil: t0.Add(9 * time.Second), PreparedAt: t0}
+	if outcome := lock("op-2", t0.Add(10*time.Second), t0.Add(8999*time.Millisecond)); outcome.Taken ||
+		outcome.Holder.ID != renewedHolder.ID || !outcome.Holder.LeaseUntil.Equal(renewedHolder.LeaseUntil) {
+		tb.Fatalf("another operation before the renewed lease passed: %+v, want %+v", outcome, renewedHolder)
 	}
 	if expired, err := control.Expire(context.Background(), processor, "op-1", t0.Add(8999*time.Millisecond)); err != nil || expired {
 		tb.Fatalf("expire before the lease passed: %t, %v", expired, err)
@@ -461,9 +464,9 @@ func pauseStateRoundTrips(tb storeTB, store snodra.MessageStore) {
 	setPaused(processor, true, "control-1", t0)
 	setPaused(processor, true, "control-1", t0)
 	paused := get(processor)
-	if !paused.Paused || !paused.PausedAt.Equal(t0) || paused.PausedBy != "control-1" ||
-		paused.Operation != nil || len(paused.Replay) != 0 || !paused.UpdatedAt.Equal(t0) {
-		tb.Fatalf("the paused state: %+v", paused)
+	if want := (snodra.ProcessorControlState{Processor: processor, Paused: true, PausedAt: t0,
+		PausedBy: "control-1", UpdatedAt: t0}); !sameControlState(paused, want) {
+		tb.Fatalf("the paused state: %+v, want %+v", paused, want)
 	}
 	if outcome, err := control.Lock(context.Background(), processor, "op-1", t0.Add(30*time.Second), t0.Add(time.Second)); err != nil || !outcome.Taken {
 		tb.Fatalf("lock while paused: %+v, %v", outcome, err)
@@ -473,18 +476,16 @@ func pauseStateRoundTrips(tb storeTB, store snodra.MessageStore) {
 	}
 	setPaused(processor, false, "control-2", t0.Add(2*time.Second))
 	resumed := get(processor)
-	if resumed.Paused || !resumed.PausedAt.IsZero() || resumed.PausedBy != "" || !resumed.UpdatedAt.Equal(t0.Add(2*time.Second)) {
-		tb.Fatalf("the resumed state: %+v", resumed)
-	}
-	if resumed.Operation == nil || resumed.Operation.ID != "op-1" {
-		tb.Fatalf("a resume cleared the lock: %+v", resumed.Operation)
+	if want := (snodra.ProcessorControlState{Processor: processor, UpdatedAt: t0.Add(2 * time.Second),
+		Operation: &snodra.ControlOperation{ID: "op-1", Kind: snodra.ResetKind,
+			LeaseUntil: t0.Add(30 * time.Second), PreparedAt: t0.Add(time.Second)}}); !sameControlState(resumed, want) {
+		tb.Fatalf("the resumed state: %+v, want %+v", resumed, want)
 	}
 	freshProcessor := fresh("conformance")
 	setPaused(freshProcessor, false, "local", t0)
 	freshState := get(freshProcessor)
-	if freshState.Processor != freshProcessor || freshState.Paused || !freshState.UpdatedAt.Equal(t0) ||
-		freshState.Operation != nil || len(freshState.Replay) != 0 {
-		tb.Fatalf("a resume of an unknown processor: %+v", freshState)
+	if want := (snodra.ProcessorControlState{Processor: freshProcessor, UpdatedAt: t0}); !sameControlState(freshState, want) {
+		tb.Fatalf("a resume of an unknown processor: %+v, want %+v", freshState, want)
 	}
 }
 
@@ -523,11 +524,11 @@ func replayRangesRoundTrip(tb storeTB, store snodra.MessageStore) {
 	}
 	setReplay(processor, []snodra.ReplayRange{r1, r2, r3}, t0.Add(time.Second))
 	state := get(processor)
-	if !reflect.DeepEqual(state.Replay, []snodra.ReplayRange{r1, r2, r3}) || !state.UpdatedAt.Equal(t0.Add(time.Second)) {
-		tb.Fatalf("the ranges: %+v", state)
-	}
-	if state.Operation == nil || state.Operation.ID != "op-1" {
-		tb.Fatalf("the ranges cleared the lock: %+v", state.Operation)
+	locked := &snodra.ControlOperation{ID: "op-1", Kind: snodra.ResetKind,
+		LeaseUntil: t0.Add(30 * time.Second), PreparedAt: t0}
+	if want := (snodra.ProcessorControlState{Processor: processor, Operation: locked,
+		Replay: []snodra.ReplayRange{r1, r2, r3}, UpdatedAt: t0.Add(time.Second)}); !sameControlState(state, want) {
+		tb.Fatalf("the ranges: %+v, want %+v", state, want)
 	}
 	remove := func(processor string, replay snodra.ReplayRange, now time.Time) bool {
 		tb.Helper()
@@ -549,16 +550,19 @@ func replayRangesRoundTrip(tb storeTB, store snodra.MessageStore) {
 	if remove(otherProcessor, r1, t0.Add(2*time.Second)) {
 		tb.Fatal("another processor's range was removed")
 	}
-	if got := get(processor).Replay; !reflect.DeepEqual(got, []snodra.ReplayRange{r1, r3}) {
-		tb.Fatalf("the ranges after a removal: %+v", got)
+	if want := (snodra.ProcessorControlState{Processor: processor, Operation: locked,
+		Replay: []snodra.ReplayRange{r1, r3}, UpdatedAt: t0.Add(2 * time.Second)}); !sameControlState(get(processor), want) {
+		tb.Fatalf("the ranges after a removal: %+v, want %+v", get(processor), want)
 	}
 	setReplay(processor, []snodra.ReplayRange{r2}, t0.Add(3*time.Second))
-	if got := get(processor).Replay; !reflect.DeepEqual(got, []snodra.ReplayRange{r2}) {
-		tb.Fatalf("the replacement: %+v", got)
+	if want := (snodra.ProcessorControlState{Processor: processor, Operation: locked,
+		Replay: []snodra.ReplayRange{r2}, UpdatedAt: t0.Add(3 * time.Second)}); !sameControlState(get(processor), want) {
+		tb.Fatalf("the replacement: %+v, want %+v", get(processor), want)
 	}
 	setReplay(processor, nil, t0.Add(4*time.Second))
-	if got := get(processor).Replay; len(got) != 0 {
-		tb.Fatalf("the cleared ranges: %+v", got)
+	if want := (snodra.ProcessorControlState{Processor: processor, Operation: locked,
+		UpdatedAt: t0.Add(4 * time.Second)}); !sameControlState(get(processor), want) {
+		tb.Fatalf("the cleared ranges: %+v, want %+v", get(processor), want)
 	}
 }
 
@@ -680,8 +684,13 @@ func sameStoreOperation(got, want snodra.ControlOperation) bool {
 func sameControlState(got, want snodra.ProcessorControlState) bool {
 	if got.Processor != want.Processor || got.Paused != want.Paused ||
 		got.PausedBy != want.PausedBy || !got.PausedAt.Equal(want.PausedAt) ||
-		!got.UpdatedAt.Equal(want.UpdatedAt) || !reflect.DeepEqual(got.Replay, want.Replay) {
+		!got.UpdatedAt.Equal(want.UpdatedAt) || len(got.Replay) != len(want.Replay) {
 		return false
+	}
+	for i := range got.Replay {
+		if got.Replay[i] != want.Replay[i] {
+			return false
+		}
 	}
 	if (got.Operation == nil) != (want.Operation == nil) {
 		return false
