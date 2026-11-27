@@ -264,10 +264,11 @@ jobs:
   # Versions are cut here, from the Conventional Commit subjects since the last tag
   # (scripts/next-version.sh): feat -> minor, fix/perf -> patch, anything else -> no release.
   # Below 1.0.0 nothing computes a major; 1.0.0 is declared by hand. A release is one commit with
-  # two tags: vX.Y.Z for the root module and observability/vX.Y.Z for the module in observability/.
+  # six tags: vX.Y.Z for the root module and <module>/vX.Y.Z for each of the five add-on modules
+  # (observability, kafka, sql, mongo, rabbitmq).
   #
   # Three jobs, so that no code that builds or tests ever holds a token that can push:
-  # - version (read-only) computes the version, makes the release commit and both tags, records
+  # - version (read-only) computes the version, makes the release commit and all six tags, records
   #   their ids and hands them over as a git bundle;
   # - package (read-only) tests exactly that commit as a consumer gets it;
   # - push (contents: write) checks out nothing and runs no file of the repository: it checks that
@@ -287,6 +288,10 @@ jobs:
       commit: ${{ steps.commit.outputs.commit }}
       tag_id: ${{ steps.commit.outputs.tag_id }}
       observability_tag_id: ${{ steps.commit.outputs.observability_tag_id }}
+      kafka_tag_id: ${{ steps.commit.outputs.kafka_tag_id }}
+      sql_tag_id: ${{ steps.commit.outputs.sql_tag_id }}
+      mongo_tag_id: ${{ steps.commit.outputs.mongo_tag_id }}
+      rabbitmq_tag_id: ${{ steps.commit.outputs.rabbitmq_tag_id }}
     steps:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
@@ -307,11 +312,15 @@ jobs:
             exit 0
           fi
           last=$(git tag --merged HEAD --list 'v*' | scripts/last-tag.sh)
-          # A release is two tags on one commit; a lone vX.Y.Z was not made here.
-          if [ -n "$last" ] && [ "$(git rev-parse -q --verify "refs/tags/observability/$last^{commit}" || true)" \
-                                != "$(git rev-parse "$last^{commit}")" ]; then
-            echo "::error::the last release tag has no observability/ tag on the same commit"
-            exit 1
+          # A release is all six tags on one commit; a lone vX.Y.Z was not made here.
+          if [ -n "$last" ]; then
+            last_commit=$(git rev-parse "$last^{commit}")
+            for m in observability kafka sql mongo rabbitmq; do
+              if [ "$(git rev-parse -q --verify "refs/tags/$m/$last^{commit}" || true)" != "$last_commit" ]; then
+                echo "::error::the last release tag has no $m/ tag on the same commit"
+                exit 1
+              fi
+            done
           fi
           range=${last:+$last..}HEAD
           version=$(
@@ -331,13 +340,21 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           scripts/release-commit.sh "$VERSION"
-          v="refs/tags/v$VERSION" o="refs/tags/observability/v$VERSION"
+          v="refs/tags/v$VERSION"
           { echo "commit=$(git rev-parse HEAD)"
             echo "tag_id=$(git rev-parse "$v")"
-            echo "observability_tag_id=$(git rev-parse "$o")"
+            for m in observability kafka sql mongo rabbitmq; do
+              echo "${m}_tag_id=$(git rev-parse "refs/tags/$m/v$VERSION")"
+            done
           } >> "$GITHUB_OUTPUT"
           mkdir -p "$RUNNER_TEMP/release"
-          git bundle create "$RUNNER_TEMP/release/release.bundle" "$v" "$o"
+          git bundle create "$RUNNER_TEMP/release/release.bundle" \
+            "$v" \
+            "refs/tags/observability/v$VERSION" \
+            "refs/tags/kafka/v$VERSION" \
+            "refs/tags/sql/v$VERSION" \
+            "refs/tags/mongo/v$VERSION" \
+            "refs/tags/rabbitmq/v$VERSION"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: steps.next.outputs.version != ''
@@ -377,10 +394,25 @@ jobs:
           COMMIT: ${{ needs.version.outputs.commit }}
           TAG_ID: ${{ needs.version.outputs.tag_id }}
           OBSERVABILITY_TAG_ID: ${{ needs.version.outputs.observability_tag_id }}
+          KAFKA_TAG_ID: ${{ needs.version.outputs.kafka_tag_id }}
+          SQL_TAG_ID: ${{ needs.version.outputs.sql_tag_id }}
+          MONGO_TAG_ID: ${{ needs.version.outputs.mongo_tag_id }}
+          RABBITMQ_TAG_ID: ${{ needs.version.outputs.rabbitmq_tag_id }}
         run: |
-          v="refs/tags/v$VERSION" o="refs/tags/observability/v$VERSION"
-          git fetch -q "$RUNNER_TEMP/release/release.bundle" "$v:$v" "$o:$o"
-          if [ "$(git rev-parse "$v")" != "$TAG_ID" ] || [ "$(git rev-parse "$o")" != "$OBSERVABILITY_TAG_ID" ] \
+          v="refs/tags/v$VERSION"
+          git fetch -q "$RUNNER_TEMP/release/release.bundle" \
+            "$v:$v" \
+            "refs/tags/observability/v$VERSION:refs/tags/observability/v$VERSION" \
+            "refs/tags/kafka/v$VERSION:refs/tags/kafka/v$VERSION" \
+            "refs/tags/sql/v$VERSION:refs/tags/sql/v$VERSION" \
+            "refs/tags/mongo/v$VERSION:refs/tags/mongo/v$VERSION" \
+            "refs/tags/rabbitmq/v$VERSION:refs/tags/rabbitmq/v$VERSION"
+          if [ "$(git rev-parse "$v")" != "$TAG_ID" ] \
+             || [ "$(git rev-parse "refs/tags/observability/v$VERSION")" != "$OBSERVABILITY_TAG_ID" ] \
+             || [ "$(git rev-parse "refs/tags/kafka/v$VERSION")" != "$KAFKA_TAG_ID" ] \
+             || [ "$(git rev-parse "refs/tags/sql/v$VERSION")" != "$SQL_TAG_ID" ] \
+             || [ "$(git rev-parse "refs/tags/mongo/v$VERSION")" != "$MONGO_TAG_ID" ] \
+             || [ "$(git rev-parse "refs/tags/rabbitmq/v$VERSION")" != "$RABBITMQ_TAG_ID" ] \
              || [ "$(git rev-parse "$v^{commit}")" != "$COMMIT" ]; then
             echo "::error::the bundle does not hold the release the version job recorded"
             exit 1
@@ -416,6 +448,10 @@ jobs:
           COMMIT: ${{ needs.version.outputs.commit }}
           TAG_ID: ${{ needs.version.outputs.tag_id }}
           OBSERVABILITY_TAG_ID: ${{ needs.version.outputs.observability_tag_id }}
+          KAFKA_TAG_ID: ${{ needs.version.outputs.kafka_tag_id }}
+          SQL_TAG_ID: ${{ needs.version.outputs.sql_tag_id }}
+          MONGO_TAG_ID: ${{ needs.version.outputs.mongo_tag_id }}
+          RABBITMQ_TAG_ID: ${{ needs.version.outputs.rabbitmq_tag_id }}
           TESTED: ${{ needs.package.outputs.commit }}
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -428,11 +464,27 @@ jobs:
           config core.hooksPath /dev/null
           git init -q --bare "$RUNNER_TEMP/release.git"
           cd "$RUNNER_TEMP/release.git"
-          v="refs/tags/v$VERSION" o="refs/tags/observability/v$VERSION"
-          git fetch -q "$RUNNER_TEMP/release/release.bundle" "$v:$v" "$o:$o"
+          v="refs/tags/v$VERSION"
+          git fetch -q "$RUNNER_TEMP/release/release.bundle" \
+            "$v:$v" \
+            "refs/tags/observability/v$VERSION:refs/tags/observability/v$VERSION" \
+            "refs/tags/kafka/v$VERSION:refs/tags/kafka/v$VERSION" \
+            "refs/tags/sql/v$VERSION:refs/tags/sql/v$VERSION" \
+            "refs/tags/mongo/v$VERSION:refs/tags/mongo/v$VERSION" \
+            "refs/tags/rabbitmq/v$VERSION:refs/tags/rabbitmq/v$VERSION"
           # Object ids are content hashes: these are the objects recorded, and the commit tested.
-          if [ "$(git rev-parse "$v")" != "$TAG_ID" ] || [ "$(git rev-parse "$o")" != "$OBSERVABILITY_TAG_ID" ] \
-             || [ "$(git rev-parse "$v^{commit}")" != "$COMMIT" ] || [ "$(git rev-parse "$o^{commit}")" != "$COMMIT" ] \
+          if [ "$(git rev-parse "$v")" != "$TAG_ID" ] \
+             || [ "$(git rev-parse "refs/tags/observability/v$VERSION")" != "$OBSERVABILITY_TAG_ID" ] \
+             || [ "$(git rev-parse "refs/tags/kafka/v$VERSION")" != "$KAFKA_TAG_ID" ] \
+             || [ "$(git rev-parse "refs/tags/sql/v$VERSION")" != "$SQL_TAG_ID" ] \
+             || [ "$(git rev-parse "refs/tags/mongo/v$VERSION")" != "$MONGO_TAG_ID" ] \
+             || [ "$(git rev-parse "refs/tags/rabbitmq/v$VERSION")" != "$RABBITMQ_TAG_ID" ] \
+             || [ "$(git rev-parse "$v^{commit}")" != "$COMMIT" ] \
+             || [ "$(git rev-parse "refs/tags/observability/v$VERSION^{commit}")" != "$COMMIT" ] \
+             || [ "$(git rev-parse "refs/tags/kafka/v$VERSION^{commit}")" != "$COMMIT" ] \
+             || [ "$(git rev-parse "refs/tags/sql/v$VERSION^{commit}")" != "$COMMIT" ] \
+             || [ "$(git rev-parse "refs/tags/mongo/v$VERSION^{commit}")" != "$COMMIT" ] \
+             || [ "$(git rev-parse "refs/tags/rabbitmq/v$VERSION^{commit}")" != "$COMMIT" ] \
              || [ "$COMMIT" != "$TESTED" ]; then
             echo "::error::the release objects are not the ones recorded and tested"
             exit 1
@@ -445,17 +497,29 @@ jobs:
           echo "::add-mask::$auth"
           config http.https://github.com/.extraheader "AUTHORIZATION: basic $auth"
           remote="https://github.com/$GITHUB_REPOSITORY.git"
-          # The commit and both tags, or none of them, and only as a fast-forward of the tested
+          # The commit and all six tags, or none of them, and only as a fast-forward of the tested
           # main head.
-          if ! git push --atomic "$remote" "$COMMIT:refs/heads/main" "$TAG_ID:$v" "$OBSERVABILITY_TAG_ID:$o"; then
+          if ! git push --atomic "$remote" \
+               "$COMMIT:refs/heads/main" \
+               "$TAG_ID:$v" \
+               "$OBSERVABILITY_TAG_ID:refs/tags/observability/v$VERSION" \
+               "$KAFKA_TAG_ID:refs/tags/kafka/v$VERSION" \
+               "$SQL_TAG_ID:refs/tags/sql/v$VERSION" \
+               "$MONGO_TAG_ID:refs/tags/mongo/v$VERSION" \
+               "$RABBITMQ_TAG_ID:refs/tags/rabbitmq/v$VERSION"; then
             main=$(git ls-remote --exit-code "$remote" refs/heads/main | cut -f1)
             if [ "$main" = "$COMMIT" ]; then
               # The push landed and only the client saw an error: release it.
-              for t in "$v" "$o"; do
+              for t in "$v" \
+                       "refs/tags/observability/v$VERSION" \
+                       "refs/tags/kafka/v$VERSION" \
+                       "refs/tags/sql/v$VERSION" \
+                       "refs/tags/mongo/v$VERSION" \
+                       "refs/tags/rabbitmq/v$VERSION"; do
                 git ls-remote --exit-code "$remote" "$t" >/dev/null \
-                  || { echo "::error::main has the release commit but not both of its tags"; exit 1; }
+                  || { echo "::error::main has the release commit but not all of its tags"; exit 1; }
               done
-              echo "::warning::git reported an error, but the release commit and both tags are on the remote"
+              echo "::warning::git reported an error, but the release commit and all tags are on the remote"
             elif [ "$main" != "$GITHUB_SHA" ]; then
               echo "::notice::main moved during the release; the run for the newer commit releases"
               exit 0

@@ -23,7 +23,7 @@ check "numbers, not text"             v0.5.10 v0.5.9 v0.5.10 v0.5.2
 check "major first"                   v1.0.0  v0.99.99 v1.0.0
 check "pre-releases are ignored"      v0.7.0  v0.7.0 v0.8.0-rc1 v0.8.0-beta.1
 check "malformed tags are ignored"    v0.5.4  v0.5.4 v0.6 v0.08.1 v0.6.0.1 vv0.7.0 0.9.0 latest
-check "observability/ tags are ignored" v0.2.0 v0.2.0 observability/v0.3.0
+check "add-on module tags are ignored" v0.2.0 v0.2.0 observability/v0.3.0 kafka/v0.3.0 sql/v0.3.0 mongo/v0.3.0 rabbitmq/v0.3.0
 check "no tags"                       ""
 check "no release tag"                ""      v0.8.0-rc1 nightly
 
