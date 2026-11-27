@@ -420,3 +420,106 @@ func sameJSON(t *testing.T, got, want []byte) {
 		t.Fatalf("the payload changed: got %s, want %s", got, want)
 	}
 }
+
+// The saga and external-call documents have the published layout's fields and BSON types.
+func TestTheSagaDocumentsWriteTheLayoutsShape(t *testing.T) {
+	at := time.Date(2026, 11, 3, 10, 0, 0, 250_000_000, time.UTC)
+	startKey := "conformance.Saga|orderId=o-1"
+	saga := snodra.Saga{ID: "saga-1", Type: "conformance.Saga", State: `{"step":1}`,
+		Associations: []snodra.SagaAssociation{{Key: "orderId", Value: "o-1"}},
+		StartKey:     &startKey, Ended: true, EndedAt: at, Version: 3, CreatedAt: at, UpdatedAt: at}
+	raw, err := bson.Marshal(sagaDocumentOf(saga))
+	if err != nil {
+		t.Fatal(err)
+	}
+	document := bson.Raw(raw)
+	for _, name := range []string{"_id", "type", "state", "associations", "startKey", "ended", "endedAt", "version", "createdAt", "updatedAt"} {
+		if _, err := document.LookupErr(name); err != nil {
+			t.Fatalf("%s is missing: %v", name, err)
+		}
+	}
+	if _, err := document.LookupErr("_class"); err == nil {
+		t.Fatal("a saga document carries _class")
+	}
+	if value, err := document.LookupErr("version"); err != nil || value.Type != bson.TypeInt64 {
+		t.Fatalf("version: %v, %v", value, err)
+	}
+	association := document.Lookup("associations").Array().Index(0).Document()
+	if association.Lookup("k").StringValue() != "orderId" || association.Lookup("v").StringValue() != "o-1" {
+		t.Fatalf("an association: %v", association)
+	}
+
+	dispatch := snodra.SagaDispatch{ID: "saga-1:1000", SagaID: "saga-1", Seq: 1000,
+		Kind: snodra.DispatchCommand, Type: "conformance.Charge", Payload: `{"n":1}`,
+		Headers: map[string]string{"correlation-id": "c-1"}, CreatedAt: at, NoticePending: true}
+	raw, err = bson.Marshal(sagaDispatchDocumentOf(dispatch))
+	if err != nil {
+		t.Fatal(err)
+	}
+	document = bson.Raw(raw)
+	for _, name := range []string{"_id", "sagaId", "seq", "kind", "type", "payload", "headers", "createdAt", "attempts", "noticePending", "noticeAttempts"} {
+		if _, err := document.LookupErr(name); err != nil {
+			t.Fatalf("%s is missing: %v", name, err)
+		}
+	}
+	if value, err := document.LookupErr("seq"); err != nil || value.Type != bson.TypeInt64 {
+		t.Fatalf("seq: %v, %v", value, err)
+	}
+	if value, err := document.LookupErr("attempts"); err != nil || value.Type != bson.TypeInt32 {
+		t.Fatalf("attempts: %v, %v", value, err)
+	}
+	if value, err := document.LookupErr("noticePending"); err != nil || !value.Boolean() {
+		t.Fatalf("noticePending: %v, %v", value, err)
+	}
+
+	deadline := snodra.SagaDeadline{ID: "deadline-1", SagaType: "conformance.Saga", SagaID: "saga-1",
+		Name: "timeout", DueAt: at, Status: snodra.DeadlineScheduled}
+	raw, err = bson.Marshal(sagaDeadlineDocumentOf(deadline))
+	if err != nil {
+		t.Fatal(err)
+	}
+	document = bson.Raw(raw)
+	for _, name := range []string{"_id", "sagaType", "sagaId", "name", "dueAt", "status"} {
+		if _, err := document.LookupErr(name); err != nil {
+			t.Fatalf("%s is missing: %v", name, err)
+		}
+	}
+	for _, name := range []string{"payload", "payloadType", "claimedBy", "claimedUntil", "finishedAt", "correlationId"} {
+		if value, err := document.LookupErr(name); err == nil {
+			t.Fatalf("%s is present: %v", name, value)
+		}
+	}
+
+	failure := snodra.SagaFailure{ID: "conformance.Saga:evt-1", SagaType: "conformance.Saga",
+		EventID: "evt-1", EventType: "conformance.Happened", Payload: `{"n":1}`, Headers: map[string]string{"a": "b"},
+		Error: "boom", Attempts: 3, FirstFailedAt: at, LastFailedAt: at}
+	raw, err = bson.Marshal(sagaFailureDocumentOf(failure))
+	if err != nil {
+		t.Fatal(err)
+	}
+	document = bson.Raw(raw)
+	if value, err := document.LookupErr("attempts"); err != nil || value.Type != bson.TypeInt32 {
+		t.Fatalf("failure attempts: %v, %v", value, err)
+	}
+	for _, name := range []string{"sagaType", "eventId", "eventType", "payload", "headers", "error", "firstFailedAt", "lastFailedAt"} {
+		if _, err := document.LookupErr(name); err != nil {
+			t.Fatalf("%s is missing: %v", name, err)
+		}
+	}
+
+	call := snodra.ExternalCall{Key: "key-1", Status: snodra.ExternalCallInProgress, Attempts: 1,
+		Owner: "owner-1", LeaseUntil: at, UpdatedAt: at}
+	raw, err = bson.Marshal(externalCallDocumentOf(call))
+	if err != nil {
+		t.Fatal(err)
+	}
+	document = bson.Raw(raw)
+	for _, name := range []string{"_id", "status", "attempts", "updatedAt", "leaseUntil", "owner"} {
+		if _, err := document.LookupErr(name); err != nil {
+			t.Fatalf("%s is missing: %v", name, err)
+		}
+	}
+	if value, err := document.LookupErr("attempts"); err != nil || value.Type != bson.TypeInt32 {
+		t.Fatalf("call attempts: %v, %v", value, err)
+	}
+}

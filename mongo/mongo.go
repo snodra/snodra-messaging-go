@@ -26,10 +26,9 @@
 //
 // # The stores
 //
-// The outbox, the processed-event markers (with a reset's marker deletion), the dead letters and the
-// processor control are implemented. The external-call and saga ports of the interface frozen at
-// level 2 return snodra.ErrUnsupported for now; the official add-ons implement every port by
-// level 4.
+// Every port is implemented: the outbox, the processed-event markers (with a reset's marker
+// deletion), the dead letters, the processor control, the external calls, the sagas and their
+// dispatch, deadlines and failures.
 //
 // Times the store stamps itself (a claim's lease, an entry's sending and its failure) come from
 // the application's clock ([Store.UseClock]), never the database's. MongoDB has no notification
@@ -342,19 +341,19 @@ func (s *Store) DeadLetters() snodra.DeadLetterStore { return mongoDeadLetters{s
 // collection.
 func (s *Store) Control() snodra.ProcessorControlStore { return mongoControl{store: s} }
 
-// ExternalCalls returns the external-call port, which this store does not implement yet (level 4):
-// every operation fails with snodra.ErrUnsupported.
-func (s *Store) ExternalCalls() snodra.ExternalCallStore { return unsupportedExternalCalls{} }
+// ExternalCalls returns the external-call port, implemented on the shared external_calls
+// collection.
+func (s *Store) ExternalCalls() snodra.ExternalCallStore { return mongoExternalCalls{store: s} }
 
-// Sagas returns the saga ports, which this store does not implement yet (level 4): every
-// operation fails with snodra.ErrUnsupported.
+// Sagas returns the saga ports, implemented on the shared saga, dispatch, deadline and failure
+// collections and the processed-event markers.
 func (s *Store) Sagas() snodra.SagaStores {
 	return snodra.SagaStores{
-		Sagas:     unsupportedSagas{},
-		Dispatch:  unsupportedSagaDispatch{},
-		Deadlines: unsupportedSagaDeadlines{},
-		Failures:  unsupportedSagaFailures{},
-		Markers:   unsupportedSagaMarkers{},
+		Sagas:     mongoSagaRepository{store: s},
+		Dispatch:  mongoSagaDispatch{store: s},
+		Deadlines: mongoSagaDeadlines{store: s},
+		Failures:  mongoSagaFailures{store: s},
+		Markers:   mongoSagaMarkers{store: s},
 	}
 }
 

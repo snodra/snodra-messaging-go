@@ -546,25 +546,6 @@ func TestBackgroundHasNothingToRun(t *testing.T) {
 	}
 }
 
-// The level-4 ports this add-on does not implement say so.
-func TestTheUnsupportedPortsSaySo(t *testing.T) {
-	store := &Store{}
-	ctx := context.Background()
-	var errs []error
-	_, err := store.ExternalCalls().Reset(ctx, "key", "owner")
-	errs = append(errs, err)
-	errs = append(errs, store.Sagas().Sagas.Insert(ctx, snodra.Saga{}))
-	errs = append(errs, store.Sagas().Dispatch.ClearNotice(ctx, "id"))
-	errs = append(errs, store.Sagas().Deadlines.CancelAll(ctx, "saga", time.Now()))
-	errs = append(errs, store.Sagas().Failures.Save(ctx, snodra.SagaFailure{}))
-	errs = append(errs, store.Sagas().Markers.Insert(ctx, "id", "type", time.Now()))
-	for _, err := range errs {
-		if !errors.Is(err, snodra.ErrUnsupported) {
-			t.Fatalf("%v, want ErrUnsupported", err)
-		}
-	}
-}
-
 // A transaction of another MongoDB store in the context is refused, never run on this store's
 // client.
 func TestAnotherStoresTransactionIsRefused(t *testing.T) {
