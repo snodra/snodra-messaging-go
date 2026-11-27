@@ -466,22 +466,46 @@ settled; where an entry is settled its behaviour is the specification. The code 
 - **Question:** should the specification fix the send timeout and the lease's lower bound, or leave them to each
   library?
 
-### SG-33: the attempts and the wait of a failed record at level 2
+### SG-33: the attempts, the wait and the dead letter of a failed record
 
 - **Specification:** [feature-levels.md, Level 2](https://snodra.damoreira.com/docs/library-authors/feature-levels/#level-2-events)
   says events are handled at least once with duplicates skipped, and [message-store-add-ons.md](https://snodra.damoreira.com/docs/library-authors/message-store-add-ons/#the-stores)
   says a record that exhausts its attempts is parked as a dead letter at level 3; neither page says how many handler
-  invocations a level-2 record gets, how long the wait between them is, or what happens when they all fail.
-- **This library:** five invocations, one second apart (`SNODRA_CONSUMER_MAX_ATTEMPTS`), then the record is logged at
-  error and acknowledged, so it does not block its key; level 3 parks it instead. The references use the same count
-  and wait (Kotlin `EventConsumer.kt`: `maxAttempts` 5 from
+  invocations a record gets, how long the wait between them is, or what happens when they all fail.
+- **Settled:** the level-2 gate adopted five invocations one second apart, then log and acknowledge at level 2; at
+  level 3 the same five attempts end in the configured dead-letter mode: `collection` parks a `HANDLER_FAILED` letter,
+  `event-store` publishes it to `<source>.dlt`, and `log` logs and acknowledges it. A payload its handler cannot decode
+  is not retried and becomes a `HANDLER_FAILED` letter with error type `InvalidMessage`. No further ruling.
+- **This library:** five invocations, one second apart (`SNODRA_CONSUMER_MAX_ATTEMPTS`); the exhaustion check is
+  `consumer.go:356` and `parkFailed` (`consumer.go:369-394`) switches on `SNODRA_DEAD_LETTER_MODE` (`env.go:63`); the
+  undecodable payload path is `consumer.go:351-354`. The references use the same count and wait (Kotlin
+  `EventConsumer.kt`: `maxAttempts` 5 from
   `snodra-messaging@64dde1e:snodra-messaging/src/main/kotlin/com/damoreira/snodra/messaging/config/SnodraMessagingProperties.kt:314`
   and `backOffMs = 1000` at
   `snodra-messaging@64dde1e:snodra-messaging/src/main/kotlin/com/damoreira/snodra/messaging/events/EventConsumer.kt:98`;
   Rust `consumer_max_attempts: 5` at `snodra-messaging-rs/src/config.rs:259` and a 1 s backoff at
   `snodra-messaging-rs/src/app.rs:1026`).
-- **Question:** should the specification name the level-2 attempts and wait, and say explicitly that a level-2 library
-  logs and skips what fails them?
+- **Question:** settled by the level-2 gate: the specification should name the five attempts, the one-second wait and
+  the mode-specific outcome above.
+
+### SG-34: a malformed record at level 2 and level 3
+
+- **Specification:** [messages.md](https://snodra.damoreira.com/docs/library-authors/messages/) says an event has a
+  type name and its payload is a JSON object, and
+  [feature-levels.md, Level 3](https://snodra.damoreira.com/docs/library-authors/feature-levels/#level-3-processors)
+  lists `INVALID` as a dead-letter reason (no type, a payload that is not a JSON object); no page says what a level-2
+  library does with such a record.
+- **Settled:** the level-2 gate adopted log-and-acknowledge without a marker at level 2; at level 3 the record is an
+  `INVALID` letter in `collection`, is published to `<source>.dlt` in `event-store`, and is logged and acknowledged in
+  `log`. An `INVALID` letter blocks no key and is never retried; it can only be discarded. No further ruling.
+- **This library:** `parkInvalid` (`consumer.go:398-413`) handles a missing type header (`consumer.go:234-238`) and a
+  payload that is not a JSON object (`consumer.go:249-251`); the mode switch is `consumer.go:399-409`. The reference
+  marks it `INVALID` and sends it to its sink (the type check at
+  `snodra-messaging@64dde1e:snodra-messaging/src/main/kotlin/com/damoreira/snodra/messaging/events/EventConsumer.kt:359`
+  and the payload check at
+  `snodra-messaging@64dde1e:snodra-messaging/src/main/kotlin/com/damoreira/snodra/messaging/events/EventConsumer.kt:371`).
+- **Question:** settled by the level-2 gate and the published level-3 dead-letter modes: the specification should name
+  the level-2 log-and-skip and the level-3 `INVALID` letter.
 
 ### SG-35: the re-subscribe backoff of a failed event subscription
 
