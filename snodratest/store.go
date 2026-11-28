@@ -71,9 +71,9 @@ type storeTB interface {
 	Fatal(args ...any)
 }
 
-// messageStoreChecks is the level-2 and level-3 set, in the Rust kit's order. store_checks.txt is
-// the checked-in copy of these ids, and a test pins it to a literal copy of that part of the Rust
-// list (its level-4 checks are not in the Go kit yet).
+// messageStoreChecks is the level-2, level-3 and level-4 set, in the Rust kit's order.
+// store_checks.txt is the checked-in copy of these ids, and a test pins it to a literal copy of
+// the Rust list.
 var messageStoreChecks = []struct {
 	id  string
 	run func(testing.TB, snodra.MessageStore)

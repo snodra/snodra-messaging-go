@@ -16,7 +16,7 @@ import (
 	"github.com/snodra/snodra-messaging-go/snodratest"
 )
 
-// The 17 message-store checks (nine level-2 and eight level-3), on a replica set.
+// The 28 message-store checks (levels 2 to 4), on a replica set.
 func TestTheMongoMessageStorePassesTheKit(t *testing.T) {
 	server := mongoContainer(t)
 	snodratest.MessageStore(t, server.kitStores(t, len(snodratest.StoreCheckIDs())))

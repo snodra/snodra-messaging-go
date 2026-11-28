@@ -7,9 +7,9 @@ import (
 	"testing"
 )
 
-// rustMessageStoreGoChecks is a literal copy of the level-2 and level-3 store checks in the Rust
+// rustMessageStoreGoChecks is a literal copy of every store check in the Rust
 // message-store conformance kit's run_store_conformance (snodra-messaging-rs,
-// src/store/conformance.rs), pinned on 2026-11-27, in the Rust order: delete_markers (level 3, the
+// src/store/conformance.rs), pinned on 2026-11-28, in the Rust order: delete_markers (level 3, the
 // Rust list places it among the level-2 checks), the seven level-3 checks and the eleven level-4
 // checks at the end. The Rust
 // list is authoritative; when it changes, this copy and store_checks.txt change with it.
@@ -45,7 +45,7 @@ var rustMessageStoreGoChecks = []string{
 }
 
 // TestStoreChecksTxtMatchesTheRustKit pins the checked-in message-store list to the Rust kit's
-// level-2 and level-3 checks.
+// level-2, level-3 and level-4 checks.
 func TestStoreChecksTxtMatchesTheRustKit(t *testing.T) {
 	data, err := os.ReadFile("store_checks.txt")
 	if err != nil {
@@ -53,10 +53,10 @@ func TestStoreChecksTxtMatchesTheRustKit(t *testing.T) {
 	}
 	got := strings.Fields(string(data))
 	if !slices.Equal(got, rustMessageStoreGoChecks) {
-		t.Fatalf("store_checks.txt has %v, want the Rust kit's level-2 and level-3 checks %v", got, rustMessageStoreGoChecks)
+		t.Fatalf("store_checks.txt has %v, want the Rust kit's level-2, level-3 and level-4 checks %v", got, rustMessageStoreGoChecks)
 	}
 	if ids := StoreCheckIDs(); !slices.Equal(ids, rustMessageStoreGoChecks) {
-		t.Fatalf("the kit runs %v, want the Rust kit's level-2 and level-3 checks %v", ids, rustMessageStoreGoChecks)
+		t.Fatalf("the kit runs %v, want the Rust kit's level-2, level-3 and level-4 checks %v", ids, rustMessageStoreGoChecks)
 	}
 	if len(rustMessageStoreGoChecks) != 28 {
 		t.Fatalf("the store kit has %d checks, want 28 (9 level-2, 8 level-3 and 11 level-4)", len(rustMessageStoreGoChecks))

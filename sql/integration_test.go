@@ -24,7 +24,7 @@ func bothServers(t *testing.T, body func(t *testing.T, server *testServer)) {
 	t.Run("mysql", func(t *testing.T) { body(t, mysqlContainer(t)) })
 }
 
-// The 17 message-store checks (nine level-2 and eight level-3) on both engines.
+// The 28 message-store checks (levels 2 to 4) on both engines.
 func TestTheSQLMessageStorePassesTheKit(t *testing.T) {
 	bothServers(t, func(t *testing.T, server *testServer) {
 		snodratest.MessageStore(t, server.kitStores(t, len(snodratest.StoreCheckIDs())))
