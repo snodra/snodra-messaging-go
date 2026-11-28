@@ -547,7 +547,11 @@ func (p *probe) onSagaStarted(ctx context.Context, saga *snodra.SagaContext, sta
 	state.DeadlineScheduledBy = p.language
 	saga.Associate(SagaAssociationKey, event.OrderID)
 	if event.Mode == "deadline" {
-		if _, err := saga.Schedule(2*time.Second, SagaDeadlineName, SagaDeadlinePayload{
+		delay := 2 * time.Second
+		if event.DeadlineDelayMs > 0 {
+			delay = time.Duration(event.DeadlineDelayMs) * time.Millisecond
+		}
+		if _, err := saga.Schedule(delay, SagaDeadlineName, SagaDeadlinePayload{
 			OrderID: event.OrderID, Run: event.Run, Family: event.Family,
 		}); err != nil {
 			return fmt.Errorf("schedule the saga deadline: %w", err)
@@ -651,6 +655,7 @@ func (p *probe) sagaPublish(ctx context.Context, command SagaPublish) (SagaPubli
 		typeName = SagaStartedType
 		payload, err = json.Marshal(SagaStarted{
 			OrderID: command.OrderID, Run: p.run, Family: p.family, Mode: command.Mode,
+			DeadlineDelayMs: command.DelayMs,
 		})
 	case "advanced":
 		typeName = SagaAdvancedType
@@ -695,8 +700,17 @@ func (p *probe) sagaState(ctx context.Context, request SagaStateRequest) (SagaSt
 	)
 	if request.SagaID != "" {
 		saga, err = p.store.Sagas().Sagas.FindByID(ctx, request.SagaID)
-		if saga != nil && !saga.Ended {
-			live = 1
+		if saga != nil {
+			if len(saga.Associations) > 0 {
+				first := saga.Associations[0]
+				found, findErr := p.store.Sagas().Sagas.FindLive(ctx, saga.Type, first.Key, first.Value)
+				if findErr != nil && !errors.Is(findErr, snodra.ErrUnsupported) {
+					return SagaStateReply{}, fmt.Errorf("count the live instances: %w", findErr)
+				}
+				live = len(found)
+			} else if !saga.Ended {
+				live = 1
+			}
 		}
 	} else {
 		var found []snodra.Saga
@@ -793,7 +807,22 @@ func (p *probe) sagaRelease(ctx context.Context, request SagaReleaseRequest) (Sa
 		return SagaReleaseReply{}, fmt.Errorf("verify the release: %w", err)
 	}
 	if taken {
-		_ = dispatch.ReleaseLease(ctx, request.SagaID, witness)
+		if err := dispatch.ReleaseLease(ctx, request.SagaID, witness); err != nil && !errors.Is(err, snodra.ErrUnsupported) {
+			return SagaReleaseReply{}, fmt.Errorf("release the witness lease: %w", err)
+		}
+		// Check the witness was released: a second fresh claim must now succeed.
+		check := witness + "-check"
+		now = time.Now()
+		freed, err := dispatch.ClaimLease(ctx, request.SagaID, check, now, now.Add(5*time.Second))
+		if err != nil && !errors.Is(err, snodra.ErrUnsupported) {
+			return SagaReleaseReply{}, fmt.Errorf("check the witness release: %w", err)
+		}
+		if freed {
+			if err := dispatch.ReleaseLease(ctx, request.SagaID, check); err != nil && !errors.Is(err, snodra.ErrUnsupported) {
+				return SagaReleaseReply{}, fmt.Errorf("release the check lease: %w", err)
+			}
+		}
+		taken = freed
 	}
 	return SagaReleaseReply{Instance: instanceName(p.language, p.family), Released: taken}, nil
 }

@@ -176,6 +176,8 @@ type SagaStarted struct {
 	Run     string `json:"run"`
 	Family  string `json:"family"`
 	Mode    string `json:"mode"`
+	// DeadlineDelayMs shifts the deadline's due time for the phase search (0 means 2 s).
+	DeadlineDelayMs int64 `json:"deadlineDelayMs,omitempty"`
 }
 
 func (SagaStarted) MessageType() string { return SagaStartedType }
@@ -260,6 +262,7 @@ type SagaPublish struct {
 	Kind    string `json:"kind"` // "started" or "advanced"
 	OrderID string `json:"orderId"`
 	Mode    string `json:"mode"`
+	DelayMs int64  `json:"deadlineDelayMs,omitempty"`
 }
 
 func (SagaPublish) MessageType() string { return "orders.interop.SagaPublish" }
