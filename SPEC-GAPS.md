@@ -12,7 +12,9 @@ settled; where an entry is settled its behaviour is the specification. The code 
 - **Specification:** what the specification says (or that it is silent).
 - **Settled:** what is now the specification, when the entry is settled.
 - **This library:** what the Go code does.
+- **Other Snodra libraries:** the choice another official library makes, where one exists.
 - **Question:** the open question, or that it is settled.
+- **Wire change:** whether the answer changes the bytes on the hub or the broker.
 
 ## Entries
 
@@ -779,8 +781,12 @@ settled; where an entry is settled its behaviour is the specification. The code 
   Kotlin classifies a local `NoHandlerException` as permanent `NO_HANDLER`
   (`snodra-messaging@64dde1e:snodra-messaging/src/main/kotlin/com/damoreira/snodra/messaging/saga/RawCommandSender.kt:74`)
   and sends through its local invoker when a service has no hub (`RawCommandSender.kt:93`).
+- **Other Snodra libraries:** Python's saga relay gives a command with no local handler and no configured hub up as
+  permanent `NO_HANDLER` before sending (`snodra/_saga_dispatch.py:214-221`), so a Python saga can produce the sixth
+  reason and a Go saga cannot.
 - **Question:** should a future hubless mode classify a local no-handler as permanent `NO_HANDLER`, and should the Go
   library support the hubless service of the design at all?
+- **Wire change:** no.
 
 ### SG-53: a custom idempotency key for an external-call adapter
 
@@ -792,8 +798,11 @@ settled; where an entry is settled its behaviour is the specification. The code 
   its default is the same header, and an adapter that polls can put the attempt in the key.
 - **This library:** `HandleIdempotentCommand` reads only the `idempotency-key` header. An adapter whose key is
   derived from the message must set the header at the caller.
+- **Other Snodra libraries:** Python reads the same header only and records the choice as its SG-47
+  (`snodra/_external.py`).
 - **Question:** should Go add a typed key expression/option (recognising message and headers), or keep the
   header-only contract?
+- **Wire change:** no.
 
 ### SG-54: a panic in an external-call adapter body
 
@@ -805,4 +814,7 @@ settled; where an entry is settled its behaviour is the specification. The code 
 - **This library:** recovers a panic in the body, settles the record `UNKNOWN` (the external system may have acted
   before the panic) and returns the unknown-outcome marker; the first caller sees `UNKNOWN_OUTCOME` and a redelivery
   does not run the body automatically.
+- **Other Snodra libraries:** Python treats a `BaseException` that is not an `Exception` (cancellation excepted) as a
+  panic and settles the record `UNKNOWN` with the same marker, its SG-48 (`snodra/_external.py`).
 - **Question:** should a panic be `UNKNOWN` (this library, the safe answer) or `FAILED` (Kotlin)?
+- **Wire change:** no.
