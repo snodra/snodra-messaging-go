@@ -145,6 +145,234 @@ type DltEvent struct {
 	Payload  json.RawMessage   `json:"payload"`
 }
 
+// The saga interop's message types. They are neutral orders shapes like the rest of the probe;
+// the same saga type and state are registered in both languages, so one shared store carries an
+// instance a Go and a Python service continue.
+const (
+	// SagaType is the registered saga name and the saga_* marker prefix both languages share.
+	SagaType = "interop-saga"
+	// SagaAssociationKey is the association both languages route the saga events by; the value is
+	// the order id.
+	SagaAssociationKey = "orderId"
+	// SagaDeadlineName is the deadline the start handler schedules.
+	SagaDeadlineName = "saga-timeout"
+	// SagaStartedType, SagaAdvancedType are the event types the driver publishes.
+	SagaStartedType  = "orders.interop.SagaStarted"
+	SagaAdvancedType = "orders.interop.SagaAdvanced"
+	// SagaFailType is the command whose handler fails permanently (INVALID), producing a notice.
+	SagaFailType = "orders.interop.SagaFail"
+	// SagaSlowType is the command whose handler is slow, holding the dispatch lease.
+	SagaSlowType = "orders.interop.SagaSlow"
+	// SagaSlowStartedType is the command the slow handler sends to the driver's probe service.
+	SagaSlowStartedType = "store.runner.SlowStarted"
+	// sagaCommandFailedType is the library's local failure notice type; it must never be published.
+	sagaCommandFailedType = "snodra.SagaCommandFailed"
+)
+
+// SagaStarted starts a saga; Mode selects what the later advanced event makes the saga do
+// ("continue", "lease", "notice" or "deadline").
+type SagaStarted struct {
+	OrderID string `json:"orderId"`
+	Run     string `json:"run"`
+	Family  string `json:"family"`
+	Mode    string `json:"mode"`
+}
+
+func (SagaStarted) MessageType() string { return SagaStartedType }
+
+// SagaAdvanced continues a live saga; the driver publishes it on the other language's partition.
+type SagaAdvanced struct {
+	OrderID string `json:"orderId"`
+	Run     string `json:"run"`
+	Family  string `json:"family"`
+	Mode    string `json:"mode"`
+}
+
+func (SagaAdvanced) MessageType() string { return SagaAdvancedType }
+
+// SagaDeadlinePayload is what the start handler schedules and the deadline handler receives.
+type SagaDeadlinePayload struct {
+	OrderID string `json:"orderId"`
+	Run     string `json:"run"`
+	Family  string `json:"family"`
+}
+
+// SagaFail is the command whose handler returns INVALID, so the saga receives a local notice.
+type SagaFail struct {
+	SagaID  string `json:"sagaId"`
+	OrderID string `json:"orderId"`
+}
+
+func (SagaFail) MessageType() string { return SagaFailType }
+
+// SagaFailReply is the command's answer; the handler never returns it.
+type SagaFailReply struct{}
+
+// SagaSlow is the command whose handler holds the dispatch lease while it works.
+type SagaSlow struct {
+	SagaID  string `json:"sagaId"`
+	OrderID string `json:"orderId"`
+}
+
+func (SagaSlow) MessageType() string { return SagaSlowType }
+
+// SagaSlowReply is the slow command's answer.
+type SagaSlowReply struct{}
+
+// SagaSlowStarted is what the slow command sends to the driver: which language's instance ran it.
+type SagaSlowStarted struct {
+	SagaID   string `json:"sagaId"`
+	OrderID  string `json:"orderId"`
+	Language string `json:"language"`
+}
+
+func (SagaSlowStarted) MessageType() string { return SagaSlowStartedType }
+
+// InteropSagaState is the shared saga state. Both languages use the same fields and wire names, so
+// either can continue an instance the other created.
+type InteropSagaState struct {
+	OrderID             string `json:"orderId"`
+	Run                 string `json:"run"`
+	Family              string `json:"family"`
+	Mode                string `json:"mode"`
+	StartedBy           string `json:"startedBy"`
+	AdvancedBy          string `json:"advancedBy"`
+	Advances            int    `json:"advances"`
+	DeadlineScheduledBy string `json:"deadlineScheduledBy"`
+	DeadlineFired       bool   `json:"deadlineFired"`
+	DeadlineFiredBy     string `json:"deadlineFiredBy"`
+	SlowRecordedBy      string `json:"slowRecordedBy"`
+	NoticeBy            string `json:"noticeBy"`
+	NoticeReason        string `json:"noticeReason"`
+	NoticeCommandType   string `json:"noticeCommandType"`
+	NoticeKey           string `json:"noticeKey"`
+	NoticeMessage       string `json:"noticeMessage"`
+	Notices             int    `json:"notices"`
+}
+
+// SagaPublish publishes one saga event through the instance's event store, on the key the driver
+// chose: the partition owner consumes it and runs stage 2.
+type SagaPublish struct {
+	Family  string `json:"family"`
+	Run     string `json:"run"`
+	ID      string `json:"id"`
+	Key     string `json:"key"`
+	Kind    string `json:"kind"` // "started" or "advanced"
+	OrderID string `json:"orderId"`
+	Mode    string `json:"mode"`
+}
+
+func (SagaPublish) MessageType() string { return "orders.interop.SagaPublish" }
+
+// SagaPublishReply names the id the event store accepted.
+type SagaPublishReply struct {
+	Instance  string `json:"instance"`
+	Published string `json:"published"`
+}
+
+// SagaStateRequest reads a saga by id, or the live instance associated with Key = Value.
+type SagaStateRequest struct {
+	Family string `json:"family"`
+	Run    string `json:"run"`
+	Type   string `json:"type"`
+	Key    string `json:"key"`
+	Value  string `json:"value"`
+	SagaID string `json:"sagaId"`
+}
+
+func (SagaStateRequest) MessageType() string { return "orders.interop.SagaState" }
+
+// SagaStateReply is one saga instance as the shared store holds it; State is the decoded JSON.
+type SagaStateReply struct {
+	Instance     string                `json:"instance"`
+	Found        bool                  `json:"found"`
+	SagaID       string                `json:"sagaId,omitempty"`
+	Type         string                `json:"type,omitempty"`
+	State        json.RawMessage       `json:"state,omitempty"`
+	Version      int64                 `json:"version"`
+	Ended        bool                  `json:"ended"`
+	Associations []SagaAssociationView `json:"associations,omitempty"`
+}
+
+// SagaAssociationView is one association of a saga instance.
+type SagaAssociationView struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
+// SagaDispatchRequest reads the first pending dispatch entry and the pending count of a saga.
+type SagaDispatchRequest struct {
+	Family string `json:"family"`
+	Run    string `json:"run"`
+	SagaID string `json:"sagaId"`
+}
+
+func (SagaDispatchRequest) MessageType() string { return "orders.interop.SagaDispatch" }
+
+// SagaDispatchReply is the pending entry and the count; Pending is false when none.
+type SagaDispatchReply struct {
+	Instance     string `json:"instance"`
+	Pending      bool   `json:"pending"`
+	EntryID      string `json:"entryId,omitempty"`
+	Seq          int64  `json:"seq"`
+	Kind         string `json:"kind,omitempty"`
+	Type         string `json:"type,omitempty"`
+	Attempts     int    `json:"attempts"`
+	PendingCount int64  `json:"pendingCount"`
+}
+
+// SagaLeaseRequest tries to take a saga's dispatch lease, as another relay would.
+type SagaLeaseRequest struct {
+	Family  string `json:"family"`
+	Run     string `json:"run"`
+	SagaID  string `json:"sagaId"`
+	Owner   string `json:"owner"`
+	UntilMs int64  `json:"untilMs"`
+}
+
+func (SagaLeaseRequest) MessageType() string { return "orders.interop.SagaLease" }
+
+// SagaLeaseReply says whether the probe owner got the lease.
+type SagaLeaseReply struct {
+	Instance string `json:"instance"`
+	Taken    bool   `json:"taken"`
+}
+
+// SagaReleaseRequest releases a probe owner's lease.
+type SagaReleaseRequest struct {
+	Family string `json:"family"`
+	Run    string `json:"run"`
+	SagaID string `json:"sagaId"`
+	Owner  string `json:"owner"`
+}
+
+func (SagaReleaseRequest) MessageType() string { return "orders.interop.SagaRelease" }
+
+// SagaReleaseReply says whether the probe owner's lease was released.
+type SagaReleaseReply struct {
+	Instance string `json:"instance"`
+	Released bool   `json:"released"`
+}
+
+// SagaNoticeRequest reads a probe instance's local view of one saga's failure notice.
+type SagaNoticeRequest struct {
+	Family   string `json:"family"`
+	Run      string `json:"run"`
+	SagaID   string `json:"sagaId"`
+	NoticeID string `json:"noticeId"`
+}
+
+func (SagaNoticeRequest) MessageType() string { return "orders.interop.SagaNotice" }
+
+// SagaNoticeReply says how many ordinary notices this instance delivered for the saga and how many
+// event-store deliveries the notice id has: the notice is local, so the latter is zero.
+type SagaNoticeReply struct {
+	Instance  string `json:"instance"`
+	Language  string `json:"language"`
+	Ordinary  int    `json:"ordinary"`
+	Published int    `json:"published"`
+}
+
 // Delivery is one event delivery this instance's consumer recorded a stage-1 marker for:
 // "handled" when the handler ran in the same transaction, "duplicate" when the marker existed
 // already (the handler did not run).

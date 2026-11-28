@@ -46,6 +46,18 @@ type probe struct {
 	// driver sends Allow to every instance before a retry, so the one the hub picks succeeds.
 	allowMu sync.Mutex
 	allowed map[string]bool
+
+	// notices counts the ordinary SagaCommandFailed handlers this instance ran per saga: the
+	// local notice dispatcher runs them, never the event store.
+	noticeMu sync.Mutex
+	notices  map[string]int
+
+	// noticeWatch is what this instance's raw subscription to the family source saw of type
+	// snodra.SagaCommandFailed: the notice is local, so it stays empty.
+	noticeWatchMu  sync.Mutex
+	noticeWatch    map[string]int
+	noticeWatchSub snodra.EventSubscription
+	noticeWatchEnd context.CancelFunc
 }
 
 // newProbe builds one family's app. It does not start it: the caller starts every app together.
@@ -55,16 +67,18 @@ func newProbe(s settings, family string, logger *slog.Logger) (*probe, error) {
 		return nil, err
 	}
 	p := &probe{
-		store:      newObservedStore(store, family, newLedger()),
-		eventStore: eventStore,
-		settings:   s,
-		family:     family,
-		language:   s.language,
-		run:        s.run,
-		source:     sourceName(s.run, family),
-		database:   database,
-		logger:     logger,
-		allowed:    map[string]bool{},
+		store:       newObservedStore(store, family, newLedger()),
+		eventStore:  eventStore,
+		settings:    s,
+		family:      family,
+		language:    s.language,
+		run:         s.run,
+		source:      sourceName(s.run, family),
+		database:    database,
+		logger:      logger,
+		allowed:     map[string]bool{},
+		notices:     map[string]int{},
+		noticeWatch: map[string]int{},
 	}
 	app, err := snodra.New(
 		snodra.Service(serviceName),
@@ -166,6 +180,14 @@ func (p *probe) register() error {
 		func(app *snodra.App) error { return snodra.HandleCommand(app, p.controlSet) },
 		func(app *snodra.App) error { return snodra.HandleCommand(app, p.poison) },
 		func(app *snodra.App) error { return snodra.HandleCommand(app, p.allow) },
+		func(app *snodra.App) error { return snodra.HandleCommand(app, p.sagaPublish) },
+		func(app *snodra.App) error { return snodra.HandleCommand(app, p.sagaState) },
+		func(app *snodra.App) error { return snodra.HandleCommand(app, p.sagaDispatch) },
+		func(app *snodra.App) error { return snodra.HandleCommand(app, p.sagaLease) },
+		func(app *snodra.App) error { return snodra.HandleCommand(app, p.sagaRelease) },
+		func(app *snodra.App) error { return snodra.HandleCommand(app, p.sagaNotice) },
+		func(app *snodra.App) error { return snodra.HandleCommand(app, p.sagaSlow) },
+		func(app *snodra.App) error { return snodra.HandleCommand(app, p.sagaFail) },
 	} {
 		if err := handler(p.app); err != nil {
 			return err
@@ -179,7 +201,26 @@ func (p *probe) register() error {
 		snodra.InProcessor(processorName(p.family)), snodra.DisallowReplay()); err != nil {
 		return err
 	}
-	return snodra.HandleReset(p.app, processorName(p.family), p.onReset)
+	// The ordinary notice handler runs from the local SagaCommandFailed dispatch; it also makes
+	// the default processor report the notice type.
+	if err := snodra.HandleEvent(p.app, p.onNotice); err != nil {
+		return err
+	}
+	if err := snodra.HandleReset(p.app, processorName(p.family), p.onReset); err != nil {
+		return err
+	}
+	return snodra.HandleSaga(p.app, SagaType, func(definition *snodra.SagaDefinition[InteropSagaState]) {
+		definition.StartOn(snodra.StartedOn(
+			snodra.Associate(SagaAssociationKey, func(event SagaStarted) string { return event.OrderID }),
+			p.onSagaStarted,
+		))
+		definition.On(snodra.HandledOn(
+			snodra.Associate(SagaAssociationKey, func(event SagaAdvanced) string { return event.OrderID }),
+			p.onSagaAdvanced,
+		))
+		definition.OnDeadline(snodra.Deadline(SagaDeadlineName, p.onSagaDeadline))
+		definition.OnCommandFailed(snodra.CommandFailed(p.onSagaCommandFailed))
+	})
 }
 
 // start starts the app and, for the RabbitMQ event-store-mode processor, the subscription that
@@ -188,7 +229,10 @@ func (p *probe) start(ctx context.Context) error {
 	if err := p.app.Start(ctx); err != nil {
 		return err
 	}
-	return p.startDlt(ctx)
+	if err := p.startDlt(ctx); err != nil {
+		return err
+	}
+	return p.startNoticeWatch(ctx)
 }
 
 func (p *probe) who(context.Context, Who) (WhoReply, error) {
@@ -492,6 +536,268 @@ func (p *probe) onReset(ctx context.Context, reset snodra.ResetContext) error {
 	return nil
 }
 
+// onSagaStarted starts the shared saga, keeps the association the other language continues by,
+// and schedules the deadline the deadline scenario observes.
+func (p *probe) onSagaStarted(ctx context.Context, saga *snodra.SagaContext, state *InteropSagaState, event SagaStarted) error {
+	state.OrderID = event.OrderID
+	state.Run = event.Run
+	state.Family = event.Family
+	state.Mode = event.Mode
+	state.StartedBy = p.language
+	state.DeadlineScheduledBy = p.language
+	saga.Associate(SagaAssociationKey, event.OrderID)
+	_, err := saga.Schedule(2*time.Second, SagaDeadlineName, SagaDeadlinePayload{
+		OrderID: event.OrderID, Run: event.Run, Family: event.Family,
+	})
+	if err != nil {
+		return fmt.Errorf("schedule the saga deadline: %w", err)
+	}
+	p.logger.Info("the probe started a saga", "family", p.family, "saga", saga.SagaID(),
+		"order", event.OrderID, "mode", event.Mode, "language", p.language)
+	return nil
+}
+
+// onSagaAdvanced continues the shared saga in this instance's language and records the command
+// the lease or notice scenario needs.
+func (p *probe) onSagaAdvanced(ctx context.Context, saga *snodra.SagaContext, state *InteropSagaState, event SagaAdvanced) error {
+	state.AdvancedBy = p.language
+	state.Advances++
+	p.logger.Info("the probe continued a saga", "family", p.family, "saga", saga.SagaID(),
+		"order", event.OrderID, "mode", event.Mode, "language", p.language)
+	switch event.Mode {
+	case "lease":
+		state.SlowRecordedBy = p.language
+		if err := saga.Send(SagaSlow{SagaID: saga.SagaID(), OrderID: event.OrderID}, ""); err != nil {
+			return err
+		}
+	case "notice":
+		state.NoticeCommandType = SagaFailType
+		if err := saga.Send(SagaFail{SagaID: saga.SagaID(), OrderID: event.OrderID}, ""); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// onSagaDeadline runs when the shared scheduler claims the deadline; the language that claims it
+// is what the driver asserts.
+func (p *probe) onSagaDeadline(ctx context.Context, saga *snodra.SagaContext, state *InteropSagaState, payload SagaDeadlinePayload) error {
+	state.DeadlineFired = true
+	state.DeadlineFiredBy = p.language
+	p.logger.Info("the probe fired a saga deadline", "family", p.family, "saga", saga.SagaID(),
+		"order", payload.OrderID, "language", p.language)
+	return nil
+}
+
+// onSagaCommandFailed runs the saga's local notice handler; the ordinary handler is onNotice.
+func (p *probe) onSagaCommandFailed(ctx context.Context, saga *snodra.SagaContext, state *InteropSagaState, event snodra.SagaCommandFailed) error {
+	state.NoticeBy = p.language
+	state.NoticeReason = event.Reason.String()
+	state.NoticeCommandType = event.CommandType
+	state.NoticeKey = event.IdempotencyKey
+	state.NoticeMessage = event.Message
+	state.Notices++
+	p.logger.Info("the probe's saga received a command failure", "family", p.family,
+		"saga", saga.SagaID(), "reason", event.Reason, "language", p.language)
+	return nil
+}
+
+// onNotice is the ordinary handler of the local failure notice: the notice dispatcher calls it in
+// the relay's instance, never through the event store.
+func (p *probe) onNotice(ctx context.Context, event snodra.SagaCommandFailed) error {
+	p.noticeMu.Lock()
+	p.notices[event.SagaID]++
+	p.noticeMu.Unlock()
+	p.logger.Info("the probe's ordinary notice handler ran", "family", p.family,
+		"saga", event.SagaID, "reason", event.Reason, "language", p.language)
+	return nil
+}
+
+// sagaFail is the command that fails permanently: the saga receives an INVALID notice.
+func (p *probe) sagaFail(ctx context.Context, command SagaFail) (SagaFailReply, error) {
+	return SagaFailReply{}, snodra.InvalidRequest("the saga fail command fails on purpose")
+}
+
+// sagaSlow holds the dispatch lease while it works: it tells the driver which language's
+// instance runs it, then waits long enough for the other language's lease probe.
+func (p *probe) sagaSlow(ctx context.Context, command SagaSlow) (SagaSlowReply, error) {
+	if _, err := snodra.Send[snodra.Empty](ctx, p.app, SagaSlowStarted{
+		SagaID: command.SagaID, OrderID: command.OrderID, Language: p.language,
+	}); err != nil {
+		return SagaSlowReply{}, fmt.Errorf("tell the driver the slow command started: %w", err)
+	}
+	time.Sleep(3 * time.Second)
+	return SagaSlowReply{}, nil
+}
+
+// sagaPublish puts one saga event in the event store on the driver's key: that partition's owner
+// consumes it and runs the saga stage.
+func (p *probe) sagaPublish(ctx context.Context, command SagaPublish) (SagaPublishReply, error) {
+	if err := p.check(command.Family, command.Run); err != nil {
+		return SagaPublishReply{}, err
+	}
+	if command.ID == "" || command.Key == "" || command.OrderID == "" {
+		return SagaPublishReply{}, snodra.InvalidRequest("id, key and orderId are required")
+	}
+	var (
+		typeName string
+		payload  []byte
+		err      error
+	)
+	switch command.Kind {
+	case "started":
+		typeName = SagaStartedType
+		payload, err = json.Marshal(SagaStarted{
+			OrderID: command.OrderID, Run: p.run, Family: p.family, Mode: command.Mode,
+		})
+	case "advanced":
+		typeName = SagaAdvancedType
+		payload, err = json.Marshal(SagaAdvanced{
+			OrderID: command.OrderID, Run: p.run, Family: p.family, Mode: command.Mode,
+		})
+	default:
+		return SagaPublishReply{}, snodra.InvalidRequest("kind is started or advanced")
+	}
+	if err != nil {
+		return SagaPublishReply{}, err
+	}
+	key := command.Key
+	headers := map[string]string{
+		snodra.HeaderType:          typeName,
+		snodra.HeaderID:            command.ID,
+		snodra.HeaderCorrelationID: command.ID,
+		snodra.HeaderTimestamp:     time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
+		snodra.HeaderSource:        serviceName,
+		snodra.HeaderUserID:        "",
+	}
+	if err := p.eventStore.Publish(ctx, snodra.OutgoingEvent{
+		Source: p.source, ID: command.ID, Type: typeName, Key: &key, Headers: headers, Payload: payload,
+	}); err != nil {
+		return SagaPublishReply{}, fmt.Errorf("publish the saga event %s: %w", command.ID, err)
+	}
+	return SagaPublishReply{Instance: instanceName(p.language, p.family), Published: command.ID}, nil
+}
+
+// sagaState reads one shared saga by id, or by its live association.
+func (p *probe) sagaState(ctx context.Context, request SagaStateRequest) (SagaStateReply, error) {
+	if err := p.check(request.Family, request.Run); err != nil {
+		return SagaStateReply{}, err
+	}
+	if request.Type == "" {
+		return SagaStateReply{}, snodra.InvalidRequest("type is required")
+	}
+	var (
+		saga *snodra.Saga
+		err  error
+	)
+	if request.SagaID != "" {
+		saga, err = p.store.Sagas().Sagas.FindByID(ctx, request.SagaID)
+	} else {
+		var found []snodra.Saga
+		found, err = p.store.Sagas().Sagas.FindLive(ctx, request.Type, request.Key, request.Value)
+		if len(found) > 0 {
+			saga = &found[0]
+		}
+	}
+	if err != nil && !errors.Is(err, snodra.ErrUnsupported) {
+		return SagaStateReply{}, fmt.Errorf("read the saga: %w", err)
+	}
+	reply := SagaStateReply{Instance: instanceName(p.language, p.family)}
+	if saga == nil {
+		return reply, nil
+	}
+	reply.Found = true
+	reply.SagaID = saga.ID
+	reply.Type = saga.Type
+	reply.State = json.RawMessage(saga.State)
+	reply.Version = saga.Version
+	reply.Ended = saga.Ended
+	for _, association := range saga.Associations {
+		reply.Associations = append(reply.Associations, SagaAssociationView{Key: association.Key, Value: association.Value})
+	}
+	return reply, nil
+}
+
+// sagaDispatch reads the first pending dispatch entry and the pending count of a shared saga.
+func (p *probe) sagaDispatch(ctx context.Context, request SagaDispatchRequest) (SagaDispatchReply, error) {
+	if err := p.check(request.Family, request.Run); err != nil {
+		return SagaDispatchReply{}, err
+	}
+	if request.SagaID == "" {
+		return SagaDispatchReply{}, snodra.InvalidRequest("sagaId is required")
+	}
+	reply := SagaDispatchReply{Instance: instanceName(p.language, p.family)}
+	dispatch := p.store.Sagas().Dispatch
+	entry, err := dispatch.NextPending(ctx, request.SagaID)
+	if err != nil && !errors.Is(err, snodra.ErrUnsupported) {
+		return SagaDispatchReply{}, fmt.Errorf("read the next pending entry: %w", err)
+	}
+	if entry != nil {
+		reply.Pending = true
+		reply.EntryID = entry.ID
+		reply.Seq = entry.Seq
+		reply.Kind = string(entry.Kind)
+		reply.Type = entry.Type
+		reply.Attempts = entry.Attempts
+	}
+	pending, err := dispatch.Pending(ctx)
+	if err != nil && !errors.Is(err, snodra.ErrUnsupported) {
+		return SagaDispatchReply{}, fmt.Errorf("count the pending entries: %w", err)
+	}
+	reply.PendingCount = pending
+	return reply, nil
+}
+
+// sagaLease tries the dispatch lease of a saga as a probe owner: while a relay holds it, the
+// other language's attempt must fail.
+func (p *probe) sagaLease(ctx context.Context, request SagaLeaseRequest) (SagaLeaseReply, error) {
+	if err := p.check(request.Family, request.Run); err != nil {
+		return SagaLeaseReply{}, err
+	}
+	if request.SagaID == "" || request.Owner == "" || request.UntilMs <= 0 {
+		return SagaLeaseReply{}, snodra.InvalidRequest("sagaId, owner and untilMs are required")
+	}
+	now := time.Now()
+	taken, err := p.store.Sagas().Dispatch.ClaimLease(ctx, request.SagaID, request.Owner, now, time.UnixMilli(request.UntilMs))
+	if err != nil && !errors.Is(err, snodra.ErrUnsupported) {
+		return SagaLeaseReply{}, fmt.Errorf("claim the dispatch lease: %w", err)
+	}
+	return SagaLeaseReply{Instance: instanceName(p.language, p.family), Taken: taken}, nil
+}
+
+// sagaRelease releases a probe owner's dispatch lease.
+func (p *probe) sagaRelease(ctx context.Context, request SagaReleaseRequest) (SagaReleaseReply, error) {
+	if err := p.check(request.Family, request.Run); err != nil {
+		return SagaReleaseReply{}, err
+	}
+	if request.SagaID == "" || request.Owner == "" {
+		return SagaReleaseReply{}, snodra.InvalidRequest("sagaId and owner are required")
+	}
+	// ReleaseLease has no result: read the lease through a claim first? The port releases when
+	// the owner holds it and has no answer, so report that the call was made.
+	if err := p.store.Sagas().Dispatch.ReleaseLease(ctx, request.SagaID, request.Owner); err != nil && !errors.Is(err, snodra.ErrUnsupported) {
+		return SagaReleaseReply{}, fmt.Errorf("release the dispatch lease: %w", err)
+	}
+	return SagaReleaseReply{Instance: instanceName(p.language, p.family), Released: true}, nil
+}
+
+// sagaNotice reads the local notice count and the event-store deliveries of one notice id.
+func (p *probe) sagaNotice(ctx context.Context, request SagaNoticeRequest) (SagaNoticeReply, error) {
+	if err := p.check(request.Family, request.Run); err != nil {
+		return SagaNoticeReply{}, err
+	}
+	p.noticeMu.Lock()
+	ordinary := p.notices[request.SagaID]
+	p.noticeMu.Unlock()
+	p.noticeWatchMu.Lock()
+	published := p.noticeWatch[request.NoticeID]
+	p.noticeWatchMu.Unlock()
+	return SagaNoticeReply{
+		Instance: instanceName(p.language, p.family), Language: p.language,
+		Ordinary: ordinary, Published: published,
+	}, nil
+}
+
 // startDlt subscribes to the family's dead-letter source when its processor uses the event-store
 // mode: the subscription receives what the processor published there, with the six snodra-dlt-*
 // headers, for the driver to assert.
@@ -542,6 +848,55 @@ func (p *probe) startDlt(ctx context.Context) error {
 	return nil
 }
 
+// startNoticeWatch reads the family source as a raw subscription and records a published
+// snodra.SagaCommandFailed, if any: the notice must stay local, so this stays empty.
+func (p *probe) startNoticeWatch(ctx context.Context) error {
+	spec := snodra.SubscriptionSpec{
+		Name:   serviceName + ".interop-" + p.family + "-notice-" + p.language,
+		Source: p.source,
+	}
+	sub, err := p.eventStore.Subscribe(ctx, spec)
+	if err != nil {
+		return fmt.Errorf("subscribe to the %s source for notices: %w", p.family, err)
+	}
+	watchCtx, stop := context.WithCancel(ctx)
+	p.noticeWatchSub = sub
+	p.noticeWatchEnd = stop
+	go func() {
+		for {
+			next, err := sub.Next(watchCtx)
+			if err != nil {
+				return
+			}
+			delivery, ok := next.(snodra.Delivery)
+			if !ok {
+				continue
+			}
+			if delivery.Headers[snodra.HeaderType] == sagaCommandFailedType {
+				id := delivery.Headers[snodra.HeaderID]
+				p.noticeWatchMu.Lock()
+				p.noticeWatch[id]++
+				p.noticeWatchMu.Unlock()
+			}
+			_ = sub.Ack(delivery.Segment, delivery.Position)
+		}
+	}()
+	return nil
+}
+
+// stopNoticeWatch ends the notice subscription before the event store closes.
+func (p *probe) stopNoticeWatch(ctx context.Context) {
+	if p.noticeWatchEnd == nil {
+		return
+	}
+	p.noticeWatchEnd()
+	if p.noticeWatchSub != nil {
+		_ = p.noticeWatchSub.Close(ctx)
+	}
+	p.noticeWatchSub = nil
+	p.noticeWatchEnd = nil
+}
+
 // stopDlt ends the dead-letter subscription before the event store closes.
 func (p *probe) stopDlt(ctx context.Context) {
 	if p.dltEnd == nil {
@@ -580,6 +935,7 @@ func (p *probe) newID(publisher string) string {
 func (p *probe) close(logger *slog.Logger) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	p.stopDlt(ctx)
+	p.stopNoticeWatch(ctx)
 	cancel()
 	if p.eventStore != nil {
 		if closer, ok := p.eventStore.(interface{ Close() error }); ok {

@@ -22,7 +22,13 @@ The service answers the harness's commands (all neutral orders-service shapes):
   state directly (the other language's instance reads it on its own poll);
 - `orders.interop.Poison` — publish an event its handler rejects until the id is allowed;
 - `orders.interop.Allow` — let this instance's handlers take a poison id, so the instance the hub
-  picks for a retry can handle it.
+  picks for a retry can handle it;
+- `orders.interop.SagaPublish` — publish a saga started/advanced event on a chosen partition;
+- `orders.interop.SagaState` — read a shared saga by id or association (id, state, version, ended);
+- `orders.interop.SagaDispatch` — the first pending saga dispatch entry and the pending count;
+- `orders.interop.SagaLease` / `SagaRelease` — try or release another relay's dispatch lease;
+- `orders.interop.SagaNotice` — this instance's ordinary notice count and whether its notice watch
+  saw the notice id in the event store.
 
 Every family registers a processor `<service>.interop-<family>` and a reset handler, and a second
 `OrderPlaced` handler with `DisallowReplay` proves a replay leaves it out. The `rabbitmq` family uses
@@ -31,10 +37,18 @@ the event-store dead-letter mode: its processor publishes a record no handler ca
 `snodra-dlt-*` headers, the key and the payload. The other families park collection dead letters,
 which the probe's state lists and the driver retries through the hub.
 
+Every family also registers the shared saga `interop-saga`: a start handler that associates `orderId`
+and schedules `saga-timeout`, an advanced handler that records a slow command or a command that
+fails with `INVALID`, a deadline handler and the local `SagaCommandFailed` handler. The same state
+fields and wire names are used in both languages, so a saga Go starts is continued by Python and the
+reverse. The slow command's handler tells the driver (`store.runner.SlowStarted`) which language ran
+it; the notice handler is ordinary (local dispatch); a raw subscription to the family source records
+any published `snodra.SagaCommandFailed` (there must be none).
+
 The probe observes the library's processed-event markers by wrapping the message store's processed
 port; the consumer, its transaction and the relay are the library's. The harness starts and stops the
 service and creates its topics, streams and databases; it runs with `GO_SRC` or `GO_REF` from
-`interop/run.sh`. The processor-control scenarios need `GO_SRC` (and `PYTHON_SRC` for the other
-language) until a release carries those ports: the released tags answer the level-2 commands only.
+`interop/run.sh`. The released tags carry the level-3 probe; the saga scenarios need `GO_SRC` (and
+`PYTHON_SRC` for the other language) until a release carries the saga commands.
 
 Tests: `go test -race ./...` here (the probe's settings, its ledger and its outbox append; no Docker).
