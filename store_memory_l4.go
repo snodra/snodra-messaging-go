@@ -352,13 +352,10 @@ func (q memorySagaDispatch) DueSagas(ctx context.Context, now time.Time, except 
 	q.store.mu.Lock()
 	defer q.store.mu.Unlock()
 	q.store.initLocked()
-	type first struct {
-		entry SagaDispatch
-	}
 	firsts := map[string]SagaDispatch{}
 	for _, row := range q.store.data.dispatch.rows {
 		entry := row.value
-		if entry.DispatchedAt.IsZero() == false || entry.FailedAt.IsZero() == false {
+		if !entry.DispatchedAt.IsZero() || !entry.FailedAt.IsZero() {
 			continue
 		}
 		current, seen := firsts[entry.SagaID]

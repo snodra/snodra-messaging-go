@@ -61,7 +61,7 @@ func newProcessorSession(p *processor, sub EventSubscription) *processorSession 
 // skips a duplicate, and a record that exhausts its attempts is parked as a dead letter.
 //
 // Stage 1 is the processor's event handlers. Stage 2 (the sagas) runs only in the default
-// processor and arrives with the saga support; a named processor never has one.
+// processor; a named processor never has one.
 func (a *App) consumeProcessor(ctx context.Context, p *processor) {
 	p.run.markStarted()
 	defer p.run.markStopped()
@@ -238,9 +238,19 @@ func (a *App) handleDelivery(ctx context.Context, s *processorSession, d Deliver
 		return a.parkInvalid(ctx, s, d, "record without type header")
 	}
 	handlers := s.p.handlers[typeName]
+	id := d.Headers[HeaderID]
+	if strings.TrimSpace(id) == "" {
+		id = s.p.subscription.Source + "-" + d.Segment + "-" + d.Position
+	}
 	if len(handlers) == 0 {
-		a.log.Debug("an event type has no handler in the processor; acknowledging it",
-			"processor", s.p.name, "type", typeName)
+		if a.sagaRuntime != nil && a.sagaRuntime.interested(typeName) && s.p.name == DefaultProcessor {
+			if err := a.runSagas(s.p, d, id, typeName); err != nil {
+				return err
+			}
+		} else {
+			a.log.Debug("an event type has no handler in the processor; acknowledging it",
+				"processor", s.p.name, "type", typeName)
+		}
 		a.acknowledge(s.p, s.sub, d)
 		return nil
 	}
@@ -250,74 +260,78 @@ func (a *App) handleDelivery(ctx context.Context, s *processorSession, d Deliver
 			"segment", d.Segment, "position", d.Position)
 		return a.parkInvalid(ctx, s, d, "payload is not a JSON object")
 	}
-	id := d.Headers[HeaderID]
-	if strings.TrimSpace(id) == "" {
-		id = s.p.subscription.Source + "-" + d.Segment + "-" + d.Position
-	}
 	scope := eventHandling(id, typeName, d.Headers)
 	replay := a.inReplay(s.p, d)
-	handled, err := a.sequence(ctx, s, d, typeName, replay)
+	handled, work, err := a.sequence(ctx, s, d, typeName, replay)
 	if err != nil {
 		return err
 	}
 	if handled {
+		// Stage 2 sees the record too: a sequenced one never ran stage 1, and a record whose
+		// letter exists may have crashed between stage 1 and stage 2. Its own markers make a
+		// repeat harmless.
+		if err := a.runSagas(s.p, d, id, typeName); err != nil {
+			return err
+		}
+		if work != nil {
+			return a.toSink(ctx, s, d, work)
+		}
+		a.acknowledge(s.p, s.sub, d)
 		return nil
 	}
 	return a.attemptRecord(ctx, s, d, id, typeName, scope, replay)
 }
 
-// sequence parks a record SEQUENCED when an earlier letter of its key is parked, and
-// acknowledges one whose own letter exists already (parked before a crash). handled reports that
-// the record is done with; err is a store failure (the record is not acknowledged).
-func (a *App) sequence(ctx context.Context, s *processorSession, d Delivery, typeName string, replay bool) (handled bool, err error) {
+// sequence parks a record SEQUENCED when an earlier letter of its key is parked, and finishes
+// one whose own letter exists already (parked before a crash). handled reports that stage 1 is
+// skipped; work, when not nil, parks the record (the caller runs stage 2 first); err is a store
+// failure (the record is not acknowledged).
+func (a *App) sequence(ctx context.Context, s *processorSession, d Delivery, typeName string, replay bool) (handled bool, work func(context.Context) error, err error) {
 	if a.cfg.events.deadLetterMode != DeadLetterModeCollection || d.Key == nil {
-		return false, nil
+		return false, nil, nil
 	}
 	if len(s.p.handlers[typeName]) == 0 {
-		return false, nil // only stage 1 is sequenced
+		return false, nil, nil // only stage 1 is sequenced
 	}
 	key := *d.Key
 	if _, unknown := s.keysUnknown[d.Segment]; !unknown {
 		if _, parked := s.parkedKeys[key]; !parked {
-			return false, nil
+			return false, nil, nil
 		}
 	}
 	head, ok, err := a.cfg.store.DeadLetters().Head(ctx, s.p.name, key)
 	if err != nil {
 		if errors.Is(err, ErrUnsupported) {
-			return false, nil // a store without dead letters keeps consuming
+			return false, nil, nil // a store without dead letters keeps consuming
 		}
 		s.p.run.markFailed(fmt.Errorf("could not check the dead letters of key %q: %w", key, err), a.now())
-		return false, err
+		return false, nil, err
 	}
 	if !ok {
 		delete(s.parkedKeys, key) // retried, discarded or expired, here or on another instance
-		return false, nil
+		return false, nil, nil
 	}
 	own := LetterID(s.p.name, s.p.subscription.Source, d.Segment, d.Position)
 	if head == own {
-		a.log.Info("a record's dead letter exists already; acknowledging the record",
+		a.log.Info("a record's dead letter exists already; finishing it",
 			"processor", s.p.name, "letter", own)
-		a.acknowledge(s.p, s.sub, d)
-		return true, nil
+		return true, nil, nil
 	}
 	letter, err := a.cfg.store.DeadLetters().Get(ctx, own)
 	if err != nil && !errors.Is(err, ErrUnsupported) {
 		s.p.run.markFailed(fmt.Errorf("could not read the record's dead letter: %w", err), a.now())
-		return false, err
+		return false, nil, err
 	}
 	if letter != nil {
-		a.log.Info("a record's dead letter exists already; acknowledging the record",
+		a.log.Info("a record's dead letter exists already; finishing it",
 			"processor", s.p.name, "letter", own)
-		a.acknowledge(s.p, s.sub, d)
-		return true, nil
+		return true, nil, nil
 	}
-	// The sagas of `default` see a SEQUENCED record even though stage 1 waits; they arrive with
-	// the saga support.
+	// The sagas of `default` see a SEQUENCED record even though stage 1 waits.
 	sequenced := a.newDeadLetter(s.p, d, DeadLetterSequenced, SequencedDeadLetterError(head), 0, head, replay)
 	a.log.Info("a record is parked SEQUENCED behind an earlier letter",
 		"processor", s.p.name, "key", key, "letter", sequenced.ID, "blockedBy", head)
-	return true, a.toSink(ctx, s, d, a.parkWork(s, d, sequenced))
+	return true, a.parkWork(s, d, sequenced), nil
 }
 
 // attemptRecord runs the record's stage 1 until it succeeds, a duplicate marker skips it, or its
@@ -332,11 +346,17 @@ func (a *App) attemptRecord(ctx context.Context, s *processorSession, d Delivery
 		if duplicate {
 			a.log.Debug("a redelivered event was handled before; skipping it",
 				"processor", s.p.name, "type", typeName, "id", id)
+			if err := a.runSagas(s.p, d, id, typeName); err != nil {
+				return err
+			}
 			s.p.processedTotal.Add(1)
 			a.acknowledge(s.p, s.sub, d)
 			return nil
 		}
 		if done {
+			if err := a.runSagas(s.p, d, id, typeName); err != nil {
+				return err
+			}
 			s.p.processedTotal.Add(1)
 			a.acknowledge(s.p, s.sub, d)
 			return nil
@@ -351,9 +371,15 @@ func (a *App) attemptRecord(ctx context.Context, s *processorSession, d Delivery
 		var undecodable *decodeError
 		if errors.As(failure, &undecodable) {
 			// The payload cannot be read as the handler's message type: no retry can change it.
+			if err := a.runSagas(s.p, d, id, typeName); err != nil {
+				return err
+			}
 			return a.parkFailed(ctx, s, d, typeName, failure, attempt, true, replay)
 		}
 		if attempt >= settings.consumerTries {
+			if err := a.runSagas(s.p, d, id, typeName); err != nil {
+				return err
+			}
 			return a.parkFailed(ctx, s, d, typeName, failure, attempt, false, replay)
 		}
 		a.log.Warn("an event handler failed; trying again",
@@ -557,4 +583,22 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	case <-timer.C:
 		return true
 	}
+}
+
+// runSagas runs the saga stage after stage 1, for the default processor's delivery d.
+func (a *App) runSagas(p *processor, d Delivery, id, typeName string) error {
+	if a.sagaRuntime == nil || p.name != DefaultProcessor || !a.sagaRuntime.interested(typeName) {
+		return nil
+	}
+	correlation := d.Headers[HeaderCorrelationID]
+	if correlation == "" {
+		correlation = id
+	}
+	// Stage 1 runs on the app's handler context, cancelled only at the hard stop; stage 2 does
+	// too, so a subscription reset cannot abandon half of one record's work.
+	_, err := a.sagaRuntime.process(a.handlerCtx, sagaMessage{
+		id: id, typeName: typeName, correlationID: correlation,
+		traceparent: validTraceparent(d.Headers), headers: copyStringMap(d.Headers),
+	}, d.Payload)
+	return err
 }

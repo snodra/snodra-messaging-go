@@ -279,6 +279,9 @@ func (a *App) freezeProcessors() {
 	for name := range a.eventHandlers {
 		names = append(names, name)
 	}
+	if len(a.sagaTypes) > 0 && !slices.Contains(names, DefaultProcessor) {
+		names = append(names, DefaultProcessor)
+	}
 	slices.Sort(names)
 	if slices.Contains(names, DefaultProcessor) {
 		names = append([]string{DefaultProcessor}, slices.DeleteFunc(names, func(name string) bool {

@@ -58,6 +58,10 @@ type App struct {
 	eventHandlers map[string]map[string][]*eventHandler
 	processors    []*processor
 	resetHandlers map[string][]*resetHandler
+	// sagas are the registered saga types by name, fixed by Start; sagaRuntime is their stage 2.
+	sagaTypes   []*sagaTypeRuntime
+	sagaByName  map[string]*sagaTypeRuntime
+	sagaRuntime *sagaRuntime
 	// now is the application's clock: what the library stamps the times it sets itself with,
 	// and what a store implementing StoreLifecycle gets.
 	now       func() time.Time
@@ -155,6 +159,7 @@ func New(opts ...Option) (*App, error) {
 		handlers:       map[string]*handler{},
 		eventHandlers:  map[string]map[string][]*eventHandler{},
 		resetHandlers:  map[string][]*resetHandler{},
+		sagaByName:     map[string]*sagaTypeRuntime{},
 		now:            time.Now,
 		calls:          newPendingCalls(),
 		running:        newRunningRequests(),
@@ -203,6 +208,9 @@ func (a *App) start(ctx context.Context) error {
 		return err
 	}
 	a.freezeTypes()
+	if len(a.sagaTypes) > 0 {
+		a.sagaRuntime = newSagaRuntime(a)
+	}
 	if err := a.prepareStore(ctx); err != nil {
 		return err
 	}
@@ -234,7 +242,7 @@ func (a *App) checkEventStartup() error {
 	if err := a.checkResetStartup(); err != nil {
 		return err
 	}
-	if len(a.eventHandlers) == 0 {
+	if len(a.eventHandlers) == 0 && len(a.sagaTypes) == 0 {
 		return nil
 	}
 	names := make([]string, 0, len(a.eventHandlers))
@@ -251,12 +259,20 @@ func (a *App) checkEventStartup() error {
 		}
 	}
 	if a.cfg.store == nil {
-		return fmt.Errorf("snodra: the event handler for %s needs a message store: set one with WithStore "+
-			"(WithStore(snodra.NewMemoryMessageStore()) runs the in-memory one, not durable: tests and local runs)", first)
+		what := "the event handler for " + first
+		if len(a.eventHandlers) == 0 {
+			what = "the saga"
+		}
+		return fmt.Errorf("snodra: %s needs a message store: set one with WithStore "+
+			"(WithStore(snodra.NewMemoryMessageStore()) runs the in-memory one, not durable: tests and local runs)", what)
 	}
 	if a.cfg.eventStore == nil {
-		return fmt.Errorf("snodra: the event handler for %s needs an event store: set one with WithEventStore "+
-			"(WithEventStore(snodra.NewMemoryEventStore()) runs the in-memory one, not durable: tests and local runs)", first)
+		what := "the event handler for " + first
+		if len(a.eventHandlers) == 0 {
+			what = "the saga"
+		}
+		return fmt.Errorf("snodra: %s needs an event store: set one with WithEventStore "+
+			"(WithEventStore(snodra.NewMemoryEventStore()) runs the in-memory one, not durable: tests and local runs)", what)
 	}
 	return nil
 }
@@ -314,6 +330,18 @@ func (a *App) startBackground() {
 			relay := newOutboxRelay(a)
 			a.background("the outbox relay", func(ctx context.Context) error {
 				relay.run(ctx)
+				return nil
+			})
+		}
+		if len(a.sagaTypes) > 0 {
+			relay := newSagaRelay(a)
+			a.background("the saga dispatch relay", func(ctx context.Context) error {
+				relay.run(ctx)
+				return nil
+			})
+			scheduler := newDeadlineScheduler(a)
+			a.background("the saga deadline scheduler", func(ctx context.Context) error {
+				scheduler.run(ctx)
 				return nil
 			})
 		}

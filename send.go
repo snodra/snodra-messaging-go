@@ -202,13 +202,19 @@ func prepare(ctx context.Context, app *App, kind hubpb.RequestKind, mode hubpb.R
 
 // prepareTyped is prepare for a message named typ.
 func prepareTyped(ctx context.Context, app *App, typ string, kind hubpb.RequestKind, mode hubpb.RequestMode, m Message, opts []SendOption) (*outgoing, error) {
-	cfg, policy, err := sendSettings(app, typ, opts)
-	if err != nil {
-		return nil, err
-	}
 	payload, err := app.cfg.codec.Marshal(m)
 	if err != nil {
 		return nil, fmt.Errorf("snodra: cannot encode %s: %w", typ, err)
+	}
+	return preparePayload(ctx, app, typ, kind, mode, payload, opts)
+}
+
+// preparePayload is prepareTyped with the payload already encoded: the relay sends a saga's
+// stored bytes without decoding them.
+func preparePayload(ctx context.Context, app *App, typ string, kind hubpb.RequestKind, mode hubpb.RequestMode, payload []byte, opts []SendOption) (*outgoing, error) {
+	cfg, policy, err := sendSettings(app, typ, opts)
+	if err != nil {
+		return nil, err
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrNeverSent, err)
@@ -260,6 +266,50 @@ func prepareTyped(ctx context.Context, app *App, typ string, kind hubpb.RequestK
 		out.budget = retryBudget(app.ackFor(tmpl.GetRoutingKey()), typ, chosen)
 	}
 	return out, nil
+}
+
+// sendRawCommand sends a command by its wire type and stored payload, the way a saga relay does:
+// no sender retry (the relay owns them), the caller's correlation/trace in ctx, and a local
+// handler when this service has one and does not route every request through the hub.
+func sendRawCommand(ctx context.Context, app *App, typ string, payload []byte, routingKey string, headers map[string]string, timeout time.Duration) error {
+	opts := []SendOption{NoRetry()}
+	if routingKey != "" {
+		opts = append(opts, RoutingKey(routingKey))
+	}
+	if timeout > 0 {
+		opts = append(opts, Timeout(timeout))
+	}
+	for name, value := range headers {
+		switch name {
+		case sagaCorrelationHeader, sagaTraceparentHeader:
+			continue // carried by the handling context, not as caller headers
+		}
+		opts = append(opts, Header(name, value))
+	}
+	if !app.cfg.alwaysRouteThroughHub {
+		app.mu.Lock()
+		h := app.handlers[typ]
+		app.mu.Unlock()
+		if h != nil && h.kind == kindCommand {
+			_, werr := app.serveLocally(ctx, h, hubpb.RequestKind_COMMAND, typ, payload, headers)
+			if werr != nil {
+				return errorFromWire(typ, werr)
+			}
+			return nil
+		}
+	}
+	out, err := preparePayload(ctx, app, typ, hubpb.RequestKind_COMMAND, hubpb.RequestMode_UNARY, payload, opts)
+	if err != nil {
+		return err
+	}
+	_, err = retrying(ctx, hubpb.RequestKind_COMMAND, out.policy, out.budget, out.chosen, func(timeout time.Duration) ([]byte, error) {
+		ans, err := app.attempt(ctx, out.tmpl, timeout)
+		if err != nil {
+			return nil, err
+		}
+		return answered(out.typ, ans)
+	})
+	return err
 }
 
 // sendSettings are what opts set for a call of typ, and its retry policy, or why the call is

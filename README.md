@@ -40,6 +40,12 @@ retries and timeouts.
   `HandleReset` handlers when anything replays, deletes the replayed range's markers, and replays from earliest, latest,
   timestamp or explicit positions. `DisallowReplay()` keeps a handler out of a replay, and all control runs off the hub
   read loop.
+- **Sagas**: `HandleSaga` runs in the `default` processor after the event handlers (stage 2), with associations, an
+  optimistic state version, parked failures, deadlines and the local `SagaCommandFailed` notice. A saga records what
+  it sends; a relay dispatches each saga's commands and events after its transaction committed, in order under a
+  lease. A command is sent by its wire type with `idempotency-key`/`saga-id`, the handled event's correlation and
+  trace, and no caller identity; transient failures are retried by the relay, permanent ones come back as the notice.
+  A deadline scheduler claims each due deadline with a lease, runs its handler and marks it fired in one transaction.
 - **Dead letters**: a record that exhausts its attempts is parked according to `DeadLetterMode`
   (`SNODRA_DEAD_LETTER_MODE`): `collection` keeps it in the message store's dead letters, with list, retry,
   retry-all and discard driven from the dashboard; `event-store` publishes it to the `<source>.dlt` source with the
@@ -53,8 +59,9 @@ retries and timeouts.
   handlers.
 - **Telemetry** behind an interface, with an OpenTelemetry implementation in the separate `observability` module.
 - **Feature level 3**, proved by the 33 level-1 checks of the conformance runner and by the level-2 and level-3
-  event-store and message-store kits. The saga store ports and the level-4 store checks are implemented on `main`; the
-  saga runtime (level 4) is not in it yet.
+  event-store and message-store kits. The saga store ports, the level-4 store checks and the saga runtime (stage 2,
+  the dispatch relay, failure notices and deadlines) are implemented on `main`; level 4 is not claimed or released
+  yet.
 
 ## Install
 

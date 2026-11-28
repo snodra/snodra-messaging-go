@@ -39,8 +39,25 @@ type eventSettings struct {
 	sendTimeout     time.Duration // the longest one publish may take
 	consumerTries   int           // handler invocations per record, the first included
 	consumerBackoff time.Duration // between two invocations of one record
-	resubscribeMin  time.Duration // after a subscription failed, before subscribing again
-	resubscribeMax  time.Duration // the cap of that wait, and what counts as a stable subscription
+	// The saga stage: conflict attempts and the handler retry, and the stage's backoff.
+	sagaAttempts        int
+	sagaHandlerAttempts int
+	sagaHandlerPause    time.Duration
+	sagaInitialBackoff  time.Duration
+	sagaMaxBackoff      time.Duration
+	// The dispatch relay and the deadline scheduler.
+	sagaPoll          time.Duration
+	sagaLease         time.Duration
+	sagaSendTimeout   time.Duration
+	sagaDispatchTries int
+	sagaDispatchWait  time.Duration
+	sagaDispatchMax   time.Duration
+	sagaBatch         int
+	sagaParallelism   int
+	deadlinePoll      time.Duration
+	deadlineLease     time.Duration
+	resubscribeMin    time.Duration // after a subscription failed, before subscribing again
+	resubscribeMax    time.Duration // the cap of that wait, and what counts as a stable subscription
 	// deadLetterMode is where a record that exhausts its attempts goes: a letter in the message
 	// store ("collection", the default). The event store's dead-letter source and logging arrive
 	// with the remaining modes.
@@ -56,19 +73,34 @@ type eventSettings struct {
 // defaultEventSettings are the shipped defaults, the reference libraries' values.
 func defaultEventSettings() eventSettings {
 	return eventSettings{
-		source:          DefaultEventsSource,
-		outboxEnabled:   true,
-		consumerEnabled: true,
-		poll:            200 * time.Millisecond,
-		batch:           100,
-		outboxAttempts:  10,
-		lease:           120 * time.Second,
-		sendTimeout:     40 * time.Second,
-		consumerTries:   5,
-		consumerBackoff: time.Second,
-		resubscribeMin:  time.Second,
-		resubscribeMax:  30 * time.Second,
-		deadLetterMode:  DeadLetterModeCollection,
+		source:              DefaultEventsSource,
+		outboxEnabled:       true,
+		consumerEnabled:     true,
+		poll:                200 * time.Millisecond,
+		batch:               100,
+		outboxAttempts:      10,
+		lease:               120 * time.Second,
+		sendTimeout:         40 * time.Second,
+		consumerTries:       5,
+		consumerBackoff:     time.Second,
+		sagaAttempts:        5,
+		sagaHandlerAttempts: 2,
+		sagaHandlerPause:    50 * time.Millisecond,
+		sagaInitialBackoff:  200 * time.Millisecond,
+		sagaMaxBackoff:      5 * time.Second,
+		sagaPoll:            500 * time.Millisecond,
+		sagaLease:           30 * time.Second,
+		sagaSendTimeout:     time.Minute,
+		sagaDispatchTries:   10,
+		sagaDispatchWait:    time.Second,
+		sagaDispatchMax:     5 * time.Minute,
+		sagaBatch:           100,
+		sagaParallelism:     4,
+		deadlinePoll:        time.Second,
+		deadlineLease:       30 * time.Second,
+		resubscribeMin:      time.Second,
+		resubscribeMax:      30 * time.Second,
+		deadLetterMode:      DeadLetterModeCollection,
 		// The references keep a letter for 30 days (snodra.messaging.events.dead-letter.retention).
 		deadLetterRetention: 30 * 24 * time.Hour,
 		storeInitSchema:     true,
@@ -354,4 +386,18 @@ func eventHandling(eventID, typeName string, headers map[string]string) *handlin
 func isJSONObject(payload []byte) bool {
 	trimmed := bytes.TrimSpace(payload)
 	return len(trimmed) > 0 && trimmed[0] == '{' && json.Valid(trimmed)
+}
+
+// sagaBackoff is the wait after conflict attempt n (2 or more): the initial backoff doubling,
+// capped, with the reference libraries' ±20% jitter.
+func (s eventSettings) sagaBackoff(attempt int) time.Duration {
+	wait := s.sagaInitialBackoff
+	for i := 2; i < attempt; i++ {
+		wait *= 2
+		if wait >= s.sagaMaxBackoff {
+			wait = s.sagaMaxBackoff
+			break
+		}
+	}
+	return jitteredWait(wait, s.sagaMaxBackoff)
 }
