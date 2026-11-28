@@ -291,6 +291,7 @@ type SagaStateReply struct {
 	State        json.RawMessage       `json:"state,omitempty"`
 	Version      int64                 `json:"version"`
 	Ended        bool                  `json:"ended"`
+	Live         int                   `json:"live"`
 	Associations []SagaAssociationView `json:"associations,omitempty"`
 }
 
@@ -356,10 +357,9 @@ type SagaReleaseReply struct {
 
 // SagaNoticeRequest reads a probe instance's local view of one saga's failure notice.
 type SagaNoticeRequest struct {
-	Family   string `json:"family"`
-	Run      string `json:"run"`
-	SagaID   string `json:"sagaId"`
-	NoticeID string `json:"noticeId"`
+	Family string `json:"family"`
+	Run    string `json:"run"`
+	SagaID string `json:"sagaId"`
 }
 
 func (SagaNoticeRequest) MessageType() string { return "orders.interop.SagaNotice" }

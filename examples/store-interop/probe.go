@@ -546,11 +546,12 @@ func (p *probe) onSagaStarted(ctx context.Context, saga *snodra.SagaContext, sta
 	state.StartedBy = p.language
 	state.DeadlineScheduledBy = p.language
 	saga.Associate(SagaAssociationKey, event.OrderID)
-	_, err := saga.Schedule(2*time.Second, SagaDeadlineName, SagaDeadlinePayload{
-		OrderID: event.OrderID, Run: event.Run, Family: event.Family,
-	})
-	if err != nil {
-		return fmt.Errorf("schedule the saga deadline: %w", err)
+	if event.Mode == "deadline" {
+		if _, err := saga.Schedule(2*time.Second, SagaDeadlineName, SagaDeadlinePayload{
+			OrderID: event.OrderID, Run: event.Run, Family: event.Family,
+		}); err != nil {
+			return fmt.Errorf("schedule the saga deadline: %w", err)
+		}
 	}
 	p.logger.Info("the probe started a saga", "family", p.family, "saga", saga.SagaID(),
 		"order", event.OrderID, "mode", event.Mode, "language", p.language)
@@ -626,7 +627,8 @@ func (p *probe) sagaSlow(ctx context.Context, command SagaSlow) (SagaSlowReply, 
 	}); err != nil {
 		return SagaSlowReply{}, fmt.Errorf("tell the driver the slow command started: %w", err)
 	}
-	time.Sleep(3 * time.Second)
+	// The driver answers that Send only after it has probed the lease from the other language:
+	// the command stays in flight, and the relay holds the saga's lease, until then.
 	return SagaSlowReply{}, nil
 }
 
@@ -689,12 +691,17 @@ func (p *probe) sagaState(ctx context.Context, request SagaStateRequest) (SagaSt
 	var (
 		saga *snodra.Saga
 		err  error
+		live int
 	)
 	if request.SagaID != "" {
 		saga, err = p.store.Sagas().Sagas.FindByID(ctx, request.SagaID)
+		if saga != nil && !saga.Ended {
+			live = 1
+		}
 	} else {
 		var found []snodra.Saga
 		found, err = p.store.Sagas().Sagas.FindLive(ctx, request.Type, request.Key, request.Value)
+		live = len(found)
 		if len(found) > 0 {
 			saga = &found[0]
 		}
@@ -702,7 +709,7 @@ func (p *probe) sagaState(ctx context.Context, request SagaStateRequest) (SagaSt
 	if err != nil && !errors.Is(err, snodra.ErrUnsupported) {
 		return SagaStateReply{}, fmt.Errorf("read the saga: %w", err)
 	}
-	reply := SagaStateReply{Instance: instanceName(p.language, p.family)}
+	reply := SagaStateReply{Instance: instanceName(p.language, p.family), Live: live}
 	if saga == nil {
 		return reply, nil
 	}
@@ -773,12 +780,22 @@ func (p *probe) sagaRelease(ctx context.Context, request SagaReleaseRequest) (Sa
 	if request.SagaID == "" || request.Owner == "" {
 		return SagaReleaseReply{}, snodra.InvalidRequest("sagaId and owner are required")
 	}
-	// ReleaseLease has no result: read the lease through a claim first? The port releases when
-	// the owner holds it and has no answer, so report that the call was made.
-	if err := p.store.Sagas().Dispatch.ReleaseLease(ctx, request.SagaID, request.Owner); err != nil && !errors.Is(err, snodra.ErrUnsupported) {
+	dispatch := p.store.Sagas().Dispatch
+	if err := dispatch.ReleaseLease(ctx, request.SagaID, request.Owner); err != nil && !errors.Is(err, snodra.ErrUnsupported) {
 		return SagaReleaseReply{}, fmt.Errorf("release the dispatch lease: %w", err)
 	}
-	return SagaReleaseReply{Instance: instanceName(p.language, p.family), Released: true}, nil
+	// ReleaseLease has no result: claim the lease with a witness owner, which succeeds only when
+	// the release actually freed it, and release the witness again.
+	witness := request.Owner + "-witness"
+	now := time.Now()
+	taken, err := dispatch.ClaimLease(ctx, request.SagaID, witness, now, now.Add(5*time.Second))
+	if err != nil && !errors.Is(err, snodra.ErrUnsupported) {
+		return SagaReleaseReply{}, fmt.Errorf("verify the release: %w", err)
+	}
+	if taken {
+		_ = dispatch.ReleaseLease(ctx, request.SagaID, witness)
+	}
+	return SagaReleaseReply{Instance: instanceName(p.language, p.family), Released: taken}, nil
 }
 
 // sagaNotice reads the local notice count and the event-store deliveries of one notice id.
@@ -790,7 +807,7 @@ func (p *probe) sagaNotice(ctx context.Context, request SagaNoticeRequest) (Saga
 	ordinary := p.notices[request.SagaID]
 	p.noticeMu.Unlock()
 	p.noticeWatchMu.Lock()
-	published := p.noticeWatch[request.NoticeID]
+	published := p.noticeWatch[request.SagaID]
 	p.noticeWatchMu.Unlock()
 	return SagaNoticeReply{
 		Instance: instanceName(p.language, p.family), Language: p.language,
@@ -873,10 +890,14 @@ func (p *probe) startNoticeWatch(ctx context.Context) error {
 				continue
 			}
 			if delivery.Headers[snodra.HeaderType] == sagaCommandFailedType {
-				id := delivery.Headers[snodra.HeaderID]
-				p.noticeWatchMu.Lock()
-				p.noticeWatch[id]++
-				p.noticeWatchMu.Unlock()
+				var notice struct {
+					SagaID string `json:"sagaId"`
+				}
+				if err := json.Unmarshal(delivery.Payload, &notice); err == nil && notice.SagaID != "" {
+					p.noticeWatchMu.Lock()
+					p.noticeWatch[notice.SagaID]++
+					p.noticeWatchMu.Unlock()
+				}
 			}
 			_ = sub.Ack(delivery.Segment, delivery.Position)
 		}
