@@ -794,3 +794,15 @@ settled; where an entry is settled its behaviour is the specification. The code 
   derived from the message must set the header at the caller.
 - **Question:** should Go add a typed key expression/option (recognising message and headers), or keep the
   header-only contract?
+
+### SG-54: a panic in an external-call adapter body
+
+- **Specification:** [writing-a-library.md, The failure notice](https://snodra.damoreira.com/docs/library-authors/writing-a-library/#the-failure-notice)
+  says `UNKNOWN_OUTCOME` is for an idempotent adapter that cannot tell whether its external call happened; no page
+  says what a panic in the adapter body does. Kotlin catches `Throwable` and settles the record `FAILED`
+  (`snodra-messaging@64dde1e:snodra-messaging/src/main/kotlin/com/damoreira/snodra/messaging/external/IdempotencyInterceptor.kt:84-90,193-209`),
+  so its first caller sees a plain permanent failure.
+- **This library:** recovers a panic in the body, settles the record `UNKNOWN` (the external system may have acted
+  before the panic) and returns the unknown-outcome marker; the first caller sees `UNKNOWN_OUTCOME` and a redelivery
+  does not run the body automatically.
+- **Question:** should a panic be `UNKNOWN` (this library, the safe answer) or `FAILED` (Kotlin)?

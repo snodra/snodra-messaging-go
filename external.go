@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -174,7 +175,7 @@ func runIdempotentCall[R any](a *App, ctx context.Context, name, key string, par
 	if replay != nil {
 		return replay, nil
 	}
-	result, err := body()
+	result, err := callIdempotentBody(a, name, body)
 	if err != nil {
 		a.settleExternalFailure(ctx, calls, name, key, owner, err)
 		return nil, err
@@ -192,6 +193,23 @@ func runIdempotentCall[R any](a *App, ctx context.Context, name, key string, par
 		return nil, a.unrecordedExternalCall(ctx, calls, name, key, owner, partnerIdempotent, cause)
 	}
 	return reply, nil
+}
+
+// callIdempotentBody runs the adapter body, turning a panic into the unknown-outcome marker:
+// the external call may have happened before the panic, so settling it FAILED (as a Kotlin
+// Throwable is) could make a caller think a retry is safe when it is not.
+//
+// TODO(spec-gap): SG-54 (Kotlin settles a panic/Throwable as FAILED; this library settles it
+// UNKNOWN because the external call may have happened).
+func callIdempotentBody[R any](a *App, name string, body func() (R, error)) (result R, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			a.log.Error("an idempotent adapter panicked", "command", name,
+				"panic", fmt.Sprint(r), "stack", string(debug.Stack()))
+			err = UnknownOutcome(fmt.Errorf("the idempotent command %s panicked: %v", name, r))
+		}
+	}()
+	return body()
 }
 
 // beginExternalCall inserts or follows a record until this call owns it or the record answers.
@@ -280,6 +298,8 @@ func (a *App) settleExternalFailure(ctx context.Context, calls ExternalCallStore
 				"command", name, "key", key, "marked", ok, "error", err)
 		}
 	default:
+		// The stored message is the handler's own text. Unlike Kotlin's `describe`, Go does not
+		// prefix an exception class name; the replay returns the text unchanged.
 		raw, _ := json.Marshal(struct {
 			Code    string `json:"code"`
 			Message string `json:"message"`

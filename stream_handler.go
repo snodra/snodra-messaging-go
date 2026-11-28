@@ -29,6 +29,9 @@ func HandleStream[Q Message, T any](app *App, h func(context.Context, Q, *Stream
 		return errors.New("snodra: registration on a nil App")
 	}
 	name, cfg, err := handlerSetup[Q](kindStream, h == nil, opts)
+	if err == nil && cfg.externalIdempotent {
+		err = fmt.Errorf("snodra: ExternalIdempotent applies to HandleIdempotentCommand (%s)", name)
+	}
 	return app.addHandler(&handler{kind: kindStream, name: name, stream: streamInvokerOf(h), cfg: cfg}, err)
 }
 

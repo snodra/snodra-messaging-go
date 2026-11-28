@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"reflect"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -308,7 +309,7 @@ func (a *App) checkEventStartup() error {
 // checkExternalCallPort refuses a message store without the external-call port, naming it; it
 // touches no table, so it can run before the schema is prepared.
 func (a *App) checkExternalCallPort(command string) error {
-	if a.cfg.store.ExternalCalls() == nil {
+	if isNilValue(a.cfg.store.ExternalCalls()) {
 		return fmt.Errorf("snodra: the idempotent command handler for %s needs the message store's external calls port, and %s does not provide it",
 			command, a.cfg.store.Name())
 	}
@@ -316,9 +317,16 @@ func (a *App) checkExternalCallPort(command string) error {
 }
 
 // probeExternalCalls is the read probe after the schema is ready: a store whose port answers
-// ErrUnsupported is refused at startup, naming the port, instead of at the first command.
+// ErrUnsupported is refused at startup, naming the port, instead of at the first command. The read
+// only proves the port exists and is readable; the official add-ons' L4 store kit exercises every
+// ExternalCallStore operation, so Start does not write a probe record.
 func (a *App) probeExternalCalls(ctx context.Context, command string) error {
-	if _, err := a.cfg.store.ExternalCalls().Find(ctx, "snodra:startup-probe"); err != nil {
+	calls := a.cfg.store.ExternalCalls()
+	if isNilValue(calls) {
+		return fmt.Errorf("snodra: the idempotent command handler for %s needs the message store's external calls port, and %s does not provide it",
+			command, a.cfg.store.Name())
+	}
+	if _, err := calls.Find(ctx, "snodra:startup-probe"); err != nil {
 		if errors.Is(err, ErrUnsupported) {
 			return fmt.Errorf("snodra: the idempotent command handler for %s needs the message store's external calls port, and %s does not provide it: %w",
 				command, a.cfg.store.Name(), err)
@@ -329,6 +337,21 @@ func (a *App) probeExternalCalls(ctx context.Context, command string) error {
 	return nil
 }
 
+// isNilValue reports v == nil or an interface holding a typed nil pointer/map/slice/func/channel,
+// so a store that returns a typed nil port is refused at startup instead of panicking at the first
+// command.
+func isNilValue(v any) bool {
+	if v == nil {
+		return true
+	}
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return rv.IsNil()
+	}
+	return false
+}
+
 // checkSagaPorts refuses a message store that does not provide one of the saga ports, naming the
 // port; it touches no table, so it can run before the schema is prepared.
 func (a *App) checkSagaPorts() error {
@@ -337,11 +360,11 @@ func (a *App) checkSagaPorts() error {
 		name string
 		ok   bool
 	}{
-		{"saga repository", sagas.Sagas != nil},
-		{"saga dispatch", sagas.Dispatch != nil},
-		{"saga deadlines", sagas.Deadlines != nil},
-		{"saga failures", sagas.Failures != nil},
-		{"saga markers", sagas.Markers != nil},
+		{"saga repository", !isNilValue(sagas.Sagas)},
+		{"saga dispatch", !isNilValue(sagas.Dispatch)},
+		{"saga deadlines", !isNilValue(sagas.Deadlines)},
+		{"saga failures", !isNilValue(sagas.Failures)},
+		{"saga markers", !isNilValue(sagas.Markers)},
 	} {
 		if !port.ok {
 			return fmt.Errorf("snodra: the saga needs the message store's %s port, and %s does not provide it",

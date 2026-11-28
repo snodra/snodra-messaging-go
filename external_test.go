@@ -762,3 +762,298 @@ func TestASagaCommandResentAfterALostMarkRunsTheAdapterOnce(t *testing.T) {
 		t.Fatalf("the entry after the re-send: %+v, %v", pending, err)
 	}
 }
+
+// A panic in the adapter body is settled as UNKNOWN, not left IN_PROGRESS and not called a known
+// failure: the external system may have acted before the panic.
+func TestAnAdapterPanicIsAnUnknownOutcome(t *testing.T) {
+	app, store := externalTestApp(t)
+	var bodies atomic.Int64
+	if err := HandleIdempotentCommand(app, func(context.Context, ExternalCharge) (ExternalReceipt, error) {
+		bodies.Add(1)
+		panic("adapter exploded")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Send[ExternalReceipt](context.Background(), app, ExternalCharge{ID: "c-1"}, externalKey("job-1"))
+	if !IsUnknownOutcome(err) {
+		t.Fatalf("the adapter panic: %v, want the unknown-outcome marker", err)
+	}
+	var protocol *Error
+	if !errors.As(err, &protocol) || protocol.Code != CodeHandlerError ||
+		string(protocol.Details) != `{"snodra":"unknown-outcome"}` {
+		t.Fatalf("the panic's answer: %v", err)
+	}
+	record, err := store.ExternalCalls().Find(context.Background(), "job-1")
+	if err != nil || record == nil || record.Status != ExternalCallUnknown {
+		t.Fatalf("the panic's record: %+v, %v", record, err)
+	}
+	if bodies.Load() != 1 {
+		t.Fatalf("the body ran %d times", bodies.Load())
+	}
+}
+
+// A marker nested in another error is still written and read, and still settles the record.
+func TestNestedExternalMarkers(t *testing.T) {
+	app, store := externalTestApp(t)
+	var bodies atomic.Int64
+	if err := HandleIdempotentCommand(app, func(_ context.Context, c ExternalCharge) (ExternalReceipt, error) {
+		bodies.Add(1)
+		if c.Mode == "retryable" {
+			return ExternalReceipt{}, fmt.Errorf("outer: %w", Retryable(errors.New("busy")))
+		}
+		return ExternalReceipt{}, fmt.Errorf("outer: %w", UnknownOutcome(errors.New("connection reset")))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Send[ExternalReceipt](context.Background(), app, ExternalCharge{ID: "c-1", Mode: "retryable"}, externalKey("nested-r"))
+	if !IsRetryable(err) {
+		t.Fatalf("the nested retryable marker: %v", err)
+	}
+	var protocol *Error
+	if !errors.As(err, &protocol) || string(protocol.Details) != `{"snodra":"retryable"}` {
+		t.Fatalf("the nested retryable answer: %v", err)
+	}
+	if record, err := store.ExternalCalls().Find(context.Background(), "nested-r"); err != nil || record != nil {
+		t.Fatalf("the nested retryable record: %+v, %v", record, err)
+	}
+	_, err = Send[ExternalReceipt](context.Background(), app, ExternalCharge{ID: "c-1", Mode: "unknown"}, externalKey("nested-u"))
+	if !IsUnknownOutcome(err) {
+		t.Fatalf("the nested unknown marker: %v", err)
+	}
+	if !errors.As(err, &protocol) || string(protocol.Details) != `{"snodra":"unknown-outcome"}` {
+		t.Fatalf("the nested unknown answer: %v", err)
+	}
+	record, err := store.ExternalCalls().Find(context.Background(), "nested-u")
+	if err != nil || record == nil || record.Status != ExternalCallUnknown {
+		t.Fatalf("the nested unknown record: %+v, %v", record, err)
+	}
+	if bodies.Load() != 2 {
+		t.Fatalf("the body ran %d times", bodies.Load())
+	}
+}
+
+// failingExternalCalls makes one ExternalCallStore operation answer an error.
+type failingExternalCalls struct {
+	ExternalCallStore
+	op  string
+	err error
+}
+
+func (f *failingExternalCalls) Insert(ctx context.Context, call ExternalCall) (bool, error) {
+	if f.op == "insert" {
+		return false, f.err
+	}
+	return f.ExternalCallStore.Insert(ctx, call)
+}
+
+func (f *failingExternalCalls) Find(ctx context.Context, key string) (*ExternalCall, error) {
+	if f.op == "find" {
+		return nil, f.err
+	}
+	return f.ExternalCallStore.Find(ctx, key)
+}
+
+func (f *failingExternalCalls) TakeOver(ctx context.Context, seen ExternalCall, owner string, leaseUntil, now time.Time) (*ExternalCall, error) {
+	if f.op == "takeover" {
+		return nil, f.err
+	}
+	return f.ExternalCallStore.TakeOver(ctx, seen, owner, leaseUntil, now)
+}
+
+func (f *failingExternalCalls) Expire(ctx context.Context, seen ExternalCall, now time.Time) (bool, error) {
+	if f.op == "expire" {
+		return false, f.err
+	}
+	return f.ExternalCallStore.Expire(ctx, seen, now)
+}
+
+type externalFailureStore struct {
+	*MemoryMessageStore
+	calls ExternalCallStore
+}
+
+func (s *externalFailureStore) ExternalCalls() ExternalCallStore { return s.calls }
+
+// A store failure before the body is a plain HANDLER_ERROR; no record is settled and the body
+// never runs.
+func TestStoreFailuresBeforeTheBodyArePermanentHandlerErrors(t *testing.T) {
+	t0 := time.Now()
+	for _, c := range []struct {
+		name   string
+		op     string
+		seed   bool
+		lapsed bool
+	}{
+		{"insert", "insert", false, false},
+		{"find", "find", true, false},
+		{"takeover", "takeover", true, true},
+		{"expire", "expire", true, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			base := NewMemoryMessageStore()
+			failing := &failingExternalCalls{ExternalCallStore: base.ExternalCalls(), op: c.op, err: errors.New("store unavailable")}
+			store := &externalFailureStore{MemoryMessageStore: base, calls: failing}
+			app := newApp(t, Hubs("127.0.0.1:1"), WithStore(store), OutboxEnabled(false))
+			app.now = func() time.Time { return t0.Add(2 * time.Minute) }
+			if c.seed {
+				if _, err := base.ExternalCalls().Insert(context.Background(), ExternalCall{
+					Key: "job-1", Status: ExternalCallInProgress, Attempts: 1,
+					UpdatedAt: t0, LeaseUntil: t0.Add(time.Minute), Owner: "old-call",
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var bodies atomic.Int64
+			opts := []HandlerOption{}
+			if c.op == "takeover" {
+				opts = append(opts, ExternalIdempotent())
+			}
+			if err := HandleIdempotentCommand(app, func(context.Context, ExternalCharge) (ExternalReceipt, error) {
+				bodies.Add(1)
+				return ExternalReceipt{}, nil
+			}, opts...); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Send[ExternalReceipt](context.Background(), app, ExternalCharge{ID: "c-1"}, externalKey("job-1"))
+			var protocol *Error
+			if !errors.As(err, &protocol) || protocol.Code != CodeHandlerError || protocol.Message != "store unavailable" {
+				t.Fatalf("the %s failure: %v", c.op, err)
+			}
+			if len(protocol.Details) != 0 || IsRetryable(err) || IsUnknownOutcome(err) {
+				t.Fatalf("the %s failure carries a marker: %v", c.op, err)
+			}
+			if bodies.Load() != 0 {
+				t.Fatalf("the body ran %d times", bodies.Load())
+			}
+		})
+	}
+}
+
+// The same store failure on a saga command is the permanent FAILED outcome, not a retry.
+func TestAStoreFailureBeforeTheBodyIsAPermanentSagaFailure(t *testing.T) {
+	base := NewMemoryMessageStore()
+	failing := &failingExternalCalls{ExternalCallStore: base.ExternalCalls(), op: "insert", err: errors.New("store unavailable")}
+	store := &externalFailureStore{MemoryMessageStore: base, calls: failing}
+	app := newApp(t, Hubs("127.0.0.1:1"), WithStore(store), WithEventStore(NewMemoryEventStore()),
+		withEventSettings(consumerSettings()), OutboxEnabled(false))
+	var bodies atomic.Int64
+	if err := HandleIdempotentCommand(app, func(context.Context, ExternalCharge) (ExternalReceipt, error) {
+		bodies.Add(1)
+		return ExternalReceipt{}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var failed SagaCommandFailed
+	if err := HandleSaga[sagaState](app, "orders", func(d *SagaDefinition[sagaState]) {
+		d.StartOn(StartedOn(Associate("orderId", func(e OrderPlaced) string { return e.OrderID }),
+			func(_ context.Context, saga *SagaContext, _ *sagaState, event OrderPlaced) error {
+				return saga.Send(ExternalCharge{ID: event.OrderID}, "")
+			}))
+		d.OnCommandFailed(CommandFailed(func(_ context.Context, _ *SagaContext, _ *sagaState, event SagaCommandFailed) error {
+			failed = event
+			return nil
+		}))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	app.sagaRuntime = newSagaRuntime(app)
+	if _, err := app.sagaRuntime.process(context.Background(), sagaMessage{id: "e-1", typeName: "orders.OrderPlaced"},
+		[]byte(`{"orderId":"o-1"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := newSagaRelay(app).poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if failed.Reason != SagaCommandFailedFailed {
+		t.Fatalf("the saga's failed notice: %+v", failed)
+	}
+	if bodies.Load() != 0 {
+		t.Fatalf("the body ran %d times", bodies.Load())
+	}
+}
+
+// A typed nil ExternalCalls value is not a supplied port: Start refuses it by reflection rather
+// than panicking on the probe.
+type typedNilExternalCalls struct{ ExternalCallStore }
+
+type typedNilExternalStore struct{ *MemoryMessageStore }
+
+func (s *typedNilExternalStore) ExternalCalls() ExternalCallStore {
+	var calls *typedNilExternalCalls
+	return calls
+}
+
+func TestATypedNilExternalCallsPortIsRefusedAtStartup(t *testing.T) {
+	app := newApp(t, Hubs("127.0.0.1:1"), WithStore(&typedNilExternalStore{MemoryMessageStore: NewMemoryMessageStore()}),
+		OutboxEnabled(false))
+	if err := HandleIdempotentCommand(app, func(context.Context, ExternalCharge) (ExternalReceipt, error) {
+		return ExternalReceipt{}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	err := app.Start(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "external calls") || !strings.Contains(err.Error(), "does not provide") {
+		t.Fatalf("the typed nil external-calls port: %v", err)
+	}
+}
+
+func TestIdempotentCommandRegistration(t *testing.T) {
+	t.Run("nil handler", func(t *testing.T) {
+		app := newApp(t, Hubs("127.0.0.1:1"))
+		err := HandleIdempotentCommand[ExternalCharge, ExternalReceipt](app, nil)
+		if err == nil || !strings.Contains(err.Error(), "nil handler") {
+			t.Fatalf("the nil handler: %v", err)
+		}
+	})
+	t.Run("after Start", func(t *testing.T) {
+		app := newApp(t, Hubs("127.0.0.1:1"), WithStore(NewMemoryMessageStore()), OutboxEnabled(false))
+		if err := app.Start(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		err := HandleIdempotentCommand(app, func(context.Context, ExternalCharge) (ExternalReceipt, error) {
+			return ExternalReceipt{}, nil
+		})
+		if !errors.Is(err, ErrRegistrationClosed) {
+			t.Fatalf("registration after Start: %v", err)
+		}
+	})
+	t.Run("duplicate type", func(t *testing.T) {
+		app := newApp(t, Hubs("127.0.0.1:1"))
+		h := func(context.Context, ExternalCharge) (ExternalReceipt, error) { return ExternalReceipt{}, nil }
+		if err := HandleIdempotentCommand(app, h); err != nil {
+			t.Fatal(err)
+		}
+		if err := HandleIdempotentCommand(app, h); err == nil || !strings.Contains(err.Error(), "already registered") {
+			t.Fatalf("the duplicate: %v", err)
+		}
+	})
+	t.Run("Shared", func(t *testing.T) {
+		app := newApp(t, Hubs("127.0.0.1:1"))
+		err := HandleIdempotentCommand(app, func(context.Context, ExternalCharge) (ExternalReceipt, error) {
+			return ExternalReceipt{}, nil
+		}, Shared())
+		if err == nil || !strings.Contains(err.Error(), "commands are never shared") {
+			t.Fatalf("the shared command: %v", err)
+		}
+	})
+	t.Run("ExternalIdempotent on a query, stream or subscription", func(t *testing.T) {
+		query := newApp(t, Hubs("127.0.0.1:1"))
+		if err := HandleQuery(query, func(context.Context, ExternalCharge) (ExternalReceipt, error) {
+			return ExternalReceipt{}, nil
+		}, ExternalIdempotent()); err == nil || !strings.Contains(err.Error(), "HandleIdempotentCommand") {
+			t.Fatalf("the query: %v", err)
+		}
+		stream := newApp(t, Hubs("127.0.0.1:1"))
+		if err := HandleStream[ExternalCharge, ExternalReceipt](stream,
+			func(context.Context, ExternalCharge, *StreamWriter[ExternalReceipt]) error { return nil },
+			ExternalIdempotent()); err == nil || !strings.Contains(err.Error(), "HandleIdempotentCommand") {
+			t.Fatalf("the stream: %v", err)
+		}
+		subscription := newApp(t, Hubs("127.0.0.1:1"))
+		if _, err := HandleSubscription[ExternalCharge, ExternalReceipt, ExternalReceipt](subscription,
+			func(context.Context, ExternalCharge) (ExternalReceipt, error) { return ExternalReceipt{}, nil },
+			ExternalIdempotent()); err == nil || !strings.Contains(err.Error(), "HandleIdempotentCommand") {
+			t.Fatalf("the subscription: %v", err)
+		}
+	})
+}

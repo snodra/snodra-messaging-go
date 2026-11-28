@@ -37,6 +37,9 @@ func HandleSubscription[Q Message, I, U any](app *App, initial func(context.Cont
 		return nil, errors.New("snodra: registration on a nil App")
 	}
 	name, cfg, err := handlerSetup[Q](kindSubscription, initial == nil, opts)
+	if err == nil && cfg.externalIdempotent {
+		err = fmt.Errorf("snodra: ExternalIdempotent applies to HandleIdempotentCommand (%s)", name)
+	}
 	h := &handler{kind: kindSubscription, name: name, invoke: invokerOf(initial), decode: queryDecoderOf[Q](), cfg: cfg}
 	if err := app.addHandler(h, err); err != nil {
 		return nil, err
