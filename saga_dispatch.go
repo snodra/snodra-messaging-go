@@ -291,8 +291,8 @@ func (r *sagaRelay) dispatchCommand(ctx context.Context, entry SagaDispatch) boo
 		defer cancel()
 	}
 	headers := map[string]string{
-		"idempotency-key": entry.ID,
-		"saga-id":         entry.SagaID,
+		idempotencyKeyHeader: entry.ID,
+		"saga-id":            entry.SagaID,
 	}
 	err := sendSagaCommand(sendCtx, app, entry, headers, wait, bound)
 	if err == nil {

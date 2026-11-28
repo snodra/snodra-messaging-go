@@ -15,13 +15,17 @@ type handlerConfig struct {
 	guards []func(Caller) bool
 	// shared registers a query in Register.shared_query_types ([Shared]).
 	shared bool
+	// externalIdempotent says the partner of an idempotent command de-duplicates by the key
+	// ([ExternalIdempotent]); it applies to HandleIdempotentCommand only.
+	externalIdempotent bool
 	// err is an option's error, returned by the registration.
 	err error
 }
 
 // A HandlerOption configures one handler in [HandleCommand], [HandleQuery], [HandleStream] or
 // [HandleSubscription]: its guards ([RequireAuthenticated], [RequireRole], [RequireCaller]) and,
-// for a query, a streaming query or a subscription query, [Shared].
+// for a query, a streaming query or a subscription query, [Shared]; [ExternalIdempotent] applies
+// to an idempotent command.
 type HandlerOption func(*handlerConfig)
 
 // Shared registers a query type as shared (Register.shared_query_types): many services may own
@@ -74,12 +78,14 @@ type queryDecoder func(codec PayloadCodec, payload []byte) (any, error)
 
 // handler is a registered handler of one type.
 type handler struct {
-	kind   handlerKind
-	name   string
-	invoke invoker       // a command, a query, or a subscription query's initial result
-	stream streamInvoker // a streaming query
-	decode queryDecoder  // a subscription query
-	cfg    handlerConfig
+	kind handlerKind
+	name string
+	// idempotent is set by HandleIdempotentCommand: the external-call adapter wraps its invoke.
+	idempotent bool
+	invoke     invoker       // a command, a query, or a subscription query's initial result
+	stream     streamInvoker // a streaming query
+	decode     queryDecoder  // a subscription query
+	cfg        handlerConfig
 }
 
 // decodeError is a payload the codec could not decode into the handler's message type.
@@ -113,6 +119,9 @@ func register[M Message, R any](app *App, kind handlerKind, h func(context.Conte
 		return errors.New("snodra: registration on a nil App")
 	}
 	name, cfg, err := handlerSetup[M](kind, h == nil, opts)
+	if err == nil && cfg.externalIdempotent {
+		err = fmt.Errorf("snodra: ExternalIdempotent applies to HandleIdempotentCommand (%s)", name)
+	}
 	return app.addHandler(&handler{kind: kind, name: name, invoke: invokerOf(h), cfg: cfg}, err)
 }
 
@@ -238,6 +247,22 @@ func (a *App) checkHandler(h *handler) error {
 		return fmt.Errorf("snodra: %s %s is already registered", h.kind, h.name)
 	}
 	return nil
+}
+
+// firstIdempotentCommand is the first idempotent command type in sorted order, or empty. It names
+// the handler in the startup store checks. Called with a.mu held.
+func (a *App) firstIdempotentCommand() string {
+	names := make([]string, 0)
+	for name, h := range a.handlers {
+		if h.kind == kindCommand && h.idempotent {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	slices.Sort(names)
+	return names[0]
 }
 
 // registrationError is every registration error so far, joined; nil when none. Called with

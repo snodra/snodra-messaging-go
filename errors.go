@@ -169,6 +169,17 @@ func errorToWire(requestID string, err error) *hubpb.Error {
 		return &hubpb.Error{RequestId: requestID, Code: hubpb.ErrorCode_HANDLER_ERROR,
 			Message: "the handler failed without an error"}
 	}
+	// The reserved external-adapter markers force HANDLER_ERROR with their exact details,
+	// whatever they wrap: they are the two values the relay reads.
+	var marker *externalMarkerError
+	if errors.As(err, &marker) {
+		return &hubpb.Error{
+			RequestId: requestID,
+			Code:      hubpb.ErrorCode_HANDLER_ERROR,
+			Message:   lineBreaks.Replace(err.Error()),
+			Details:   append(json.RawMessage(nil), marker.details...),
+		}
+	}
 	w := &hubpb.Error{
 		RequestId: requestID,
 		Code:      hubpb.ErrorCode_HANDLER_ERROR,

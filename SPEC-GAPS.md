@@ -781,3 +781,16 @@ settled; where an entry is settled its behaviour is the specification. The code 
   and sends through its local invoker when a service has no hub (`RawCommandSender.kt:93`).
 - **Question:** should a future hubless mode classify a local no-handler as permanent `NO_HANDLER`, and should the Go
   library support the hubless service of the design at all?
+
+### SG-53: a custom idempotency key for an external-call adapter
+
+- **Specification:** [messages.md, Request headers](https://snodra.damoreira.com/docs/library-authors/messages/#request-headers)
+  says an idempotent adapter uses the `idempotency-key` header to act once and does not say whether the key may be
+  derived from the message. Kotlin's public `@IdempotentHandler` takes a SpEL key over the decoded message and the
+  headers and compiles it at registration
+  (`snodra-messaging@64dde1e:snodra-messaging/src/main/kotlin/com/damoreira/snodra/messaging/external/IdempotentHandler.kt:23-25,34,48`);
+  its default is the same header, and an adapter that polls can put the attempt in the key.
+- **This library:** `HandleIdempotentCommand` reads only the `idempotency-key` header. An adapter whose key is
+  derived from the message must set the header at the caller.
+- **Question:** should Go add a typed key expression/option (recognising message and headers), or keep the
+  header-only contract?

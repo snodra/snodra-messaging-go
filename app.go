@@ -222,6 +222,11 @@ func (a *App) start(ctx context.Context) error {
 			return err
 		}
 	}
+	if idempotent := a.firstIdempotentCommand(); idempotent != "" {
+		if err := a.probeExternalCalls(ctx, idempotent); err != nil {
+			return err
+		}
+	}
 	a.started = true
 	a.warnPlainTextCredential()
 	a.warnMemoryStores()
@@ -242,15 +247,17 @@ func (a *App) warnMemoryStores() {
 	}
 }
 
-// checkEventStartup refuses event handlers without the stores they need, naming the missing
-// add-on and the first handler in a stable order. Commands, queries and subscription queries need
-// neither store. A service that only publishes is not visible here (a builder cannot know that a
-// service publishes): its first [Publish] fails naming the missing add-on.
+// checkEventStartup refuses event handlers, sagas and idempotent commands without the stores they
+// need, naming the missing add-on and the first handler in a stable order. Plain commands, queries
+// and subscription queries need neither store. A service that only publishes is not visible here (a
+// builder cannot know that a service publishes): its first [Publish] fails naming the missing
+// add-on.
 func (a *App) checkEventStartup() error {
 	if err := a.checkResetStartup(); err != nil {
 		return err
 	}
-	if len(a.eventHandlers) == 0 && len(a.sagaTypes) == 0 {
+	idempotent := a.firstIdempotentCommand()
+	if len(a.eventHandlers) == 0 && len(a.sagaTypes) == 0 && idempotent == "" {
 		return nil
 	}
 	names := make([]string, 0, len(a.eventHandlers))
@@ -267,14 +274,17 @@ func (a *App) checkEventStartup() error {
 		}
 	}
 	if a.cfg.store == nil {
-		what := "the event handler for " + first
-		if len(a.eventHandlers) == 0 {
-			what = "the saga"
+		what := "the saga"
+		switch {
+		case first != "":
+			what = "the event handler for " + first
+		case idempotent != "":
+			what = "the idempotent command handler for " + idempotent
 		}
 		return fmt.Errorf("snodra: %s needs a message store: set one with WithStore "+
 			"(WithStore(snodra.NewMemoryMessageStore()) runs the in-memory one, not durable: tests and local runs)", what)
 	}
-	if a.cfg.eventStore == nil {
+	if (len(a.eventHandlers) > 0 || len(a.sagaTypes) > 0) && a.cfg.eventStore == nil {
 		what := "the event handler for " + first
 		if len(a.eventHandlers) == 0 {
 			what = "the saga"
@@ -282,10 +292,39 @@ func (a *App) checkEventStartup() error {
 		return fmt.Errorf("snodra: %s needs an event store: set one with WithEventStore "+
 			"(WithEventStore(snodra.NewMemoryEventStore()) runs the in-memory one, not durable: tests and local runs)", what)
 	}
+	if idempotent != "" {
+		if err := a.checkExternalCallPort(idempotent); err != nil {
+			return err
+		}
+	}
 	if len(a.sagaTypes) > 0 {
 		if err := a.checkSagaPorts(); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// checkExternalCallPort refuses a message store without the external-call port, naming it; it
+// touches no table, so it can run before the schema is prepared.
+func (a *App) checkExternalCallPort(command string) error {
+	if a.cfg.store.ExternalCalls() == nil {
+		return fmt.Errorf("snodra: the idempotent command handler for %s needs the message store's external calls port, and %s does not provide it",
+			command, a.cfg.store.Name())
+	}
+	return nil
+}
+
+// probeExternalCalls is the read probe after the schema is ready: a store whose port answers
+// ErrUnsupported is refused at startup, naming the port, instead of at the first command.
+func (a *App) probeExternalCalls(ctx context.Context, command string) error {
+	if _, err := a.cfg.store.ExternalCalls().Find(ctx, "snodra:startup-probe"); err != nil {
+		if errors.Is(err, ErrUnsupported) {
+			return fmt.Errorf("snodra: the idempotent command handler for %s needs the message store's external calls port, and %s does not provide it: %w",
+				command, a.cfg.store.Name(), err)
+		}
+		return fmt.Errorf("snodra: the idempotent command handler for %s could not probe the message store's external calls: %w",
+			command, err)
 	}
 	return nil
 }

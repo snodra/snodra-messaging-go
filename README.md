@@ -46,6 +46,11 @@ retries and timeouts.
   lease. A command is sent by its wire type with `idempotency-key`/`saga-id`, the handled event's correlation and
   trace, and no caller identity; transient failures are retried by the relay, permanent ones come back as the notice.
   A deadline scheduler claims each due deadline with a lease, runs its handler and marks it fired in one transaction.
+- **Idempotent external calls**: `HandleIdempotentCommand` records each call under the `idempotency-key` header in
+  `external_calls`: the first insert wins, a repeat after success returns the first reply, a permanent failure is
+  replayed, and a lapsed call is given up as unknown (or taken over with `ExternalIdempotent()`). `Retryable` and
+  `UnknownOutcome` write the two reserved `Error.details` markers, which `IsRetryable` and `IsUnknownOutcome` read
+  locally and from a hub; the saga relay owns the backoff.
 - **Dead letters**: a record that exhausts its attempts is parked according to `DeadLetterMode`
   (`SNODRA_DEAD_LETTER_MODE`): `collection` keeps it in the message store's dead letters, with list, retry,
   retry-all and discard driven from the dashboard; `event-store` publishes it to the `<source>.dlt` source with the
@@ -59,9 +64,9 @@ retries and timeouts.
   handlers.
 - **Telemetry** behind an interface, with an OpenTelemetry implementation in the separate `observability` module.
 - **Feature level 3**, proved by the 33 level-1 checks of the conformance runner and by the level-2 and level-3
-  event-store and message-store kits. The saga store ports, the level-4 store checks and the saga runtime (stage 2,
-  the dispatch relay, failure notices and deadlines) are implemented on `main`; level 4 is not claimed or released
-  yet.
+  event-store and message-store kits. The saga store ports, the level-4 store checks, the saga runtime (stage 2,
+  the dispatch relay, failure notices and deadlines) and the idempotent external-call adapter with its two markers are
+  implemented on `main`; level 4 is not claimed or released yet.
 
 ## Install
 
