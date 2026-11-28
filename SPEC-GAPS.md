@@ -769,7 +769,7 @@ settled; where an entry is settled its behaviour is the specification. The code 
 
 ### SG-52: a permanent NO_HANDLER for a service without a hub
 
-- **Specification:** [writing-a-library.md, Retries and failures](https://snodora.damoreira.com/docs/library-authors/writing-a-library/#retries-and-failures)
+- **Specification:** [writing-a-library.md, Retries and failures](https://snodra.damoreira.com/docs/library-authors/writing-a-library/#retries-and-failures)
   makes "no handler for the type in a service without a hub" permanent, with reason `NO_HANDLER`; the notice table
   lists the same reason.
 - **This library:** every saga command with no local handler goes through a hub, and `New` refuses a service without
