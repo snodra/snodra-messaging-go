@@ -180,9 +180,13 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           LATEST: ${{ needs.check.outputs.latest }}
         run: |
-          NOTES="Two Go modules, tagged on the same commit:
+          NOTES="Six Go modules, tagged on the same commit:
           - \`$MODULE\` $TAG: \`go get $MODULE@$TAG\`
-          - \`$MODULE/observability\` $TAG (tag \`observability/$TAG\`): \`go get $MODULE/observability@$TAG\`"
+          - \`$MODULE/observability\` $TAG (tag \`observability/$TAG\`): \`go get $MODULE/observability@$TAG\`
+          - \`$MODULE/kafka\` $TAG (tag \`kafka/$TAG\`): \`go get $MODULE/kafka@$TAG\`
+          - \`$MODULE/rabbitmq\` $TAG (tag \`rabbitmq/$TAG\`): \`go get $MODULE/rabbitmq@$TAG\`
+          - \`$MODULE/sql\` $TAG (tag \`sql/$TAG\`): \`go get $MODULE/sql@$TAG\`
+          - \`$MODULE/mongo\` $TAG (tag \`mongo/$TAG\`): \`go get $MODULE/mongo@$TAG\`"
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" \
               --title "${GITHUB_REPOSITORY#*/} $TAG" --notes "$NOTES"
