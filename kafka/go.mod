@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	github.com/moby/moby/api v1.56.1
-	github.com/snodra/snodra-messaging-go v0.6.0
+	github.com/snodra/snodra-messaging-go v0.7.0
 	github.com/testcontainers/testcontainers-go v0.45.0
 	github.com/twmb/franz-go v1.22.3
 	github.com/twmb/franz-go/pkg/kadm v1.20.0
