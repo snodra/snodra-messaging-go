@@ -12,7 +12,8 @@ import (
 
 // sqlExternalCalls is the snodra.ExternalCallStore on snodra_external_calls. Every write is one
 // statement of its own, outside the caller's transaction: a call that happened is never forgotten
-// by a rolled-back handler.
+// by a rolled-back handler. The MySQL DSN sets ClientFoundRows, so a conditional UPDATE reports a
+// matched row even when it writes the values already there.
 type sqlExternalCalls struct {
 	store *Store
 }

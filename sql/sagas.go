@@ -10,7 +10,8 @@ import (
 	snodra "github.com/snodra/snodra-messaging-go"
 )
 
-// The saga ports on the shared V1 tables. What the runtime calls joins the caller's transaction;
+// The saga ports on the shared V1 tables. The MySQL DSN sets ClientFoundRows, so a conditional
+// UPDATE reports a matched row even when it writes the values already there. What the runtime calls joins the caller's transaction;
 // the relays' and the scheduler's claims (notices, leases, deadlines) commit on their own.
 
 // sqlSagaRepository is the snodra.SagaRepository on snodra_sagas and snodra_saga_associations.
@@ -484,16 +485,9 @@ func (q sqlSagaDispatch) MarkDispatched(ctx context.Context, id string, now time
 	if err != nil {
 		return err
 	}
-	result, err := exec.ExecContext(ctx, s.bind("UPDATE snodra_saga_dispatch SET dispatched_at = ? WHERE id = ?"), millis(now), id)
+	_, err = exec.ExecContext(ctx, s.bind("UPDATE snodra_saga_dispatch SET dispatched_at = ? WHERE id = ?"), millis(now), id)
 	if err != nil {
 		return finish(storeError(err))
-	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return finish(storeError(err))
-	}
-	if affected == 0 {
-		return finish(fmt.Errorf("%w: saga-dispatch entry %q does not exist", snodra.ErrInvalid, id))
 	}
 	return finish(nil)
 }

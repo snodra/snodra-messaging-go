@@ -368,16 +368,10 @@ func (q mongoSagaDispatch) MarkDispatched(ctx context.Context, id string, now ti
 	if err != nil {
 		return err
 	}
-	result, err := q.store.db.Collection(collectionSagaDispatch).UpdateOne(scope,
+	_, err = q.store.db.Collection(collectionSagaDispatch).UpdateOne(scope,
 		bson.D{{Key: "_id", Value: id}},
 		bson.D{{Key: "$set", Value: bson.D{{Key: "dispatchedAt", Value: controlDate(now)}}}})
-	if err != nil {
-		return storeError(err)
-	}
-	if result.MatchedCount == 0 {
-		return snodra.ErrInvalid
-	}
-	return nil
+	return storeError(err)
 }
 
 // ScheduleRetry records a transient failure.

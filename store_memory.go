@@ -466,6 +466,26 @@ func (d *memoryData) commit(tx *memoryTx) error {
 		return fmt.Errorf("%w: saga_failure record %q changed since the transaction read it",
 			ErrConflict, id)
 	}
+	// A live saga's start key is unique among the live sagas, also across two live transactions
+	// that each saw the key free. A saga this transaction also wrote does not count: its own
+	// write (an end, a new key) wins.
+	written := make(map[string]bool, len(tx.sagas.writes))
+	for id := range tx.sagas.writes {
+		written[id] = true
+	}
+	for id, write := range tx.sagas.writes {
+		if write.value == nil || write.value.Ended || write.value.StartKey == nil {
+			continue
+		}
+		for otherID, row := range d.sagas.rows {
+			if otherID == id || written[otherID] || row.value.Ended || row.value.StartKey == nil {
+				continue
+			}
+			if *row.value.StartKey == *write.value.StartKey {
+				return fmt.Errorf("%w: a live saga holds the start key of saga %q", ErrConflict, id)
+			}
+		}
+	}
 	d.outbox.apply(&tx.outbox, d)
 	d.processed.apply(&tx.processed, d)
 	d.deadLetters.apply(&tx.deadLetters, d)

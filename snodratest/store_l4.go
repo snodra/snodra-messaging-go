@@ -413,18 +413,23 @@ func twoTransactionsStartingOneSagaKeyLeaveOneLiveSaga(tb storeTB, store snodra.
 	firstID, secondID := fresh("race"), fresh("race")
 	tx1, tx1body := beginStore(tb, store)
 	tx2, tx2body := beginStore(tb, store)
+	// Both transactions are open, both insert, and only then does either commit: the loser must
+	// conflict instead of waiting for the winner.
+	inserted := []error{store.Sagas().Sagas.Insert(tx1, saga(firstID)), store.Sagas().Sagas.Insert(tx2, saga(secondID))}
 	outcomes := make([]error, 2)
-	if err := store.Sagas().Sagas.Insert(tx1, saga(firstID)); err != nil {
-		outcomes[0] = err
-		rollbackStore(tb, tx1body, tx1)
-	} else {
-		outcomes[0] = tx1body.Commit(tx1)
-	}
-	if err := store.Sagas().Sagas.Insert(tx2, saga(secondID)); err != nil {
-		outcomes[1] = err
-		rollbackStore(tb, tx2body, tx2)
-	} else {
-		outcomes[1] = tx2body.Commit(tx2)
+	for i, pair := range []struct {
+		ctx context.Context
+		tx  snodra.Tx
+	}{{tx1, tx1body}, {tx2, tx2body}} {
+		if inserted[i] != nil {
+			outcomes[i] = inserted[i]
+			rollbackStore(tb, pair.tx, pair.ctx)
+			continue
+		}
+		outcomes[i] = pair.tx.Commit(pair.ctx)
+		if outcomes[i] != nil {
+			rollbackStore(tb, pair.tx, pair.ctx)
+		}
 	}
 	won := -1
 	for i, err := range outcomes {
@@ -801,8 +806,13 @@ func twoSchedulersClaimEachDueDeadlineOnce(tb storeTB, store snodra.MessageStore
 	}
 	commitStore(tb, tx, txctx)
 	start := make(chan struct{})
-	firstClaims := &sync.WaitGroup{}
-	firstClaims.Add(2)
+	firstClaims := make(chan struct{}, 2)
+	allFirst := make(chan struct{})
+	go func() {
+		<-firstClaims
+		<-firstClaims
+		close(allFirst)
+	}()
 	results := make([]map[string]bool, 2)
 	errs := make([]error, 2)
 	var wg sync.WaitGroup
@@ -822,8 +832,13 @@ func twoSchedulersClaimEachDueDeadlineOnce(tb storeTB, store snodra.MessageStore
 				}
 				if first {
 					first = false
-					firstClaims.Done()
-					firstClaims.Wait()
+					firstClaims <- struct{}{}
+					select {
+					case <-allFirst:
+					case <-time.After(30 * time.Second):
+						errs[i] = fmt.Errorf("timed out waiting for the other scheduler's first claim")
+						return
+					}
 				}
 				if d == nil {
 					results[i] = claimed

@@ -251,12 +251,8 @@ func (r memorySagas) Insert(ctx context.Context, saga Saga) error {
 		if _, exists := data.sagas.get(overlay, saga.ID); exists {
 			return fmt.Errorf("%w: saga %q exists", ErrConflict, saga.ID)
 		}
-		if saga.StartKey != nil && !saga.Ended {
-			for _, other := range data.sagas.snapshot(overlay) {
-				if !other.Ended && other.StartKey != nil && *other.StartKey == *saga.StartKey {
-					return fmt.Errorf("%w: a live saga holds the start key", ErrConflict)
-				}
-			}
+		if err := checkMemoryStartKey(data.sagas.snapshot(overlay), saga); err != nil {
+			return err
 		}
 		copied := copySaga(saga)
 		data.sagas.set(overlay, data, saga.ID, &copied)
@@ -276,6 +272,9 @@ func (r memorySagas) Update(ctx context.Context, saga Saga, expectedVersion int6
 		stored, ok := data.sagas.get(overlay, saga.ID)
 		if !ok || stored.Version != expectedVersion {
 			return nil
+		}
+		if err := checkMemoryStartKey(data.sagas.snapshot(overlay), saga); err != nil {
+			return err
 		}
 		copied := copySaga(saga)
 		data.sagas.set(overlay, data, saga.ID, &copied)
@@ -426,7 +425,7 @@ func (q memorySagaDispatch) MarkDispatched(ctx context.Context, id string, now t
 		}
 		stored, ok := data.dispatch.get(overlay, id)
 		if !ok {
-			return fmt.Errorf("%w: saga-dispatch entry %q does not exist", ErrInvalid, id)
+			return nil
 		}
 		entry := copyDispatch(*stored)
 		entry.DispatchedAt = now
@@ -446,7 +445,7 @@ func (q memorySagaDispatch) modifyDispatch(ctx context.Context, id string, chang
 	q.store.initLocked()
 	stored, ok := q.store.data.dispatch.get(nil, id)
 	if !ok {
-		return fmt.Errorf("%w: saga-dispatch entry %q does not exist", ErrInvalid, id)
+		return nil
 	}
 	entry := copyDispatch(*stored)
 	change(&entry)
@@ -902,6 +901,20 @@ func (m memorySagaMarkers) Insert(ctx context.Context, id, typeName string, now 
 		return nil
 	})
 	return err
+}
+
+// checkMemoryStartKey refuses a live saga whose start key another live saga holds; sagas is the
+// view (committed plus the transaction's writes) the call acts on.
+func checkMemoryStartKey(sagas []Saga, saga Saga) error {
+	if saga.Ended || saga.StartKey == nil {
+		return nil
+	}
+	for _, other := range sagas {
+		if other.ID != saga.ID && !other.Ended && other.StartKey != nil && *other.StartKey == *saga.StartKey {
+			return fmt.Errorf("%w: a live saga holds the start key", ErrConflict)
+		}
+	}
+	return nil
 }
 
 // hasAssociation reports whether saga has key = value.

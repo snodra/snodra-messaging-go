@@ -734,7 +734,8 @@ type DispatchFailure struct {
 // records what a saga sends in the saga's transaction; the dispatch relay works through it. An
 // entry is pending until it is dispatched or failed. Every relay operation is a write of its
 // own, outside any transaction, but MarkDispatched, which joins the transaction the relay
-// appends the event to the outbox in.
+// appends the event to the outbox in. A call naming an entry that no longer exists changes
+// nothing.
 type SagaDispatchStore interface {
 	// Record records entries in the transaction carried by ctx. An EVENT entry whose payload
 	// the outbox would refuse (not a JSON object, or an integer above the signed 64-bit range)
