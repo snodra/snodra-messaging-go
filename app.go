@@ -214,6 +214,14 @@ func (a *App) start(ctx context.Context) error {
 	if err := a.prepareStore(ctx); err != nil {
 		return err
 	}
+	if len(a.sagaTypes) > 0 {
+		// The read probe comes after the schema is prepared or checked: SQL and MongoDB
+		// initialize their saga tables there, and a query before that would fail for the wrong
+		// reason.
+		if err := a.probeSagaPorts(ctx); err != nil {
+			return err
+		}
+	}
 	a.started = true
 	a.warnPlainTextCredential()
 	a.warnMemoryStores()
@@ -273,6 +281,49 @@ func (a *App) checkEventStartup() error {
 		}
 		return fmt.Errorf("snodra: %s needs an event store: set one with WithEventStore "+
 			"(WithEventStore(snodra.NewMemoryEventStore()) runs the in-memory one, not durable: tests and local runs)", what)
+	}
+	if len(a.sagaTypes) > 0 {
+		if err := a.checkSagaPorts(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkSagaPorts refuses a message store that does not provide one of the saga ports, naming the
+// port; it touches no table, so it can run before the schema is prepared.
+func (a *App) checkSagaPorts() error {
+	sagas := a.cfg.store.Sagas()
+	for _, port := range []struct {
+		name string
+		ok   bool
+	}{
+		{"saga repository", sagas.Sagas != nil},
+		{"saga dispatch", sagas.Dispatch != nil},
+		{"saga deadlines", sagas.Deadlines != nil},
+		{"saga failures", sagas.Failures != nil},
+		{"saga markers", sagas.Markers != nil},
+	} {
+		if !port.ok {
+			return fmt.Errorf("snodra: the saga needs the message store's %s port, and %s does not provide it",
+				port.name, a.cfg.store.Name())
+		}
+	}
+	return nil
+}
+
+// probeSagaPorts checks the saga ports once the schema is ready: a store whose methods answer
+// ErrUnsupported reports the missing port here, naming it, instead of failing in the consumer.
+func (a *App) probeSagaPorts(ctx context.Context) error {
+	if err := a.checkSagaPorts(); err != nil {
+		return err
+	}
+	if _, err := a.cfg.store.Sagas().Markers.Exists(ctx, "saga:startup-probe"); err != nil {
+		if errors.Is(err, ErrUnsupported) {
+			return fmt.Errorf("snodra: the saga needs the message store's saga markers port, and %s does not provide it: %w",
+				a.cfg.store.Name(), err)
+		}
+		return fmt.Errorf("snodra: the saga stage could not probe the message store's saga markers: %w", err)
 	}
 	return nil
 }

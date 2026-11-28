@@ -83,6 +83,22 @@ func (a *App) addSaga(typ *sagaTypeRuntime, err error) error {
 	return nil
 }
 
+// sagaEventTypes is every event type any registered saga handles, sorted.
+func (a *App) sagaEventTypes() []string {
+	seen := map[string]struct{}{}
+	for _, typ := range a.sagaTypes {
+		for eventType := range typ.handlers {
+			seen[eventType] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for eventType := range seen {
+		out = append(out, eventType)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // interested reports whether a saga type reacts to eventType.
 func (r *sagaRuntime) interested(eventType string) bool {
 	return r != nil && len(r.byEvent[eventType]) > 0
@@ -471,7 +487,7 @@ func callSagaHandler(kind, name string, invoke func() error) (err error) {
 // sagaHandling is the context a saga handler sees: the delivered message, its correlation and
 // its valid trace (none for a deadline's handling), and no caller identity.
 func sagaHandling(msg sagaMessage) *handling {
-	scope := &handling{event: true, info: MessageInfo{
+	scope := &handling{saga: true, event: true, info: MessageInfo{
 		ID: msg.id, Type: msg.typeName, CorrelationID: msg.correlationID, Headers: copyStringMap(msg.headers),
 	}}
 	if msg.traceparent != "" && traceparent.Valid(msg.traceparent) {

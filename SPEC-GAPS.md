@@ -766,3 +766,18 @@ settled; where an entry is settled its behaviour is the specification. The code 
   `snodra-messaging@64dde1e:snodra-messaging/src/main/kotlin/com/damoreira/snodra/messaging/events/EventProcessors.kt:51`).
 - **Question:** refuse at startup (this library), ignore the handler, or run a processor that exists only to hold
   reset handlers?
+
+### SG-52: a permanent NO_HANDLER for a service without a hub
+
+- **Specification:** [writing-a-library.md, Retries and failures](https://snodora.damoreira.com/docs/library-authors/writing-a-library/#retries-and-failures)
+  makes "no handler for the type in a service without a hub" permanent, with reason `NO_HANDLER`; the notice table
+  lists the same reason.
+- **This library:** every saga command with no local handler goes through a hub, and `New` refuses a service without
+  one (`options.go:384`), so a hub's `NO_HANDLER` is the transient row ("a redeploy of the target service looks the
+  same") and a Go saga cannot produce the permanent local `NO_HANDLER`. The reason,
+  `FailureNoHandler`/`SagaCommandFailedNoHandler`, is kept for records and notices written by another library.
+  Kotlin classifies a local `NoHandlerException` as permanent `NO_HANDLER`
+  (`snodra-messaging@64dde1e:snodra-messaging/src/main/kotlin/com/damoreira/snodra/messaging/saga/RawCommandSender.kt:74`)
+  and sends through its local invoker when a service has no hub (`RawCommandSender.kt:93`).
+- **Question:** should a future hubless mode classify a local no-handler as permanent `NO_HANDLER`, and should the Go
+  library support the hubless service of the design at all?

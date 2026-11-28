@@ -590,6 +590,11 @@ func (a *App) runSagas(p *processor, d Delivery, id, typeName string) error {
 	if a.sagaRuntime == nil || p.name != DefaultProcessor || !a.sagaRuntime.interested(typeName) {
 		return nil
 	}
+	if a.inReplay(p, d) {
+		// Sagas never run again inside a replay range, like a DisallowReplay handler: the record
+		// is handled by stage 1 (or skipped) and acknowledged, and its sagas are left alone.
+		return nil
+	}
 	correlation := d.Headers[HeaderCorrelationID]
 	if correlation == "" {
 		correlation = id

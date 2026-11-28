@@ -273,6 +273,9 @@ func Publish[E Message](ctx context.Context, app *App, e E, opts ...PublishOptio
 	if app == nil {
 		return errors.New("snodra: Publish on a nil App")
 	}
+	if h := handlingFrom(ctx); h != nil && h.saga {
+		return errors.New("snodra: a saga handler records events with SagaContext.Publish; app-level Publish is refused while it handles")
+	}
 	var cfg publishConfig
 	for _, o := range opts {
 		if o != nil {

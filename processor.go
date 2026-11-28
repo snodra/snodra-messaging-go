@@ -75,6 +75,24 @@ type processor struct {
 	parkedSinceSample atomic.Bool
 }
 
+// addEventTypes adds types that the processor does not run stage 1 for but must report, such as
+// the saga event types of the default processor.
+func (p *processor) addEventTypes(types []string) {
+	for _, typ := range types {
+		found := false
+		for _, existing := range p.eventTypes {
+			if existing == typ {
+				found = true
+				break
+			}
+		}
+		if !found {
+			p.eventTypes = append(p.eventTypes, typ)
+		}
+	}
+	sort.Strings(p.eventTypes)
+}
+
 // newProcessor builds a processor of name reading source for service, with handlers by type. It
 // keeps the handler order and sorts the types.
 func newProcessor(service, name, source string, handlers map[string][]*eventHandler) *processor {

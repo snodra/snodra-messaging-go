@@ -26,8 +26,10 @@ func Associate[E Message](key string, value func(E) string) SagaRoute[E] {
 
 // SagaContext is what a saga handler records: associations, commands, events, deadlines and the
 // end of its instance. Nothing is sent or published while the handler runs; the runtime applies
-// what was recorded in the saga's transaction and the relay sends it afterwards. A nil
-// *SagaContext is never passed to a handler.
+// what was recorded in the saga's transaction and the relay sends it afterwards. Use Send and
+// Publish (and Schedule) here: the package-level Send, Query and Publish are refused inside a saga
+// handler, because they would bypass the saga's transaction and its ordering. A nil *SagaContext
+// is never passed to a handler.
 type SagaContext struct {
 	app           *App
 	sagaType      string
@@ -363,6 +365,9 @@ func (d *SagaDefinition[S]) OnCommandFailed(handler SagaCommandFailedHandler[S])
 // The state S must encode to a JSON object and round-trip through the library's codec. A
 // definition error names the saga and the handler; it is returned here and kept for [App.Start]
 // like every other registration error. A name may be registered once.
+//
+// A handler records what it sends through its [SagaContext]; the package-level [Send], [Query]
+// and [Publish] are refused with an error while a saga handler runs.
 func HandleSaga[S any](app *App, name string, define func(*SagaDefinition[S])) error {
 	if app == nil {
 		return errors.New("snodra: registration on a nil App")

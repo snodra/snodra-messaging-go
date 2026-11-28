@@ -158,8 +158,8 @@ func (s *deadlineScheduler) fire(ctx context.Context, typ *sagaTypeRuntime, clai
 	saga := &SagaContext{app: app, sagaType: typ.name, id: doc.ID, version: doc.Version + 1,
 		correlationID: correlation, now: now, associations: append([]SagaAssociation(nil), doc.Associations...)}
 	// A deadline's work carries the scheduling message's correlation id and no trace context.
-	scope := &handling{info: MessageInfo{ID: claimed.ID, Type: "deadline:" + claimed.Name,
-		CorrelationID: correlation, Headers: map[string]string{HeaderCorrelationID: correlation}}}
+	scope := &handling{saga: true, info: MessageInfo{ID: claimed.ID, Type: "deadline:" + claimed.Name,
+		CorrelationID: correlation, Headers: map[string]string{}}}
 	handlerCtx := withHandling(txctx, scope)
 	if err := callSagaHandler("deadline", claimed.Name, func() error {
 		return handler.invoke(handlerCtx, saga, state, payload)

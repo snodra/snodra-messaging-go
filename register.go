@@ -289,6 +289,10 @@ func (a *App) freezeProcessors() {
 		})...)
 	}
 	for _, name := range names {
-		a.processors = append(a.processors, newProcessor(a.cfg.service, name, a.cfg.events.source, a.eventHandlers[name]))
+		p := newProcessor(a.cfg.service, name, a.cfg.events.source, a.eventHandlers[name])
+		if name == DefaultProcessor {
+			p.addEventTypes(a.sagaEventTypes())
+		}
+		a.processors = append(a.processors, p)
 	}
 }

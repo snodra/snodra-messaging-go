@@ -35,6 +35,9 @@ type handling struct {
 	// event is set when an event handler runs: the handling is the delivered event, whose userId
 	// header is the acting user (an event carries no token).
 	event bool
+	// saga is set inside a saga handler (an event's stage 2, a notice or a deadline): the
+	// app-level Send, Query and Publish are refused there; SagaContext records the effects.
+	saga bool
 }
 
 type handlingKey struct{}

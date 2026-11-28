@@ -229,7 +229,7 @@ func (r *sagaRelay) dispatchEvent(ctx context.Context, entry SagaDispatch) bool 
 	if trace := validTraceparent(entry.Headers); trace != "" {
 		headers[HeaderTraceparent] = trace
 	}
-	out := OutboxEntry{ID: entry.ID, Type: entry.Type, Key: entry.RoutingKey,
+	out := OutboxEntry{ID: uuid.New(), Type: entry.Type, Key: entry.RoutingKey,
 		Headers: headers, Payload: []byte(entry.Payload),
 		CreatedAt: now, Seq: app.nextOutboxSeq()}
 	if err := app.cfg.store.Outbox().Append(txctx, out); err != nil {
@@ -396,6 +396,10 @@ const (
 	sagaSendTransient
 )
 
+// TODO(spec-gap): SG-52 (a permanent local NO_HANDLER needs a service without a hub; the Go
+// library requires a hub, so a hub's NO_HANDLER is the transient row and the permanent reason is
+// only kept for records from other libraries).
+//
 // classifySagaSend is the retry taxonomy of a saga command's failed attempt, as the public
 // writing-a-library.md table names it.
 func classifySagaSend(err error) (sagaSendKind, FailureReason, string) {

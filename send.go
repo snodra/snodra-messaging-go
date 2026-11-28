@@ -113,6 +113,10 @@ func Query[R any](ctx context.Context, app *App, q Message, opts ...SendOption) 
 // telemetry per call through the hubs, retries included, unless the caller's own cancellation
 // ended it or the call panicked.
 func request[R any](ctx context.Context, app *App, kind hubpb.RequestKind, m Message, opts []SendOption) (R, error) {
+	var zero R
+	if h := handlingFrom(ctx); h != nil && h.saga {
+		return zero, errors.New("snodra: a saga handler records messages with SagaContext.Send; app-level Send and Query are refused while it handles")
+	}
 	if h, typ := app.localHandler(kind, m); h != nil {
 		return local[R](ctx, app, h, kind, typ, m, opts)
 	}
@@ -286,6 +290,9 @@ func sendRawCommand(ctx context.Context, app *App, typ string, payload []byte, r
 		}
 		opts = append(opts, Header(name, value))
 	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("%w: %w", ErrNeverSent, err)
+	}
 	if !app.cfg.alwaysRouteThroughHub {
 		app.mu.Lock()
 		h := app.handlers[typ]
@@ -293,6 +300,11 @@ func sendRawCommand(ctx context.Context, app *App, typ string, payload []byte, r
 		if h != nil && h.kind == kindCommand {
 			_, werr := app.serveLocally(ctx, h, hubpb.RequestKind_COMMAND, typ, payload, headers)
 			if werr != nil {
+				if err := ctx.Err(); err != nil {
+					// The caller's bound ended while the handler ran: the handler may or may
+					// not have finished, so the outcome is unknown and a retry is safe.
+					return errors.Join(fmt.Errorf("%w: %w", ErrOutcomeUnknown, err), errorFromWire(typ, werr))
+				}
 				return errorFromWire(typ, werr)
 			}
 			return nil

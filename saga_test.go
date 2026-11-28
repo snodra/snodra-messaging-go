@@ -356,6 +356,11 @@ func TestASagaPublishedEventReachesTheOutbox(t *testing.T) {
 		correlationID: "c-1", headers: map[string]string{HeaderCorrelationID: "c-1"}}, []byte(`{"orderId":"o-1"}`)); err != nil {
 		t.Fatal(err)
 	}
+	live, _ := store.Sagas().Sagas.FindLive(context.Background(), "orders", "orderId", "o-1")
+	dispatchEntry, err := store.Sagas().Dispatch.NextPending(context.Background(), live[0].ID)
+	if err != nil || dispatchEntry == nil {
+		t.Fatalf("the dispatch entry: %+v, %v", dispatchEntry, err)
+	}
 	relay := newSagaRelay(app)
 	if err := relay.poll(context.Background()); err != nil {
 		t.Fatal(err)
@@ -368,7 +373,9 @@ func TestASagaPublishedEventReachesTheOutbox(t *testing.T) {
 		entries[0].Headers[HeaderCorrelationID] != "c-1" {
 		t.Fatalf("the outbox entry: %+v", entries[0])
 	}
-	live, _ := store.Sagas().Sagas.FindLive(context.Background(), "orders", "orderId", "o-1")
+	if entries[0].ID == "" || entries[0].ID == dispatchEntry.ID {
+		t.Fatalf("the outbox event id: %q, the dispatch entry %q", entries[0].ID, dispatchEntry.ID)
+	}
 	if next, err := store.Sagas().Dispatch.NextPending(context.Background(), live[0].ID); err != nil || next != nil {
 		t.Fatalf("the dispatched event entry: %+v, %v", next, err)
 	}
@@ -692,7 +699,7 @@ func TestASagaCommandThroughTheHub(t *testing.T) {
 		if err := HandleSaga[sagaState](app, "orders", func(d *SagaDefinition[sagaState]) {
 			d.StartOn(StartedOn(Associate("orderId", func(e OrderPlaced) string { return e.OrderID }),
 				func(_ context.Context, saga *SagaContext, _ *sagaState, event OrderPlaced) error {
-					return saga.Send(resolveOrder{OrderID: event.OrderID}, "")
+					return saga.Send(resolveOrder{OrderID: event.OrderID}, "order-"+event.OrderID)
 				}))
 		}); err != nil {
 			t.Fatal(err)
@@ -722,6 +729,12 @@ func TestASagaCommandThroughTheHub(t *testing.T) {
 	}
 	if string(req.GetPayload()) != `{"orderId":"o-1"}` {
 		t.Fatalf("the payload: %s", req.GetPayload())
+	}
+	if got := req.GetRoutingKey(); got != "order-o-1" {
+		t.Fatalf("the routing key: %q", got)
+	}
+	if pending, err := store.Sagas().Dispatch.NextPending(context.Background(), doc.ID); err != nil || pending == nil {
+		t.Fatalf("the entry was marked dispatched before the reply: %+v, %v", pending, err)
 	}
 	if got := req.GetHeaders()["idempotency-key"]; got != doc.ID+":0" {
 		t.Fatalf("the idempotency key: %q, want %q", got, doc.ID+":0")
@@ -1112,14 +1125,17 @@ func TestASagaDeadlineWorkKeepsTheSchedulingCorrelationAndNoTrace(t *testing.T) 
 		Reason string `json:"reason"`
 	}
 	var got timeoutPayload
+	var deadlineInfo MessageInfo
+	deadlineInfoOK := true
 	if err := HandleSaga[sagaState](app, "orders", func(d *SagaDefinition[sagaState]) {
 		d.StartOn(StartedOn(Associate("orderId", func(e OrderPlaced) string { return e.OrderID }),
 			func(_ context.Context, saga *SagaContext, _ *sagaState, _ OrderPlaced) error {
-				_, err := saga.Schedule(0, "timeout", timeoutPayload{Reason: "slow"})
+				_, err := saga.ScheduleAt(time.Now(), "timeout", timeoutPayload{Reason: "slow"})
 				return err
 			}))
-		d.OnDeadline(Deadline("timeout", func(_ context.Context, saga *SagaContext, _ *sagaState, payload timeoutPayload) error {
+		d.OnDeadline(Deadline("timeout", func(ctx context.Context, saga *SagaContext, _ *sagaState, payload timeoutPayload) error {
 			got = payload
+			deadlineInfo, deadlineInfoOK = MessageFrom(ctx)
 			return saga.Send(resolveOrder{OrderID: "from-deadline"}, "")
 		}))
 	}); err != nil {
@@ -1135,6 +1151,9 @@ func TestASagaDeadlineWorkKeepsTheSchedulingCorrelationAndNoTrace(t *testing.T) 
 	newDeadlineScheduler(app).poll(context.Background())
 	if got.Reason != "slow" {
 		t.Fatalf("the deadline payload: %+v", got)
+	}
+	if !deadlineInfoOK || deadlineInfo.CorrelationID != "c-schedule" || len(deadlineInfo.Headers) != 0 {
+		t.Fatalf("the deadline context: ok %t, info %+v", deadlineInfoOK, deadlineInfo)
 	}
 	live, _ := store.Sagas().Sagas.FindLive(context.Background(), "orders", "orderId", "o-1")
 	entry, err := store.Sagas().Dispatch.NextPending(context.Background(), live[0].ID)
@@ -1421,5 +1440,704 @@ func TestASagaNameCannotContainAColon(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "cannot contain ':'") {
 		t.Fatalf("the colon in a saga name: %v", err)
+	}
+}
+
+// The design skips the saga stage for records inside a replay range, as Kotlin does.
+func TestASagaSkipsAReplay(t *testing.T) {
+	app, store, _ := sagaTestApp(t)
+	if err := HandleSaga[sagaState](app, "orders", func(d *SagaDefinition[sagaState]) {
+		d.StartOn(StartedOn(Associate("orderId", func(e OrderPlaced) string { return e.OrderID }),
+			func(_ context.Context, _ *SagaContext, state *sagaState, _ OrderPlaced) error {
+				state.Orders++
+				return nil
+			}))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	app.sagaRuntime = newSagaRuntime(app)
+	app.freezeTypes()
+	p := app.processors[0]
+	if p.name != DefaultProcessor {
+		t.Fatalf("the first processor is %q", p.name)
+	}
+	p.run.setReplay([]ReplayRange{{Source: DefaultEventsSource, Segment: "0", From: "0", Until: "1"}})
+	delivery := Delivery{Segment: "0", Position: "0",
+		Headers: map[string]string{HeaderID: "e-1", HeaderType: "orders.OrderPlaced"},
+		Payload: []byte(`{"orderId":"o-1"}`)}
+	if err := app.runSagas(p, delivery, "e-1", "orders.OrderPlaced"); err != nil {
+		t.Fatal(err)
+	}
+	if live, err := store.Sagas().Sagas.FindLive(context.Background(), "orders", "orderId", "o-1"); err != nil || len(live) != 0 {
+		t.Fatalf("the replayed event started a saga: %+v, %v", live, err)
+	}
+	// Outside the range the same stage starts it, so the range was the reason.
+	delivery.Position = "1"
+	delivery.Headers[HeaderID] = "e-2"
+	if err := app.runSagas(p, delivery, "e-2", "orders.OrderPlaced"); err != nil {
+		t.Fatal(err)
+	}
+	if live, err := store.Sagas().Sagas.FindLive(context.Background(), "orders", "orderId", "o-1"); err != nil || len(live) != 1 {
+		t.Fatalf("the event after the replay: %+v, %v", live, err)
+	}
+}
+
+// A local command whose handler honours an ended context is an unknown outcome, not a
+// permanent handler failure: the relay retries it with the same idempotency key.
+func TestALocalSagaCommandAbandonedAtTheBoundIsTransient(t *testing.T) {
+	app, _, _ := sagaTestApp(t)
+	if err := HandleCommand(app, func(ctx context.Context, _ resolveOrder) (Empty, error) {
+		<-ctx.Done()
+		return Empty{}, ctx.Err()
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	err := sendRawCommand(ctx, app, "orders.ResolveOrder", []byte(`{"orderId":"o-1"}`), "", nil, 0)
+	if !errors.Is(err, ErrOutcomeUnknown) {
+		t.Fatalf("the abandoned local command: %v, want ErrOutcomeUnknown", err)
+	}
+	done, cancelNow := context.WithCancel(context.Background())
+	cancelNow()
+	err = sendRawCommand(done, app, "orders.ResolveOrder", []byte(`{"orderId":"o-1"}`), "", nil, 0)
+	if !errors.Is(err, ErrNeverSent) {
+		t.Fatalf("the command with an ended context: %v, want ErrNeverSent", err)
+	}
+}
+
+// ackCheckEvents checks the saga stage's commit before the subscription acknowledges the record.
+type ackCheckEvents struct {
+	EventStore
+	check  func() bool
+	failed atomic.Bool
+	acks   atomic.Int64
+}
+
+func (e *ackCheckEvents) Subscribe(ctx context.Context, spec SubscriptionSpec) (EventSubscription, error) {
+	sub, err := e.EventStore.Subscribe(ctx, spec)
+	if err != nil {
+		return nil, err
+	}
+	return &ackCheckSubscription{EventSubscription: sub, events: e}, nil
+}
+
+type ackCheckSubscription struct {
+	EventSubscription
+	events *ackCheckEvents
+}
+
+func (s *ackCheckSubscription) Ack(segment, position string) error {
+	if s.events.check != nil && !s.events.check() {
+		s.events.failed.Store(true)
+	}
+	s.events.acks.Add(1)
+	return s.EventSubscription.Ack(segment, position)
+}
+
+// The record is acknowledged only after both stages committed.
+func TestAnEventIsAcknowledgedAfterBothStages(t *testing.T) {
+	hub := fakehub.Start(t)
+	store := NewMemoryMessageStore()
+	events := &ackCheckEvents{EventStore: NewMemoryEventStore()}
+	var stage1 atomic.Bool
+	_, _ = l3ServingAt(t, hub, time.Now, func(app *App) {
+		if err := HandleEvent(app, func(context.Context, OrderPlaced) error {
+			stage1.Store(true)
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := HandleSaga[sagaState](app, "orders", func(d *SagaDefinition[sagaState]) {
+			d.StartOn(StartedOn(Associate("orderId", func(e OrderPlaced) string { return e.OrderID }),
+				func(_ context.Context, _ *SagaContext, state *sagaState, _ OrderPlaced) error {
+					state.Orders++
+					return nil
+				}))
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}, WithStore(store), WithEventStore(events))
+	events.check = func() bool {
+		live, err := store.Sagas().Sagas.FindLive(context.Background(), "orders", "orderId", "e-1")
+		return stage1.Load() && err == nil && len(live) == 1
+	}
+	publishTestEvent(t, events, "e-1", "orders.OrderPlaced", nil, nil)
+	waitUntil(t, "the acknowledgement", func() bool { return events.acks.Load() > 0 })
+	if events.failed.Load() {
+		t.Fatal("the record was acknowledged before both stages committed")
+	}
+}
+
+// A duplicate stage-1 marker still runs stage 2: the crash may have happened between the stages.
+func TestADuplicateStageOneMarkerStillRunsStageTwo(t *testing.T) {
+	hub := fakehub.Start(t)
+	store := NewMemoryMessageStore()
+	processed, err := store.Processed().Record(context.Background(), ProcessedMarker{
+		ID: ProcessorMarker(DefaultProcessor, "e-1"), Type: "orders.OrderPlaced",
+		Processor: DefaultProcessor, ProcessedAt: time.Now()})
+	if err != nil || !processed {
+		t.Fatalf("the stage-1 marker: %t, %v", processed, err)
+	}
+	var stage1 atomic.Int64
+	events := NewMemoryEventStore()
+	_, _ = l3ServingAt(t, hub, time.Now, func(app *App) {
+		if err := HandleEvent(app, func(context.Context, OrderPlaced) error {
+			stage1.Add(1)
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := HandleSaga[sagaState](app, "orders", func(d *SagaDefinition[sagaState]) {
+			d.StartOn(StartedOn(Associate("orderId", func(e OrderPlaced) string { return e.OrderID }),
+				func(_ context.Context, _ *SagaContext, state *sagaState, _ OrderPlaced) error {
+					state.Orders++
+					return nil
+				}))
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}, WithStore(store), WithEventStore(events))
+	publishTestEvent(t, events, "e-1", "orders.OrderPlaced", nil, nil)
+	waitUntil(t, "the saga after the duplicate stage-1 marker", func() bool {
+		live, err := store.Sagas().Sagas.FindLive(context.Background(), "orders", "orderId", "e-1")
+		return err == nil && len(live) == 1
+	})
+	if stage1.Load() != 0 {
+		t.Fatalf("stage 1 ran despite its marker: %d", stage1.Load())
+	}
+}
+
+// Two events for one instance in real concurrent transactions both apply once; the optimistic
+// version makes the loser retry.
+func TestTwoConcurrentEventsApplyToTheSameSagaOnceEach(t *testing.T) {
+	app, store, _ := sagaTestApp(t)
+	if err := HandleSaga[sagaState](app, "orders", func(d *SagaDefinition[sagaState]) {
+		d.StartOn(StartedOn(Associate("orderId", func(e OrderPlaced) string { return e.OrderID }),
+			func(context.Context, *SagaContext, *sagaState, OrderPlaced) error { return nil }))
+		d.On(HandledOn(Associate("orderId", func(e confirmed) string { return e.OrderID }),
+			func(_ context.Context, _ *SagaContext, state *sagaState, _ confirmed) error {
+				state.Orders++
+				return nil
+			}))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	app.sagaRuntime = newSagaRuntime(app)
+	if _, err := app.sagaRuntime.process(context.Background(), sagaMessage{id: "e-1", typeName: "orders.OrderPlaced"},
+		[]byte(`{"orderId":"o-1"}`)); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		id := fmt.Sprintf("e-%d", i+2)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := app.sagaRuntime.process(context.Background(),
+				sagaMessage{id: id, typeName: "conformance.Confirmed"}, []byte(`{"orderId":"o-1"}`))
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	live, err := store.Sagas().Sagas.FindLive(context.Background(), "orders", "orderId", "o-1")
+	if err != nil || len(live) != 1 {
+		t.Fatalf("live: %+v, %v", live, err)
+	}
+	state, doc := sagaStateOf(t, store, live[0].ID)
+	if state.Orders != 2 || doc.Version != 2 {
+		t.Fatalf("the concurrent writes: %+v, %+v", doc, state)
+	}
+}
+
+// Ending() stops the later handlers of the same event and ends the instance.
+func TestASagaEndingStopsTheLaterHandlers(t *testing.T) {
+	app, store, _ := sagaTestApp(t)
+	var sagaID string
+	var later atomic.Bool
+	if err := HandleSaga[sagaState](app, "orders", func(d *SagaDefinition[sagaState]) {
+		d.StartOn(StartedOn(Associate("orderId", func(e OrderPlaced) string { return e.OrderID }),
+			func(_ context.Context, saga *SagaContext, state *sagaState, _ OrderPlaced) error {
+				sagaID = saga.SagaID()
+				state.Orders++
+				return nil
+			}).Ending())
+		d.On(HandledOn(Associate("orderId", func(e OrderPlaced) string { return e.OrderID }),
+			func(context.Context, *SagaContext, *sagaState, OrderPlaced) error {
+				later.Store(true)
+				return nil
+			}))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	app.sagaRuntime = newSagaRuntime(app)
+	if _, err := app.sagaRuntime.process(context.Background(), sagaMessage{id: "e-1", typeName: "orders.OrderPlaced"},
+		[]byte(`{"orderId":"o-1"}`)); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := store.Sagas().Sagas.FindByID(context.Background(), sagaID)
+	if err != nil || doc == nil || !doc.Ended {
+		t.Fatalf("the ended saga: %+v, %v", doc, err)
+	}
+	if later.Load() {
+		t.Fatal("a handler after Ending ran")
+	}
+}
+
+// extraConfirmed reaches a saga by an association that is not the one it started with.
+type extraConfirmed struct {
+	Extra string `json:"extra"`
+}
+
+func (extraConfirmed) MessageType() string { return "conformance.ExtraConfirmed" }
+
+// Associations, ScheduleAt, CancelDeadlines, End, and the cancel-on-end rule.
+func TestASagaContextAssociationsDeadlinesAndEnd(t *testing.T) {
+	app, store, _ := sagaTestApp(t)
+	var sagaID, cleanupA, cleanupB, laterID string
+	var laterFired atomic.Bool
+	if err := HandleSaga[sagaState](app, "orders", func(d *SagaDefinition[sagaState]) {
+		d.StartOn(StartedOn(Associate("orderId", func(e OrderPlaced) string { return e.OrderID }),
+			func(_ context.Context, saga *SagaContext, _ *sagaState, event OrderPlaced) error {
+				sagaID = saga.SagaID()
+				saga.Associate("extra", "x")
+				saga.Associate("temp", "y")
+				saga.RemoveAssociation("temp", "y")
+				saga.RemoveAssociation("orderId", event.OrderID)
+				cleanupA, _ = saga.Schedule(0, "cleanup", nil)
+				cleanupB, _ = saga.Schedule(0, "cleanup", nil)
+				laterID, _ = saga.ScheduleAt(time.Now().Add(time.Hour), "later", resolveOrder{OrderID: "later"})
+				saga.CancelDeadlines("cleanup")
+				return nil
+			}))
+		d.On(HandledOn(Associate("extra", func(e extraConfirmed) string { return e.Extra }),
+			func(_ context.Context, saga *SagaContext, _ *sagaState, _ extraConfirmed) error {
+				saga.End()
+				return nil
+			}))
+		d.OnDeadline(Deadline("later", func(context.Context, *SagaContext, *sagaState, resolveOrder) error {
+			laterFired.Store(true)
+			return nil
+		}))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	app.sagaRuntime = newSagaRuntime(app)
+	if _, err := app.sagaRuntime.process(context.Background(), sagaMessage{id: "e-1", typeName: "orders.OrderPlaced"},
+		[]byte(`{"orderId":"o-1"}`)); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := store.Sagas().Sagas.FindByID(context.Background(), sagaID)
+	if err != nil || doc == nil {
+		t.Fatalf("the saga: %+v, %v", doc, err)
+	}
+	if doc.StartKey != nil {
+		t.Fatalf("the removed start association kept a start key: %v", *doc.StartKey)
+	}
+	if len(doc.Associations) != 1 || doc.Associations[0] != (SagaAssociation{Key: "extra", Value: "x"}) {
+		t.Fatalf("the associations: %+v", doc.Associations)
+	}
+	for _, id := range []string{cleanupA, cleanupB} {
+		if deadline, err := store.Sagas().Deadlines.FindScheduled(context.Background(), id); err != nil || deadline != nil {
+			t.Fatalf("the cancelled cleanup %s: %+v, %v", id, deadline, err)
+		}
+	}
+	if deadline, err := store.Sagas().Deadlines.FindScheduled(context.Background(), laterID); err != nil || deadline == nil {
+		t.Fatalf("the later deadline before the end: %+v, %v", deadline, err)
+	}
+	if _, err := app.sagaRuntime.process(context.Background(), sagaMessage{id: "e-2", typeName: "conformance.ExtraConfirmed"},
+		[]byte(`{"extra":"x"}`)); err != nil {
+		t.Fatal(err)
+	}
+	doc, err = store.Sagas().Sagas.FindByID(context.Background(), sagaID)
+	if err != nil || doc == nil || !doc.Ended {
+		t.Fatalf("the saga after End: %+v, %v", doc, err)
+	}
+	if deadline, err := store.Sagas().Deadlines.FindScheduled(context.Background(), laterID); err != nil || deadline != nil {
+		t.Fatalf("the deadline after the end: %+v, %v", deadline, err)
+	}
+	newDeadlineScheduler(app).poll(context.Background())
+	if laterFired.Load() {
+		t.Fatal("a deadline after the saga ended fired")
+	}
+}
+
+// A command that fails transiently ten times becomes EXHAUSTED after exactly ten sends.
+func TestASagaCommandExhaustsItsTenAttempts(t *testing.T) {
+	app, _, _ := sagaTestApp(t)
+	settings := app.cfg.events
+	settings.sagaDispatchWait = time.Millisecond
+	settings.sagaDispatchMax = time.Millisecond
+	app.cfg.events = settings
+	var calls atomic.Int64
+	if err := HandleCommand(app, func(context.Context, resolveOrder) (Empty, error) {
+		calls.Add(1)
+		return Empty{}, WithDetails(errors.New("still busy"), map[string]string{"snodra": "retryable"})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var failed SagaCommandFailed
+	if err := HandleSaga[sagaState](app, "orders", func(d *SagaDefinition[sagaState]) {
+		d.StartOn(StartedOn(Associate("orderId", func(e OrderPlaced) string { return e.OrderID }),
+			func(_ context.Context, saga *SagaContext, _ *sagaState, event OrderPlaced) error {
+				return saga.Send(resolveOrder{OrderID: event.OrderID}, "")
+			}))
+		d.OnCommandFailed(CommandFailed(func(_ context.Context, _ *SagaContext, _ *sagaState, event SagaCommandFailed) error {
+			failed = event
+			return nil
+		}))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	app.sagaRuntime = newSagaRuntime(app)
+	if _, err := app.sagaRuntime.process(context.Background(), sagaMessage{id: "e-1", typeName: "orders.OrderPlaced"},
+		[]byte(`{"orderId":"o-1"}`)); err != nil {
+		t.Fatal(err)
+	}
+	relay := newSagaRelay(app)
+	waitUntil(t, "the ten attempts", func() bool {
+		if err := relay.poll(context.Background()); err != nil {
+			t.Fatalf("the relay: %v", err)
+		}
+		time.Sleep(3 * time.Millisecond)
+		return calls.Load() >= 10
+	})
+	if calls.Load() != 10 {
+		t.Fatalf("the command ran %d times", calls.Load())
+	}
+	if failed.Reason != SagaCommandFailedExhausted {
+		t.Fatalf("the exhausted notice: %+v", failed)
+	}
+}
+
+// The relay's backoff starts at 1 s, doubles to the 5 min cap, and applies the ±20 % jitter.
+func TestSagaDispatchBackoffIsJitteredAndCapped(t *testing.T) {
+	settings := eventSettings{sagaDispatchWait: time.Second, sagaDispatchMax: 5 * time.Minute}
+	for attempts := 1; attempts <= 10; attempts++ {
+		nominal := settings.sagaDispatchWait
+		for i := 1; i < attempts; i++ {
+			nominal *= 2
+		}
+		if nominal > settings.sagaDispatchMax {
+			nominal = settings.sagaDispatchMax
+		}
+		low := time.Duration(float64(nominal) * 0.8)
+		high := time.Duration(float64(nominal) * 1.2)
+		if high > settings.sagaDispatchMax {
+			high = settings.sagaDispatchMax
+		}
+		for i := 0; i < 20; i++ {
+			got := sagaDispatchWait(settings, attempts)
+			if got < low || got > high {
+				t.Fatalf("attempt %d: wait %v outside [%v, %v]", attempts, got, low, high)
+			}
+		}
+	}
+}
+
+// The deadline scheduler does not fire before the due time, and a handler that calls End cancels
+// the instance's scheduled deadlines.
+func TestASagaDeadlineDoesNotFireEarlyAndIsCancelledAtTheEnd(t *testing.T) {
+	app, store, _ := sagaTestApp(t)
+	var earlyID, sagaID string
+	var earlyFired atomic.Bool
+	if err := HandleSaga[sagaState](app, "orders", func(d *SagaDefinition[sagaState]) {
+		d.StartOn(StartedOn(Associate("orderId", func(e OrderPlaced) string { return e.OrderID }),
+			func(_ context.Context, saga *SagaContext, _ *sagaState, _ OrderPlaced) error {
+				sagaID = saga.SagaID()
+				earlyID, _ = saga.Schedule(time.Hour, "early", nil)
+				return nil
+			}))
+		d.On(HandledOn(Associate("orderId", func(e confirmed) string { return e.OrderID }),
+			func(_ context.Context, saga *SagaContext, _ *sagaState, _ confirmed) error {
+				saga.End()
+				return nil
+			}))
+		d.OnDeadline(Deadline("early", func(context.Context, *SagaContext, *sagaState, any) error {
+			earlyFired.Store(true)
+			return nil
+		}))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	app.sagaRuntime = newSagaRuntime(app)
+	if _, err := app.sagaRuntime.process(context.Background(), sagaMessage{id: "e-1", typeName: "orders.OrderPlaced"},
+		[]byte(`{"orderId":"o-1"}`)); err != nil {
+		t.Fatal(err)
+	}
+	newDeadlineScheduler(app).poll(context.Background())
+	if earlyFired.Load() {
+		t.Fatal("a deadline fired before it was due")
+	}
+	if deadline, err := store.Sagas().Deadlines.FindScheduled(context.Background(), earlyID); err != nil || deadline == nil {
+		t.Fatalf("the early deadline: %+v, %v", deadline, err)
+	}
+	if _, err := app.sagaRuntime.process(context.Background(), sagaMessage{id: "e-2", typeName: "conformance.Confirmed"},
+		[]byte(`{"orderId":"o-1"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if deadline, err := store.Sagas().Deadlines.FindScheduled(context.Background(), earlyID); err != nil || deadline != nil {
+		t.Fatalf("the deadline after End: %+v, %v", deadline, err)
+	}
+	newDeadlineScheduler(app).poll(context.Background())
+	if earlyFired.Load() {
+		t.Fatal("a deadline fired after the saga ended")
+	}
+	_ = sagaID
+}
+
+// A due deadline whose saga is already ended is cancelled, not fired.
+func TestASagaDeadlineForAnEndedSagaIsCancelled(t *testing.T) {
+	app, store, _ := sagaTestApp(t)
+	var goneID, sagaID string
+	var fired atomic.Bool
+	if err := HandleSaga[sagaState](app, "orders", func(d *SagaDefinition[sagaState]) {
+		d.StartOn(StartedOn(Associate("orderId", func(e OrderPlaced) string { return e.OrderID }),
+			func(_ context.Context, saga *SagaContext, _ *sagaState, _ OrderPlaced) error {
+				sagaID = saga.SagaID()
+				goneID, _ = saga.Schedule(0, "gone", nil)
+				return nil
+			}))
+		d.OnDeadline(Deadline("gone", func(context.Context, *SagaContext, *sagaState, any) error {
+			fired.Store(true)
+			return nil
+		}))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	app.sagaRuntime = newSagaRuntime(app)
+	if _, err := app.sagaRuntime.process(context.Background(), sagaMessage{id: "e-1", typeName: "orders.OrderPlaced"},
+		[]byte(`{"orderId":"o-1"}`)); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := store.Sagas().Sagas.FindByID(context.Background(), sagaID)
+	if err != nil || doc == nil {
+		t.Fatalf("the saga: %+v, %v", doc, err)
+	}
+	next := *doc
+	next.Ended = true
+	next.EndedAt = time.Now()
+	next.UpdatedAt = time.Now()
+	next.Version = doc.Version + 1
+	if ok, err := store.Sagas().Sagas.Update(context.Background(), next, doc.Version); err != nil || !ok {
+		t.Fatalf("ending the saga directly: %t, %v", ok, err)
+	}
+	newDeadlineScheduler(app).poll(context.Background())
+	if fired.Load() {
+		t.Fatal("a deadline for an ended saga fired")
+	}
+	if deadline, err := store.Sagas().Deadlines.FindScheduled(context.Background(), goneID); err != nil || deadline != nil {
+		t.Fatalf("the ended saga's deadline: %+v, %v", deadline, err)
+	}
+}
+
+// A due deadline with no handler is cancelled and logged, not fired.
+func TestASagaDeadlineWithoutAHandlerIsCancelled(t *testing.T) {
+	app, store, _ := sagaTestApp(t)
+	var ghostID, sagaID string
+	if err := HandleSaga[sagaState](app, "orders", func(d *SagaDefinition[sagaState]) {
+		d.StartOn(StartedOn(Associate("orderId", func(e OrderPlaced) string { return e.OrderID }),
+			func(_ context.Context, saga *SagaContext, _ *sagaState, _ OrderPlaced) error {
+				sagaID = saga.SagaID()
+				ghostID, _ = saga.Schedule(0, "ghost", nil)
+				return nil
+			}))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	app.sagaRuntime = newSagaRuntime(app)
+	if _, err := app.sagaRuntime.process(context.Background(), sagaMessage{id: "e-1", typeName: "orders.OrderPlaced"},
+		[]byte(`{"orderId":"o-1"}`)); err != nil {
+		t.Fatal(err)
+	}
+	newDeadlineScheduler(app).poll(context.Background())
+	if deadline, err := store.Sagas().Deadlines.FindScheduled(context.Background(), ghostID); err != nil || deadline != nil {
+		t.Fatalf("the handlerless deadline: %+v, %v", deadline, err)
+	}
+	if state, _ := sagaStateOf(t, store, sagaID); state.Orders != 0 {
+		t.Fatalf("the handlerless deadline changed the state: %+v", state)
+	}
+}
+
+// The app starts and stops the saga relay and the deadline scheduler with the service.
+type countingSagaStore struct {
+	*MemoryMessageStore
+	sagas SagaStores
+}
+
+func (s *countingSagaStore) Sagas() SagaStores { return s.sagas }
+
+type countingDispatch struct {
+	SagaDispatchStore
+	due atomic.Int64
+}
+
+func (d *countingDispatch) DueSagas(ctx context.Context, now time.Time, except []string, limit int) ([]string, error) {
+	d.due.Add(1)
+	return d.SagaDispatchStore.DueSagas(ctx, now, except, limit)
+}
+
+type countingDeadlines struct {
+	SagaDeadlineStore
+	claims atomic.Int64
+}
+
+func (d *countingDeadlines) ClaimDue(ctx context.Context, owner string, now, until time.Time) (*SagaDeadline, error) {
+	d.claims.Add(1)
+	return d.SagaDeadlineStore.ClaimDue(ctx, owner, now, until)
+}
+
+func TestSagaRelayAndSchedulerStartAndStopWithTheApp(t *testing.T) {
+	hub := fakehub.Start(t)
+	base := NewMemoryMessageStore()
+	store := &countingSagaStore{MemoryMessageStore: base}
+	store.sagas = base.Sagas()
+	dispatch := &countingDispatch{SagaDispatchStore: store.sagas.Dispatch}
+	deadlines := &countingDeadlines{SagaDeadlineStore: store.sagas.Deadlines}
+	store.sagas.Dispatch = dispatch
+	store.sagas.Deadlines = deadlines
+	settings := consumerSettings()
+	settings.sagaPoll = 5 * time.Millisecond
+	settings.deadlinePoll = 5 * time.Millisecond
+	app, _ := serving(t, hub, func(app *App) {
+		if err := HandleSaga[sagaState](app, "orders", func(d *SagaDefinition[sagaState]) {
+			d.StartOn(StartedOn(Associate("orderId", func(e OrderPlaced) string { return e.OrderID }),
+				func(context.Context, *SagaContext, *sagaState, OrderPlaced) error { return nil }))
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}, WithStore(store), WithEventStore(NewMemoryEventStore()), withEventSettings(settings))
+	waitUntil(t, "the relay and the scheduler", func() bool {
+		return dispatch.due.Load() > 0 && deadlines.claims.Load() > 0
+	})
+	if err := app.Shutdown(ctxWithin(t, 5*time.Second)); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+	due, claims := dispatch.due.Load(), deadlines.claims.Load()
+	time.Sleep(30 * time.Millisecond)
+	if dispatch.due.Load() != due || deadlines.claims.Load() != claims {
+		t.Fatalf("the workers kept running after Shutdown: due %d->%d, claims %d->%d",
+			due, dispatch.due.Load(), claims, deadlines.claims.Load())
+	}
+}
+
+// The default processor's status lists the saga event types, so a saga-only service reports them.
+func TestASagaOnlyStatusListsTheSagaEventTypes(t *testing.T) {
+	app, _, _ := sagaTestApp(t)
+	if err := HandleSaga[sagaState](app, "orders", func(d *SagaDefinition[sagaState]) {
+		d.StartOn(StartedOn(Associate("orderId", func(e OrderPlaced) string { return e.OrderID }),
+			func(context.Context, *SagaContext, *sagaState, OrderPlaced) error { return nil }))
+		d.OnCommandFailed(CommandFailed(func(context.Context, *SagaContext, *sagaState, SagaCommandFailed) error {
+			return nil
+		}))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	app.freezeTypes()
+	p := app.processors[0]
+	status := app.processorStatus(p, time.Now())
+	types := status.GetEventTypes()
+	for _, want := range []string{"orders.OrderPlaced", commandFailedTypeName} {
+		found := false
+		for _, typ := range types {
+			if typ == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("the default processor's event types %v miss %q", types, want)
+		}
+	}
+}
+
+// A store without the saga ports fails Start naming the port, not the first event.
+type noSagaPortsStore struct{ *MemoryMessageStore }
+
+func (s *noSagaPortsStore) Sagas() SagaStores { return SagaStores{} }
+
+type unsupportedSagaMarkers struct{}
+
+func (unsupportedSagaMarkers) Exists(context.Context, string) (bool, error) {
+	return false, ErrUnsupported
+}
+func (unsupportedSagaMarkers) Insert(context.Context, string, string, time.Time) error {
+	return ErrUnsupported
+}
+
+type unsupportedSagaStore struct {
+	*MemoryMessageStore
+	sagas SagaStores
+}
+
+func (s *unsupportedSagaStore) Sagas() SagaStores { return s.sagas }
+
+func TestASagaStartupProbesTheStorePorts(t *testing.T) {
+	newSagaApp := func(store MessageStore) *App {
+		app := newApp(t, Hubs("127.0.0.1:1"), WithStore(store),
+			WithEventStore(NewMemoryEventStore()), OutboxEnabled(false))
+		if err := HandleSaga[sagaState](app, "orders", func(d *SagaDefinition[sagaState]) {
+			d.StartOn(StartedOn(Associate("orderId", func(e OrderPlaced) string { return e.OrderID }),
+				func(context.Context, *SagaContext, *sagaState, OrderPlaced) error { return nil }))
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return app
+	}
+	err := newSagaApp(&noSagaPortsStore{MemoryMessageStore: NewMemoryMessageStore()}).Start(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "saga repository") {
+		t.Fatalf("the store without saga ports: %v", err)
+	}
+	base := NewMemoryMessageStore()
+	unmarked := &unsupportedSagaStore{MemoryMessageStore: base}
+	unmarked.sagas = base.Sagas()
+	unmarked.sagas.Markers = unsupportedSagaMarkers{}
+	err = newSagaApp(unmarked).Start(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "saga markers") || !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("the store without saga markers: %v", err)
+	}
+}
+
+// The app-level Send and Publish are refused inside a saga handler; SagaContext is the path.
+func TestASagaHandlerCannotUseTheAppLevelSendOrPublish(t *testing.T) {
+	app, _, _ := sagaTestApp(t)
+	if err := HandleCommand(app, func(context.Context, resolveOrder) (Empty, error) { return Empty{}, nil }); err != nil {
+		t.Fatal(err)
+	}
+	var sendErr, publishErr error
+	if err := HandleSaga[sagaState](app, "orders", func(d *SagaDefinition[sagaState]) {
+		d.StartOn(StartedOn(Associate("orderId", func(e OrderPlaced) string { return e.OrderID }),
+			func(ctx context.Context, _ *SagaContext, _ *sagaState, _ OrderPlaced) error {
+				_, sendErr = Send[Empty](ctx, app, resolveOrder{OrderID: "x"})
+				publishErr = Publish(ctx, app, OrderShipped{OrderID: "x"})
+				return nil
+			}))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	app.sagaRuntime = newSagaRuntime(app)
+	if _, err := app.sagaRuntime.process(context.Background(), sagaMessage{id: "e-1", typeName: "orders.OrderPlaced"},
+		[]byte(`{"orderId":"o-1"}`)); err != nil {
+		t.Fatal(err)
+	}
+	for name, err := range map[string]error{"Send": sendErr, "Publish": publishErr} {
+		if err == nil || !strings.Contains(err.Error(), "SagaContext") {
+			t.Fatalf("%s inside a saga handler: %v", name, err)
+		}
+	}
+}
+
+// SG-52: without a hubless service, a hub's NO_HANDLER is the transient row; the permanent
+// local NO_HANDLER reason is kept for records and notices from other libraries.
+func TestAHubNoHandlerIsTransientWithoutAHublessService(t *testing.T) {
+	kind, reason, _ := classifySagaSend(&Error{Code: CodeNoHandler, Message: "no handler"})
+	if kind != sagaSendTransient || reason != FailureExhausted {
+		t.Fatalf("the hub NO_HANDLER: %v/%v, want transient/EXHAUSTED", kind, reason)
 	}
 }
