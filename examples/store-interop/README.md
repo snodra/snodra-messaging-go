@@ -51,7 +51,6 @@ none).
 The probe observes the library's processed-event markers by wrapping the message store's processed
 port; the consumer, its transaction and the relay are the library's. The harness starts and stops the
 service and creates its topics, streams and databases; it runs with `GO_SRC` or `GO_REF` from
-`interop/run.sh`. The released tags carry the level-3 probe; the saga scenarios need `GO_SRC` (and
-`PYTHON_SRC` for the other language) until a release carries the saga commands.
+`interop/run.sh`. The released tags carry the level-4 probe, the saga commands included.
 
 Tests: `go test -race ./...` here (the probe's settings, its ledger and its outbox append; no Docker).

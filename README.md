@@ -6,7 +6,7 @@
 
 <p align="center">
   Commands, queries, streams, scatter-gathers and subscriptions — events through an outbox, processors with
-  control — for Go services, routed by Snodra Server.
+  control, sagas and idempotent external calls — for Go services, routed by Snodra Server.
 </p>
 
 <p align="center">
@@ -63,10 +63,10 @@ retries and timeouts.
   certificate (rolled over to a renewed pair); the caller's token verified against the issuer's keys, and guards on
   handlers.
 - **Telemetry** behind an interface, with an OpenTelemetry implementation in the separate `observability` module.
-- **Feature level 3**, proved by the 33 level-1 checks of the conformance runner and by the level-2 and level-3
-  event-store and message-store kits. The saga store ports, the level-4 store checks, the saga runtime (stage 2,
-  the dispatch relay, failure notices and deadlines) and the idempotent external-call adapter with its two markers are
-  implemented on `main`; level 4 is not claimed or released yet.
+- **Feature level 4**, proved by the 33 level-1 checks of the conformance runner, by the level-2 to level-4
+  event-store and message-store kits, and by the cross-language interop run. The saga store ports, the level-4 store
+  checks, the saga runtime (stage 2, the dispatch relay, failure notices and deadlines) and the idempotent
+  external-call adapter with its two markers are part of the release.
 
 ## Install
 
@@ -90,8 +90,8 @@ modules of a release share its version. Each add-on depends on the core and on i
 |---|---|---|
 | Kafka event store | `github.com/snodra/snodra-messaging-go/kafka` | Events, in ordered partitions |
 | RabbitMQ Streams event store | `github.com/snodra/snodra-messaging-go/rabbitmq` | Events, in partitioned streams |
-| MongoDB message store | `github.com/snodra/snodra-messaging-go/mongo` | Outbox, markers, dead letters and processor control, in the shared collections |
-| SQL message store | `github.com/snodra/snodra-messaging-go/sql` | Outbox, markers, dead letters and processor control, in the shared V1 tables |
+| MongoDB message store | `github.com/snodra/snodra-messaging-go/mongo` | Outbox, markers, dead letters, processor control, external calls and saga records, in the shared collections |
+| SQL message store | `github.com/snodra/snodra-messaging-go/sql` | Outbox, markers, dead letters, processor control, external calls and saga records, in the shared V1 tables |
 
 A service needs one event store and one message store, each passed to `snodra.New` with `WithEventStore` and
 `WithStore`. The event stores follow the shared wire layouts and declare their capabilities; the message stores follow
